@@ -6,7 +6,17 @@
 - `#support`: 후원 안내
 - `#now`: 제작 근황
 
-콘텐츠는 `app/page.tsx`, 색상과 레이아웃은 `app/globals.css`에서 수정합니다. 모든 작성 색상은 OKLCH를 사용합니다.
+## 구조
+
+- `app/content.ts`: 작품과 제작 근황 데이터
+- `app/page.tsx`: 페이지의 시맨틱 마크업
+- `app/globals.css`: 스타일 모듈 진입점
+- `app/styles/`: 기반·히어로·섹션·모션·반응형 스타일
+- `worker/`: Cloudflare Worker 진입점
+- `tooling/`: 빌드 시 필요한 Sites 메타데이터 처리
+- `tests/`: 렌더링과 스크롤 모션 회귀 테스트
+
+콘텐츠는 `app/content.ts`, 화면 구조는 `app/page.tsx`에서 수정합니다. 모든 작성 색상은 OKLCH를 사용합니다.
 
 ```bash
 npm run dev

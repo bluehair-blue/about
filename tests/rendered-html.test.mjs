@@ -41,8 +41,20 @@ test("renders the portfolio reference page", async () => {
 });
 
 test("keeps scroll motion progressive and optional", async () => {
-  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  const entry = await readFile(
+    new URL("../app/globals.css", import.meta.url),
+    "utf8",
+  );
+  const css = (
+    await Promise.all(
+      ["motion.css", "responsive.css"].map((file) =>
+        readFile(new URL("../app/styles/" + file, import.meta.url), "utf8"),
+      ),
+    )
+  ).join("\n");
 
+  assert.match(entry, /styles\/foundation\.css/);
+  assert.match(entry, /styles\/motion\.css/);
   assert.match(css, /@supports \(animation-timeline: view\(\)\)/);
   assert.match(css, /@keyframes hero-wipe/);
   assert.match(css, /\.hero-scene \{[\s\S]*height: 190svh/);
