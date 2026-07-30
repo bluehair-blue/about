@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function render() {
@@ -36,4 +37,14 @@ test("renders the portfolio reference page", async () => {
   assert.match(html, /id="now"/);
   assert.match(html, /https:\/\/intro\.bluehair\.blue/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
+});
+
+test("keeps scroll motion progressive and optional", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  assert.match(css, /@supports \(animation-timeline: view\(\)\)/);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*animation: none !important/,
+  );
 });
