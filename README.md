@@ -15,4 +15,4 @@ npm test
 npm run deploy
 ```
 
-현재 Worker 미리보기는 `https://hanparan-portfolio.odeye3217.workers.dev`에서 확인할 수 있습니다. `bluhair.blue` 연결은 해당 Zone이 배포 계정에 공유된 뒤 Worker Custom Domain으로 설정합니다.
+배포 주소는 `https://about.bluehair.blue`이며, Worker 미리보기는 `https://about.odeye3217.workers.dev`에서 확인할 수 있습니다.
