@@ -32,6 +32,7 @@ test("renders the portfolio reference page", async () => {
   assert.match(html, /<html lang="ko">/);
   assert.match(html, /한파란 — 서브컬쳐 AI 챗봇 기획자/);
   assert.match(html, /대화로/);
+  assert.match(html, /class="hero-scene"/);
   assert.match(html, /id="work"/);
   assert.match(html, /id="support"/);
   assert.match(html, /id="now"/);
@@ -43,6 +44,9 @@ test("keeps scroll motion progressive and optional", async () => {
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 
   assert.match(css, /@supports \(animation-timeline: view\(\)\)/);
+  assert.match(css, /@keyframes hero-wipe/);
+  assert.match(css, /\.hero-scene \{[\s\S]*height: 190svh/);
+  assert.match(css, /\.featured-work \{[\s\S]*position: sticky/);
   assert.match(
     css,
     /@media \(prefers-reduced-motion: reduce\)[\s\S]*animation: none !important/,

@@ -49,44 +49,46 @@ export default function Home() {
       </header>
 
       <main id="main">
-        <section className="hero" id="top" aria-labelledby="hero-title">
-          <div className="hero-copy">
-            <p className="eyebrow">SUBCULTURE × AI CHATBOT</p>
-            <h1 id="hero-title">
-              <span>대화로</span>
-              <span>세계의 결을</span>
-              <span>설계합니다.</span>
-            </h1>
-            <div className="hero-intro">
-              <p>
-                캐릭터의 말투부터 세계의 규칙까지.
-                <br />
-                서브컬쳐 AI 챗봇 기획자, 한파란입니다.
-              </p>
-              <a className="text-link" href="#work">
-                첫 작품 보기 <span aria-hidden="true">↓</span>
-              </a>
+        <section className="hero-scene" id="top" aria-labelledby="hero-title">
+          <div className="hero">
+            <div className="hero-copy">
+              <p className="eyebrow">SUBCULTURE × AI CHATBOT</p>
+              <h1 id="hero-title">
+                <span>대화로</span>
+                <span>세계의 결을</span>
+                <span>설계합니다.</span>
+              </h1>
+              <div className="hero-intro">
+                <p>
+                  캐릭터의 말투부터 세계의 규칙까지.
+                  <br />
+                  서브컬쳐 AI 챗봇 기획자, 한파란입니다.
+                </p>
+                <a className="text-link" href="#work">
+                  첫 작품 보기 <span aria-hidden="true">↓</span>
+                </a>
+              </div>
             </div>
-          </div>
 
-          <aside className="hero-poster" aria-label="한파란 브랜드 포스터">
-            <div className="poster-top">
-              <span>PORTFOLIO</span>
-              <span>V.01</span>
-            </div>
-            <p className="poster-name" aria-hidden="true">
-              HAN
-              <br />
-              PARAN
-            </p>
-            <span className="poster-glyph" aria-hidden="true">
-              파
-            </span>
-            <div className="poster-bottom">
-              <span>BLUE / NARRATIVE / SYSTEM</span>
-              <span className="poster-dot" aria-hidden="true" />
-            </div>
-          </aside>
+            <aside className="hero-poster" aria-label="한파란 브랜드 포스터">
+              <div className="poster-top">
+                <span>PORTFOLIO</span>
+                <span>V.01</span>
+              </div>
+              <p className="poster-name" aria-hidden="true">
+                HAN
+                <br />
+                PARAN
+              </p>
+              <span className="poster-glyph" aria-hidden="true">
+                파
+              </span>
+              <div className="poster-bottom">
+                <span>BLUE / NARRATIVE / SYSTEM</span>
+                <span className="poster-dot" aria-hidden="true" />
+              </div>
+            </aside>
+          </div>
         </section>
 
         <section className="section work-section" id="work" aria-labelledby="work-title">
