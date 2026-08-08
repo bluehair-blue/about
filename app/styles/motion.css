@@ -9,9 +9,47 @@
   }
 }
 
+@keyframes smoke-ribbon-drift {
+  0%,
+  100% {
+    transform: perspective(60rem) translate3d(-0.75rem, -1%, 0)
+      rotateZ(-0.7deg) rotateY(-3deg) scaleX(0.99);
+  }
+  36% {
+    transform: perspective(60rem) translate3d(1.1rem, 1.4%, 0.25rem)
+      rotateZ(0.55deg) rotateY(4deg) scaleX(1.025);
+  }
+  72% {
+    transform: perspective(60rem) translate3d(-0.15rem, 2.2%, -0.15rem)
+      rotateZ(-0.2deg) rotateY(-1deg) scaleX(0.98);
+  }
+}
+
+@keyframes smoke-ribbon-wisp {
+  0%,
+  100% {
+    opacity: 0.14;
+    transform: perspective(52rem) translate3d(0.9rem, -1.6%, 0.4rem)
+      rotateZ(0.45deg) rotateY(5deg) scaleX(1.02);
+  }
+  50% {
+    opacity: 0.3;
+    transform: perspective(52rem) translate3d(-1rem, 2.4%, -0.2rem)
+      rotateZ(-0.65deg) rotateY(-6deg) scaleX(0.965);
+  }
+}
+
 @keyframes page-progress {
   to {
     transform: scaleX(1);
+  }
+}
+
+@keyframes mobile-page-progress {
+  to {
+    background-size:
+      100% 100%,
+      100% 100%;
   }
 }
 
@@ -42,28 +80,16 @@
   }
 }
 
-@keyframes hero-poster-scene {
+@keyframes hero-updates-scene {
   0%,
   14% {
     transform: none;
   }
   65% {
-    transform: translateX(-5vw) scale(1.12);
+    transform: translateX(-3vw) scale(1.035);
   }
   100% {
-    transform: translateX(-11vw) scale(1.28);
-  }
-}
-
-@keyframes poster-name-scene {
-  to {
-    transform: translateY(-2.5rem) scale(1.14);
-  }
-}
-
-@keyframes glyph-scene {
-  to {
-    transform: translate(-7%, -14%) rotate(-9deg) scale(1.16);
+    transform: translateX(-7vw) scale(1.08);
   }
 }
 
@@ -255,21 +281,47 @@
   }
 }
 
-@keyframes mobile-poster-scene {
+@keyframes mobile-updates-scene {
   0% {
     opacity: 0.2;
-    clip-path: inset(18% 0);
-    transform: scale(0.88) rotate(1.5deg);
+    clip-path: inset(0 0 0 18%);
+    filter: blur(1rem);
+    transform: translateX(6%);
   }
   48%,
   100% {
     opacity: 1;
     clip-path: inset(0);
+    filter: blur(0);
     transform: none;
   }
 }
 
+@keyframes update-stage-progress {
+  to {
+    transform: scaleX(1);
+  }
+}
+
 @media (prefers-reduced-motion: no-preference) {
+  .ambient-mist::before {
+    animation: smoke-ribbon-drift 22s ease-in-out infinite;
+  }
+
+  .ambient-mist::after {
+    animation: smoke-ribbon-wisp 15s ease-in-out infinite;
+  }
+
+  .update-stage-pagination button[data-active="true"]::after {
+    animation: update-stage-progress var(--slide-duration) linear both;
+  }
+
+  .hero-updates[data-paused="true"]
+    .update-stage-pagination
+    button[data-active="true"]::after {
+    animation-play-state: paused;
+  }
+
   @supports (animation-timeline: scroll()) {
     .site-header::after {
       animation: page-progress linear both;
@@ -325,23 +377,10 @@
         animation-range: cover 24% cover 100%;
       }
 
-      .hero-poster {
-        animation: hero-poster-scene linear both;
+      .hero-updates {
+        animation: hero-updates-scene linear both;
         animation-timeline: --hero;
         animation-range: cover 24% cover 100%;
-      }
-
-      .poster-name,
-      .poster-glyph {
-        animation: poster-name-scene linear both;
-        animation-timeline: --hero;
-        animation-range: cover 24% cover 94%;
-        transform-origin: left top;
-      }
-
-      .poster-glyph {
-        animation-name: glyph-scene;
-        transform-origin: center;
       }
 
       .work-section {
@@ -422,16 +461,10 @@
     }
 
     @media (max-width: 52rem) {
-      .hero-poster {
-        animation: mobile-poster-scene linear both;
+      .hero-updates {
+        animation: mobile-updates-scene linear both;
         animation-timeline: view(block);
         animation-range: entry 0% cover 48%;
-      }
-
-      .poster-glyph {
-        animation: glyph-scene linear both;
-        animation-timeline: view(block);
-        animation-range: entry 0% exit 100%;
       }
 
       .work-visual,

@@ -15,16 +15,16 @@ export async function generateMetadata(): Promise<Metadata> {
 
   return {
     metadataBase: new URL(origin),
-    title: "한파란 — 서브컬쳐 AI 챗봇 기획자",
+    title: "한파란 — 세계를 설계합니다.",
     description:
-      "캐릭터의 말투부터 세계의 규칙까지 설계하는 서브컬쳐 AI 챗봇 기획자 한파란의 포트폴리오.",
+      "인물과 이야기, 그들이 살아갈 규칙까지 설계하는 한파란의 포트폴리오.",
     icons: {
       icon: "/favicon.svg",
       shortcut: "/favicon.svg",
     },
     openGraph: {
-      title: "한파란 — 서브컬쳐 AI 챗봇 기획자",
-      description: "대화로 세계의 결을 설계합니다.",
+      title: "한파란 — 세계를 설계합니다.",
+      description: "인물과 이야기, 그들이 살아갈 규칙까지 설계합니다.",
       type: "website",
       locale: "ko_KR",
       images: [
@@ -32,14 +32,14 @@ export async function generateMetadata(): Promise<Metadata> {
           url: `${origin}/og.png`,
           width: 1731,
           height: 909,
-          alt: "한파란 포트폴리오 — 대화로 세계의 결을 설계합니다.",
+          alt: "한파란 포트폴리오 — 세계를 설계합니다.",
         },
       ],
     },
     twitter: {
       card: "summary_large_image",
-      title: "한파란 — 서브컬쳐 AI 챗봇 기획자",
-      description: "대화로 세계의 결을 설계합니다.",
+      title: "한파란 — 세계를 설계합니다.",
+      description: "인물과 이야기, 그들이 살아갈 규칙까지 설계합니다.",
       images: [`${origin}/og.png`],
     },
   };

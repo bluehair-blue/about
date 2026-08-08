@@ -30,9 +30,12 @@ test("renders the portfolio reference page", async () => {
 
   const html = await response.text();
   assert.match(html, /<html lang="ko">/);
-  assert.match(html, /한파란 — 서브컬쳐 AI 챗봇 기획자/);
-  assert.match(html, /대화로/);
+  assert.match(html, /한파란 — 세계를 설계합니다\./);
+  assert.match(html, /WORLD DESIGN · BLUE/);
   assert.match(html, /class="hero-scene"/);
+  assert.match(html, /class="hero-updates"/);
+  assert.match(html, /최근 업데이트 슬라이드/);
+  assert.match(html, /\/works\/prime-city\.webp/);
   assert.match(html, /id="work"/);
   assert.match(html, /id="support"/);
   assert.match(html, /id="now"/);

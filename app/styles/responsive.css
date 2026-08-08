@@ -8,7 +8,11 @@
   }
 
   .hero {
-    grid-template-columns: minmax(0, 1.2fr) minmax(18rem, 0.65fr);
+    grid-template-columns: minmax(32rem, 1fr) minmax(0, 1fr);
+  }
+
+  .hero-updates {
+    margin-inline-start: clamp(-13rem, -20vw, -10rem);
   }
 
   .featured-work,
@@ -26,6 +30,24 @@
     height: 4rem;
   }
 
+  .site-header::after {
+    top: 100%;
+    right: 0;
+    bottom: auto;
+    left: auto;
+    width: clamp(0.45rem, 1.7vw, 0.6rem);
+    height: calc(100svh - 4rem);
+    border-left: 1px solid oklch(0.72 0.18 253 / 0.2);
+    background:
+      linear-gradient(180deg, var(--blue-light), var(--blue), var(--blue-dark))
+        top / 100% 0% no-repeat,
+      oklch(0.83 0.07 248 / 0.22);
+    box-shadow: -0.35rem 0 1rem oklch(0.53 0.29 264 / 0.12);
+    backdrop-filter: blur(0.7rem);
+    transform: none;
+    animation-name: mobile-page-progress;
+  }
+
   .header-inner {
     gap: 1rem;
   }
@@ -40,11 +62,15 @@
 
   .hero {
     min-height: auto;
+    padding-inline-start: 1rem;
     grid-template-columns: 1fr;
     gap: 0;
   }
 
   .hero-copy {
+    --hero-title-size: clamp(3.8rem, 15vw, 7rem);
+    --hero-optical-inset: clamp(0.6rem, 2.7vw, 1.2rem);
+
     min-height: calc(100svh - 4rem);
     display: flex;
     flex-direction: column;
@@ -52,21 +78,56 @@
     padding: 5rem 0 3rem;
   }
 
-  .hero h1 {
-    font-size: clamp(3.8rem, 15vw, 7rem);
+  .hero-updates {
+    --stage-inset: clamp(1.25rem, 5vw, 2rem);
+    --stage-fade-mid: 9%;
+    --stage-fade-end: 20%;
+    --stage-edge-top: clamp(0.1rem, 0.4vw, 0.18rem);
+    --stage-edge-bottom: clamp(0.5rem, 1.8vw, 0.75rem);
+    --stage-safe-left: calc(
+      var(--stage-fade-end) + clamp(0.75rem, 3vw, 1rem)
+    );
+
+    min-height: 72svh;
+    margin-inline-start: -1rem;
   }
 
-  .hero-intro {
-    margin-top: 3.5rem;
+  .hero-updates::before {
+    backdrop-filter: blur(0.9rem);
   }
 
-  .hero-poster {
-    min-height: 68svh;
-    margin: 0 0 1rem;
+  .hero-updates::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 7;
+    background:
+      linear-gradient(
+          90deg,
+          oklch(0.53 0.29 264 / 0.28),
+          var(--blue-light) 18%,
+          var(--blue) 62%,
+          var(--blue-dark)
+        )
+        top / 100% var(--stage-edge-top) no-repeat,
+      linear-gradient(
+          90deg,
+          oklch(0.53 0.29 264 / 0.38),
+          var(--blue-light) 12%,
+          var(--blue) 42%,
+          var(--blue-dark)
+        )
+        bottom / 100% var(--stage-edge-bottom) no-repeat;
+    pointer-events: none;
   }
 
-  .poster-name {
-    font-size: clamp(4rem, 18vw, 7rem);
+  .update-slide-copy {
+    bottom: clamp(6.5rem, 15vh, 8rem);
+  }
+
+  .update-slide-copy h2 {
+    max-width: 12ch;
+    font-size: clamp(2.4rem, 10vw, 4.5rem);
   }
 
   .section {
