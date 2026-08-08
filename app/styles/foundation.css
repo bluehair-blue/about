@@ -3,7 +3,7 @@
   --blue-dark: oklch(0.37 0.22 266);
   --blue-light: oklch(0.72 0.18 253);
   --ink: oklch(0.18 0.025 260);
-  --paper: oklch(0.975 0.006 255);
+  --paper: oklch(0.995 0.002 255);
   --white: oklch(0.995 0.002 255);
   --muted: oklch(0.49 0.025 258);
   --line: oklch(0.18 0.025 260 / 0.17);
@@ -24,14 +24,46 @@ html {
 }
 
 body {
+  position: relative;
+  isolation: isolate;
   margin: 0;
   overflow-x: clip;
-  background: var(--paper);
+  background: transparent;
   color: var(--ink);
   font-family: "Pretendard Variable", Pretendard, "Apple SD Gothic Neo",
     "Noto Sans KR", "Malgun Gothic", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+.ambient-mist {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  background: var(--paper);
+  pointer-events: none;
+}
+
+.ambient-mist::before,
+.ambient-mist::after {
+  content: "";
+  position: absolute;
+  inset: -30%;
+  filter: blur(3rem);
+}
+
+.ambient-mist::before {
+  background:
+    radial-gradient(ellipse at 24% 38%, oklch(0.82 0.1 244 / 0.38), transparent 38%),
+    radial-gradient(ellipse at 75% 24%, oklch(0.9 0.065 235 / 0.42), transparent 34%),
+    radial-gradient(ellipse at 63% 78%, oklch(0.86 0.085 255 / 0.3), transparent 40%);
+}
+
+.ambient-mist::after {
+  background:
+    radial-gradient(ellipse at 78% 58%, oklch(0.84 0.09 242 / 0.3), transparent 36%),
+    radial-gradient(ellipse at 31% 76%, oklch(0.92 0.05 250 / 0.48), transparent 34%);
 }
 
 a {
@@ -75,7 +107,7 @@ img {
   z-index: 30;
   height: 4.5rem;
   border-bottom: 1px solid var(--line);
-  background: oklch(0.975 0.006 255 / 0.94);
+  background: oklch(0.995 0.002 255 / 0.86);
   backdrop-filter: blur(14px);
 }
 

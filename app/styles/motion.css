@@ -9,6 +9,26 @@
   }
 }
 
+@keyframes mist-drift-a {
+  0%,
+  100% {
+    transform: translate3d(-3%, -2%, 0) rotate(-2deg) scale(1);
+  }
+  50% {
+    transform: translate3d(5%, 4%, 0) rotate(3deg) scale(1.08);
+  }
+}
+
+@keyframes mist-drift-b {
+  0%,
+  100% {
+    transform: translate3d(4%, 3%, 0) rotate(2deg) scale(1.06);
+  }
+  50% {
+    transform: translate3d(-5%, -4%, 0) rotate(-4deg) scale(0.98);
+  }
+}
+
 @keyframes page-progress {
   to {
     transform: scaleX(1);
@@ -270,6 +290,14 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  .ambient-mist::before {
+    animation: mist-drift-a 38s ease-in-out infinite;
+  }
+
+  .ambient-mist::after {
+    animation: mist-drift-b 52s ease-in-out infinite;
+  }
+
   @supports (animation-timeline: scroll()) {
     .site-header::after {
       animation: page-progress linear both;

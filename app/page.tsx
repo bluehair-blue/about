@@ -7,6 +7,8 @@ export default function Home() {
         본문으로 건너뛰기
       </a>
 
+      <div className="ambient-mist" aria-hidden="true" />
+
       <header className="site-header">
         <div className="header-inner">
           <a className="wordmark" href="#top" aria-label="한파란 포트폴리오 홈">
