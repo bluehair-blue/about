@@ -1,28 +1,98 @@
-import { featuredWork, updates } from "./content";
+"use client";
+
+import { useEffect, useState } from "react";
+import {
+  localeOptions,
+  siteContent,
+  type Locale,
+} from "./content";
 import { UpdateShowcase } from "./update-showcase";
 
+const LOCALE_KEY = "hanparan-locale";
+
+function isLocale(value: string | null): value is Locale {
+  return value === "ko" || value === "ja" || value === "en";
+}
+
+function detectLocale(): Locale {
+  try {
+    const savedLocale = window.localStorage.getItem(LOCALE_KEY);
+    if (isLocale(savedLocale)) return savedLocale;
+  } catch {
+    // Storage can be unavailable in privacy-restricted browsers.
+  }
+
+  const browserLocale = window.navigator.language.toLowerCase();
+  if (browserLocale.startsWith("ja")) return "ja";
+  if (browserLocale.startsWith("en")) return "en";
+  return "ko";
+}
+
+function syncDocument(locale: Locale) {
+  const { meta } = siteContent[locale];
+  document.documentElement.lang = locale;
+  document.title = meta.title;
+  document
+    .querySelector('meta[name="description"]')
+    ?.setAttribute("content", meta.description);
+}
+
 export default function Home() {
+  const [locale, setLocale] = useState<Locale>("ko");
+  const copy = siteContent[locale];
+
+  useEffect(() => {
+    const initialLocale = detectLocale();
+    setLocale(initialLocale);
+    syncDocument(initialLocale);
+  }, []);
+
+  const changeLocale = (nextLocale: Locale) => {
+    setLocale(nextLocale);
+    syncDocument(nextLocale);
+
+    try {
+      window.localStorage.setItem(LOCALE_KEY, nextLocale);
+    } catch {
+      // The language still changes for this visit when storage is unavailable.
+    }
+  };
+
   return (
     <>
       <a className="skip-link" href="#main">
-        본문으로 건너뛰기
+        {copy.skipLink}
       </a>
 
       <div className="ambient-mist" aria-hidden="true" />
 
       <header className="site-header">
         <div className="header-inner">
-          <a className="wordmark" href="#top" aria-label="한파란 포트폴리오 홈">
+          <a className="wordmark" href="#top" aria-label={copy.homeLabel}>
             HANPARAN<span aria-hidden="true">.</span>
           </a>
 
-          <nav aria-label="주요 메뉴">
-            <a href="#work">작품</a>
-            <a href="#support">후원</a>
-            <a href="#now">근황</a>
+          <nav aria-label={copy.navLabel}>
+            <a href="#work">{copy.nav.work}</a>
+            <a href="#support">{copy.nav.support}</a>
+            <a href="#now">{copy.nav.now}</a>
           </nav>
 
-          <p className="header-note">WORLD DESIGN · BLUE</p>
+          <div className="header-actions">
+            <p className="header-note">WORLD DESIGN · BLUE</p>
+            <select
+              className="language-select"
+              aria-label={copy.languageLabel}
+              value={locale}
+              onChange={(event) => changeLocale(event.target.value as Locale)}
+            >
+              {localeOptions.map((option) => (
+                <option value={option.value} key={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </header>
 
@@ -32,67 +102,68 @@ export default function Home() {
             <div className="hero-copy">
               <p className="eyebrow">WORLD · NARRATIVE · SYSTEM</p>
               <h1 id="hero-title">
-                <span>세계를</span>
-                <span>설계합니다.</span>
+                {copy.hero.title.map((line) => (
+                  <span key={line}>{line}</span>
+                ))}
               </h1>
               <div className="hero-intro">
-                <p>인물과 이야기, 그들이 살아갈 규칙까지.</p>
+                <p>{copy.hero.intro}</p>
                 <a className="text-link" href="#work">
-                  첫 작품 보기 <span aria-hidden="true">↓</span>
+                  {copy.hero.workLink} <span aria-hidden="true">↓</span>
                 </a>
               </div>
             </div>
 
-            <UpdateShowcase items={updates} />
+            <UpdateShowcase items={copy.updates} labels={copy.showcase} />
           </div>
         </section>
 
         <section className="section work-section" id="work" aria-labelledby="work-title">
           <div className="section-heading">
             <p>01</p>
-            <h2 id="work-title">Selected work</h2>
-            <span>선별 작품</span>
+            <h2 id="work-title">{copy.work.sectionTitle}</h2>
+            <span>{copy.work.sectionSubtitle}</span>
           </div>
 
           <article className="featured-work">
             <a
               className="work-visual"
-              href={featuredWork.url}
+              href={copy.work.url}
               target="_blank"
               rel="noreferrer"
-              aria-label={`${featuredWork.title} 소개 사이트 열기`}
+              aria-label={copy.work.openLabel}
             >
               <img
-                src={featuredWork.image}
-                alt="프라임시티 캐릭터 장그루"
+                src={copy.work.image}
+                alt={copy.work.imageAlt}
                 width="800"
                 height="1200"
               />
               <span className="visual-index">001</span>
               <span className="visual-cta" aria-hidden="true">
-                VISIT PROJECT ↗
+                {copy.work.visualCta}
               </span>
             </a>
 
             <div className="work-copy">
-              <p className="work-label">FEATURED · 2026</p>
+              <p className="work-label">{copy.work.label}</p>
               <h3>
-                {featuredWork.title}
-                <span>{featuredWork.englishTitle}</span>
+                {copy.work.title}
+                <span>{copy.work.subtitle}</span>
               </h3>
-              <p className="work-description">{featuredWork.description}</p>
-              <ul className="work-details" aria-label="프로젝트 주요 정보">
-                {featuredWork.details.map((detail) => (
+              <p className="work-description">{copy.work.description}</p>
+              <ul className="work-details" aria-label={copy.work.detailsLabel}>
+                {copy.work.details.map((detail) => (
                   <li key={detail}>{detail}</li>
                 ))}
               </ul>
               <a
                 className="project-link"
-                href={featuredWork.url}
+                href={copy.work.url}
                 target="_blank"
                 rel="noreferrer"
               >
-                프로젝트 소개 보기 <span aria-hidden="true">↗</span>
+                {copy.work.projectLink} <span aria-hidden="true">↗</span>
               </a>
             </div>
           </article>
@@ -103,32 +174,24 @@ export default function Home() {
             <div className="support-copy">
               <p className="section-number">02 / SUPPORT</p>
               <h2 id="support-title">
-                <span>좋아한 장면이</span>
-                <span>오래 남았다면.</span>
+                {copy.support.title.map((line) => (
+                  <span key={line}>{line}</span>
+                ))}
               </h2>
-              <p>
-                후원은 다음 캐릭터와 다음 세계를 만드는 시간으로 돌아옵니다.
-              </p>
+              <p>{copy.support.description}</p>
             </div>
 
-            <div className="support-panel" aria-label="후원 방법">
-              <div className="support-row">
-                <div>
-                  <span>01</span>
-                  <h3>한 번의 응원</h3>
+            <div className="support-panel" aria-label={copy.support.panelLabel}>
+              {copy.support.options.map((option, index) => (
+                <div className="support-row" key={option.title}>
+                  <div>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <h3>{option.title}</h3>
+                  </div>
+                  <p>{option.status}</p>
                 </div>
-                <p>후원 링크 준비 중</p>
-              </div>
-              <div className="support-row">
-                <div>
-                  <span>02</span>
-                  <h3>정기 멤버십</h3>
-                </div>
-                <p>멤버십 구성 중</p>
-              </div>
-              <p className="support-note">
-                현재는 포트폴리오 구조를 확인하기 위한 안내입니다. 결제 기능은 다음 버전에서 연결됩니다.
-              </p>
+              ))}
+              <p className="support-note">{copy.support.note}</p>
             </div>
           </div>
         </section>
@@ -136,12 +199,12 @@ export default function Home() {
         <section className="section updates-section" id="now" aria-labelledby="now-title">
           <div className="section-heading">
             <p>03</p>
-            <h2 id="now-title">Making notes</h2>
-            <span>제작 근황</span>
+            <h2 id="now-title">{copy.notes.sectionTitle}</h2>
+            <span>{copy.notes.sectionSubtitle}</span>
           </div>
 
           <div className="updates-list">
-            {updates.map((update, index) => (
+            {copy.updates.map((update, index) => (
               <article className="update" key={update.date}>
                 <div className="update-meta">
                   <time dateTime={update.date.replaceAll(".", "-")}>{update.date}</time>
@@ -156,19 +219,17 @@ export default function Home() {
             ))}
           </div>
 
-          <p className="updates-footnote">
-            세부 제작 로그와 아카이브는 콘텐츠 구조가 확정된 뒤 순차적으로 공개합니다.
-          </p>
+          <p className="updates-footnote">{copy.notes.footnote}</p>
         </section>
       </main>
 
       <footer>
         <div className="footer-mark">
-          <span>한파란</span>
+          <span>{copy.footer.name}</span>
           <span>HANPARAN</span>
         </div>
         <p>WORLD · NARRATIVE · SYSTEM</p>
-        <a href="#top">맨 위로 ↑</a>
+        <a href="#top">{copy.footer.top} ↑</a>
       </footer>
     </>
   );

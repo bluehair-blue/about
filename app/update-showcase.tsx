@@ -5,7 +5,21 @@ import type { UpdateItem } from "./content";
 
 const SLIDE_INTERVAL_MS = 2600;
 
-export function UpdateShowcase({ items }: { items: UpdateItem[] }) {
+type ShowcaseLabels = {
+  label: string;
+  latest: string;
+  selectionLabel: string;
+  itemLabel: string;
+  allUpdates: string;
+};
+
+export function UpdateShowcase({
+  items,
+  labels,
+}: {
+  items: UpdateItem[];
+  labels: ShowcaseLabels;
+}) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
@@ -43,7 +57,7 @@ export function UpdateShowcase({ items }: { items: UpdateItem[] }) {
   return (
     <aside
       className="hero-updates"
-      aria-label="최근 업데이트 슬라이드"
+      aria-label={labels.label}
       data-paused={paused}
       style={style}
       onPointerEnter={() => setHovered(true)}
@@ -56,7 +70,7 @@ export function UpdateShowcase({ items }: { items: UpdateItem[] }) {
       }}
     >
       <div className="update-stage-top" aria-hidden="true">
-        <span>LATEST UPDATE</span>
+        <span>{labels.latest}</span>
         <span>
           {String(currentIndex + 1).padStart(2, "0")} / {countLabel}
         </span>
@@ -94,14 +108,16 @@ export function UpdateShowcase({ items }: { items: UpdateItem[] }) {
       </div>
 
       <div className="update-stage-bottom">
-        <div className="update-stage-pagination" aria-label="업데이트 선택">
+        <div className="update-stage-pagination" aria-label={labels.selectionLabel}>
           {items.map((item, index) => {
             const active = index === currentIndex;
 
             return (
               <button
                 type="button"
-                aria-label={`${index + 1}번째 업데이트: ${item.title}`}
+                aria-label={labels.itemLabel
+                  .replace("{index}", String(index + 1))
+                  .replace("{title}", item.title)}
                 aria-pressed={active}
                 data-active={active}
                 key={item.date}
@@ -114,7 +130,7 @@ export function UpdateShowcase({ items }: { items: UpdateItem[] }) {
         </div>
 
         <a href="#now">
-          전체 업데이트 보기 <span aria-hidden="true">↓</span>
+          {labels.allUpdates} <span aria-hidden="true">↓</span>
         </a>
       </div>
     </aside>

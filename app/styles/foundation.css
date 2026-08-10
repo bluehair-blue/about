@@ -23,6 +23,10 @@ html {
   background: var(--paper);
 }
 
+html:lang(ja) {
+  line-break: strict;
+}
+
 body {
   position: relative;
   isolation: isolate;
@@ -31,7 +35,8 @@ body {
   background: transparent;
   color: var(--ink);
   font-family: "Pretendard Variable", Pretendard, "Apple SD Gothic Neo",
-    "Noto Sans KR", "Malgun Gothic", sans-serif;
+    "Noto Sans KR", "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP",
+    "Malgun Gothic", "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -184,9 +189,29 @@ nav a:focus-visible::after {
   transform-origin: left;
 }
 
-.header-note {
+.header-actions {
   justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.header-note {
   margin: 0;
   color: var(--muted);
   font-size: 0.62rem;
+}
+
+.language-select {
+  width: 5.6rem;
+  height: 2.25rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.64rem;
+  font-weight: 750;
+  cursor: pointer;
 }
