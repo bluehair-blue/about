@@ -83,6 +83,10 @@ test("keeps scroll motion progressive and optional", async () => {
   assert.match(css, /\.featured-work \{[\s\S]*position: sticky/);
   assert.match(
     css,
+    /@media \(max-width: 52rem\)[\s\S]*\.hero-updates::before \{[\s\S]*content: none[\s\S]*\.update-slide-image \{[\s\S]*mask-image: none/,
+  );
+  assert.match(
+    css,
     /@media \(prefers-reduced-motion: reduce\)[\s\S]*animation: none !important/,
   );
 });

@@ -84,20 +84,29 @@
 
   .hero-updates {
     --stage-inset: clamp(1.25rem, 5vw, 2rem);
-    --stage-fade-mid: 9%;
-    --stage-fade-end: 20%;
     --stage-edge-top: clamp(0.1rem, 0.4vw, 0.18rem);
     --stage-edge-bottom: clamp(0.5rem, 1.8vw, 0.75rem);
-    --stage-safe-left: calc(
-      var(--stage-fade-end) + clamp(0.75rem, 3vw, 1rem)
-    );
+    --stage-safe-left: var(--stage-inset);
 
     min-height: 72svh;
     margin-inline-start: -1rem;
   }
 
   .hero-updates::before {
-    backdrop-filter: blur(0.9rem);
+    content: none;
+  }
+
+  .update-slide::after {
+    background: linear-gradient(
+      0deg,
+      oklch(0.18 0.025 260 / 0.88),
+      transparent 72%
+    );
+  }
+
+  .update-slide-image {
+    -webkit-mask-image: none;
+    mask-image: none;
   }
 
   .hero-updates::after {
