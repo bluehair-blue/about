@@ -6,7 +6,7 @@
 }
 
 .work-section {
-  scroll-margin-top: 4.5rem;
+  scroll-margin-top: var(--header-height);
 }
 
 .section-heading {
@@ -153,7 +153,7 @@
 
 .support-section {
   min-height: 88svh;
-  scroll-margin-top: 4.5rem;
+  scroll-margin-top: var(--header-height);
   background: var(--blue);
   color: var(--white);
 }
@@ -244,7 +244,7 @@
 }
 
 .updates-section {
-  scroll-margin-top: 4.5rem;
+  scroll-margin-top: var(--header-height);
 }
 
 .updates-list {
@@ -316,9 +316,9 @@
   text-align: right;
 }
 
-footer {
+.site-footer {
   min-height: 15rem;
-  padding: 3rem max(1.5rem, calc((100% - 92rem) / 2));
+  padding: 3rem max(1.5rem, calc((100% - var(--page-max)) / 2));
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: end;
@@ -342,14 +342,14 @@ footer {
   letter-spacing: 0.02em;
 }
 
-footer p,
-footer a {
+.site-footer p,
+.site-footer a {
   margin: 0;
   font-size: 0.65rem;
   font-weight: 750;
   letter-spacing: 0.11em;
 }
 
-footer a {
+.site-footer a {
   justify-self: end;
 }

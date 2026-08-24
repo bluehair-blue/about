@@ -347,7 +347,7 @@
     }
 
     .updates-footnote,
-    footer > * {
+    .site-footer > * {
       animation: footer-rise linear both;
       animation-timeline: view(block);
       animation-range: entry 0% cover 36%;
@@ -361,8 +361,8 @@
 
       .hero {
         position: sticky;
-        top: 4.5rem;
-        height: calc(100svh - 4.5rem);
+        top: var(--header-height);
+        height: calc(100svh - var(--header-height));
       }
 
       .hero::before {
@@ -390,8 +390,8 @@
 
       .featured-work {
         position: sticky;
-        top: 4.5rem;
-        min-height: calc(100svh - 4.5rem);
+        top: var(--header-height);
+        min-height: calc(100svh - var(--header-height));
       }
 
       .work-visual,
@@ -420,9 +420,9 @@
 
       .support-inner {
         position: sticky;
-        top: 4.5rem;
-        min-height: calc(100svh - 4.5rem);
-        height: calc(100svh - 4.5rem);
+        top: var(--header-height);
+        min-height: calc(100svh - var(--header-height));
+        height: calc(100svh - var(--header-height));
         padding-block: clamp(3rem, 7vh, 6rem);
       }
 
@@ -453,7 +453,7 @@
 
       .updates-section .section-heading {
         position: sticky;
-        top: 4.5rem;
+        top: var(--header-height);
         z-index: 5;
         padding-top: 1.5rem;
         background: var(--paper);

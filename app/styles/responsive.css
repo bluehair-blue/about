@@ -1,10 +1,14 @@
 @media (max-width: 70rem) {
   .header-inner {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: auto 1fr auto;
   }
 
   .header-note {
     display: none;
+  }
+
+  .site-header nav {
+    justify-self: center;
   }
 
   .hero {
@@ -23,11 +27,12 @@
 
 @media (max-width: 52rem) {
   :root {
-    --page: min(100% - 2rem, 92rem);
+    --page: min(100% - 2rem, var(--page-max));
+    --header-height: 4rem;
   }
 
   .site-header {
-    height: 4rem;
+    height: var(--header-height);
   }
 
   .site-header::after {
@@ -36,7 +41,7 @@
     bottom: auto;
     left: auto;
     width: clamp(0.45rem, 1.7vw, 0.6rem);
-    height: calc(100svh - 4rem);
+    height: calc(100svh - var(--header-height));
     border-left: 1px solid oklch(0.72 0.18 253 / 0.2);
     background:
       linear-gradient(180deg, var(--blue-light), var(--blue), var(--blue-dark))
@@ -52,11 +57,11 @@
     gap: 1rem;
   }
 
-  nav {
+  .site-header nav {
     gap: 1.25rem;
   }
 
-  nav a {
+  .site-header nav a {
     font-size: 0.67rem;
   }
 
@@ -71,7 +76,7 @@
     --hero-title-size: clamp(3.8rem, 15vw, 7rem);
     --hero-optical-inset: clamp(0.6rem, 2.7vw, 1.2rem);
 
-    min-height: calc(100svh - 4rem);
+    min-height: calc(100svh - var(--header-height));
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -80,20 +85,29 @@
 
   .hero-updates {
     --stage-inset: clamp(1.25rem, 5vw, 2rem);
-    --stage-fade-mid: 9%;
-    --stage-fade-end: 20%;
     --stage-edge-top: clamp(0.1rem, 0.4vw, 0.18rem);
     --stage-edge-bottom: clamp(0.5rem, 1.8vw, 0.75rem);
-    --stage-safe-left: calc(
-      var(--stage-fade-end) + clamp(0.75rem, 3vw, 1rem)
-    );
+    --stage-safe-left: var(--stage-inset);
 
     min-height: 72svh;
     margin-inline-start: -1rem;
   }
 
   .hero-updates::before {
-    backdrop-filter: blur(0.9rem);
+    content: none;
+  }
+
+  .update-slide::after {
+    background: linear-gradient(
+      0deg,
+      oklch(0.18 0.025 260 / 0.88),
+      transparent 72%
+    );
+  }
+
+  .update-slide-image {
+    -webkit-mask-image: none;
+    mask-image: none;
   }
 
   .hero-updates::after {
@@ -158,26 +172,36 @@
     font-size: clamp(3.7rem, 13vw, 6.5rem);
   }
 
-  footer {
+  .site-footer {
     grid-template-columns: 1fr auto;
   }
 
-  footer p {
+  .site-footer p {
     display: none;
   }
 }
 
 @media (max-width: 36rem) {
+  .header-inner {
+    gap: 0.55rem;
+  }
+
   .wordmark {
     font-size: 0.75rem;
   }
 
-  nav {
-    gap: 0.85rem;
+  .site-header nav {
+    gap: 0.65rem;
   }
 
-  nav a {
+  .site-header nav a {
     font-size: 0.61rem;
+  }
+
+  .language-select {
+    width: 4.5rem;
+    padding-inline: 0.35rem;
+    font-size: 0.59rem;
   }
 
   .eyebrow {

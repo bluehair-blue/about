@@ -8,7 +8,9 @@
   --muted: oklch(0.49 0.025 258);
   --line: oklch(0.18 0.025 260 / 0.17);
   --white-line: oklch(0.995 0.002 255 / 0.3);
-  --page: min(100% - 3rem, 92rem);
+  --page-max: 92rem;
+  --page: min(100% - 3rem, var(--page-max));
+  --header-height: 4.5rem;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --reveal-distance: clamp(2rem, 5vw, 5rem);
 }
@@ -23,6 +25,10 @@ html {
   background: var(--paper);
 }
 
+html:lang(ja) {
+  line-break: strict;
+}
+
 body {
   position: relative;
   isolation: isolate;
@@ -31,7 +37,8 @@ body {
   background: transparent;
   color: var(--ink);
   font-family: "Pretendard Variable", Pretendard, "Apple SD Gothic Neo",
-    "Noto Sans KR", "Malgun Gothic", sans-serif;
+    "Noto Sans KR", "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP",
+    "Malgun Gothic", "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -107,7 +114,7 @@ img {
   position: sticky;
   top: 0;
   z-index: 30;
-  height: 4.5rem;
+  height: var(--header-height);
   border-bottom: 1px solid var(--line);
   background: oklch(0.97 0.012 250 / 0.88);
   backdrop-filter: blur(14px);
@@ -147,25 +154,25 @@ img {
   color: var(--blue);
 }
 
-nav {
+.site-header nav {
   display: flex;
   align-items: center;
   gap: clamp(1.5rem, 3.5vw, 3.75rem);
 }
 
-nav a,
+.site-header nav a,
 .header-note {
   font-size: 0.71rem;
   font-weight: 700;
   letter-spacing: 0.09em;
 }
 
-nav a {
+.site-header nav a {
   position: relative;
   padding: 0.7rem 0;
 }
 
-nav a::after {
+.site-header nav a::after {
   content: "";
   position: absolute;
   right: 0;
@@ -178,15 +185,35 @@ nav a::after {
   transition: transform 0.35s var(--ease);
 }
 
-nav a:hover::after,
-nav a:focus-visible::after {
+.site-header nav a:hover::after,
+.site-header nav a:focus-visible::after {
   transform: scaleX(1);
   transform-origin: left;
 }
 
-.header-note {
+.header-actions {
   justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.header-note {
   margin: 0;
   color: var(--muted);
   font-size: 0.62rem;
+}
+
+.language-select {
+  width: 5.6rem;
+  height: 2.25rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.64rem;
+  font-weight: 750;
+  cursor: pointer;
 }

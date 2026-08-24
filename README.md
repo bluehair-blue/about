@@ -9,14 +9,17 @@
 ## 구조
 
 - `app/content.ts`: 작품과 제작 근황 데이터
-- `app/page.tsx`: 페이지의 시맨틱 마크업
+- `app/page.tsx`: locale과 섹션을 연결하는 페이지 조합 루트
+- `app/use-portfolio-locale.ts`: 언어 탐지·저장·문서 동기화
+- `app/components/`: 헤더·히어로·프로젝트·후원·근황·푸터 DOM 모듈
 - `app/globals.css`: 스타일 모듈 진입점
 - `app/styles/`: 기반·히어로·섹션·모션·반응형 스타일
+- `docs/architecture.md`: DOM 계약과 에이전트별 최소 컨텍스트
 - `worker/`: Cloudflare Worker 진입점
 - `tooling/`: 빌드 시 필요한 Sites 메타데이터 처리
 - `tests/`: 렌더링과 스크롤 모션 회귀 테스트
 
-콘텐츠는 `app/content.ts`, 화면 구조는 `app/page.tsx`에서 수정합니다. 모든 작성 색상은 OKLCH를 사용합니다.
+콘텐츠는 `app/content.ts`, 각 화면 구조는 대응하는 `app/components/` 파일에서 수정합니다. 모든 작성 색상은 OKLCH를 사용합니다.
 
 ```bash
 npm run dev

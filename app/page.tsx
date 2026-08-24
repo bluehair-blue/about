@@ -1,175 +1,40 @@
-import { featuredWork, updates } from "./content";
-import { UpdateShowcase } from "./update-showcase";
+"use client";
+
+import { HeroSection } from "./components/hero-section";
+import { ProjectIndexSection } from "./components/project-index-section";
+import { SiteFooter } from "./components/site-footer";
+import { SiteHeader } from "./components/site-header";
+import { SupportSection } from "./components/support-section";
+import { UpdatesSection } from "./components/updates-section";
+import { siteContent } from "./content";
+import { usePortfolioLocale } from "./use-portfolio-locale";
 
 export default function Home() {
+  const { locale, changeLocale } = usePortfolioLocale();
+  const copy = siteContent[locale];
+
   return (
     <>
       <a className="skip-link" href="#main">
-        본문으로 건너뛰기
+        {copy.skipLink}
       </a>
 
       <div className="ambient-mist" aria-hidden="true" />
 
-      <header className="site-header">
-        <div className="header-inner">
-          <a className="wordmark" href="#top" aria-label="한파란 포트폴리오 홈">
-            HANPARAN<span aria-hidden="true">.</span>
-          </a>
-
-          <nav aria-label="주요 메뉴">
-            <a href="#work">작품</a>
-            <a href="#support">후원</a>
-            <a href="#now">근황</a>
-          </nav>
-
-          <p className="header-note">WORLD DESIGN · BLUE</p>
-        </div>
-      </header>
+      <SiteHeader copy={copy} locale={locale} onLocaleChange={changeLocale} />
 
       <main id="main">
-        <section className="hero-scene" id="top" aria-labelledby="hero-title">
-          <div className="hero">
-            <div className="hero-copy">
-              <p className="eyebrow">WORLD · NARRATIVE · SYSTEM</p>
-              <h1 id="hero-title">
-                <span>세계를</span>
-                <span>설계합니다.</span>
-              </h1>
-              <div className="hero-intro">
-                <p>인물과 이야기, 그들이 살아갈 규칙까지.</p>
-                <a className="text-link" href="#work">
-                  첫 작품 보기 <span aria-hidden="true">↓</span>
-                </a>
-              </div>
-            </div>
-
-            <UpdateShowcase items={updates} />
-          </div>
-        </section>
-
-        <section className="section work-section" id="work" aria-labelledby="work-title">
-          <div className="section-heading">
-            <p>01</p>
-            <h2 id="work-title">Selected work</h2>
-            <span>선별 작품</span>
-          </div>
-
-          <article className="featured-work">
-            <a
-              className="work-visual"
-              href={featuredWork.url}
-              target="_blank"
-              rel="noreferrer"
-              aria-label={`${featuredWork.title} 소개 사이트 열기`}
-            >
-              <img
-                src={featuredWork.image}
-                alt="프라임시티 캐릭터 장그루"
-                width="800"
-                height="1200"
-              />
-              <span className="visual-index">001</span>
-              <span className="visual-cta" aria-hidden="true">
-                VISIT PROJECT ↗
-              </span>
-            </a>
-
-            <div className="work-copy">
-              <p className="work-label">FEATURED · 2026</p>
-              <h3>
-                {featuredWork.title}
-                <span>{featuredWork.englishTitle}</span>
-              </h3>
-              <p className="work-description">{featuredWork.description}</p>
-              <ul className="work-details" aria-label="프로젝트 주요 정보">
-                {featuredWork.details.map((detail) => (
-                  <li key={detail}>{detail}</li>
-                ))}
-              </ul>
-              <a
-                className="project-link"
-                href={featuredWork.url}
-                target="_blank"
-                rel="noreferrer"
-              >
-                프로젝트 소개 보기 <span aria-hidden="true">↗</span>
-              </a>
-            </div>
-          </article>
-        </section>
-
-        <section className="support-section" id="support" aria-labelledby="support-title">
-          <div className="support-inner">
-            <div className="support-copy">
-              <p className="section-number">02 / SUPPORT</p>
-              <h2 id="support-title">
-                <span>좋아한 장면이</span>
-                <span>오래 남았다면.</span>
-              </h2>
-              <p>
-                후원은 다음 캐릭터와 다음 세계를 만드는 시간으로 돌아옵니다.
-              </p>
-            </div>
-
-            <div className="support-panel" aria-label="후원 방법">
-              <div className="support-row">
-                <div>
-                  <span>01</span>
-                  <h3>한 번의 응원</h3>
-                </div>
-                <p>후원 링크 준비 중</p>
-              </div>
-              <div className="support-row">
-                <div>
-                  <span>02</span>
-                  <h3>정기 멤버십</h3>
-                </div>
-                <p>멤버십 구성 중</p>
-              </div>
-              <p className="support-note">
-                현재는 포트폴리오 구조를 확인하기 위한 안내입니다. 결제 기능은 다음 버전에서 연결됩니다.
-              </p>
-            </div>
-          </div>
-        </section>
-
-        <section className="section updates-section" id="now" aria-labelledby="now-title">
-          <div className="section-heading">
-            <p>03</p>
-            <h2 id="now-title">Making notes</h2>
-            <span>제작 근황</span>
-          </div>
-
-          <div className="updates-list">
-            {updates.map((update, index) => (
-              <article className="update" key={update.date}>
-                <div className="update-meta">
-                  <time dateTime={update.date.replaceAll(".", "-")}>{update.date}</time>
-                  <span>{update.state}</span>
-                </div>
-                <div className="update-copy">
-                  <p aria-hidden="true">0{index + 1}</p>
-                  <h3>{update.title}</h3>
-                  <p>{update.description}</p>
-                </div>
-              </article>
-            ))}
-          </div>
-
-          <p className="updates-footnote">
-            세부 제작 로그와 아카이브는 콘텐츠 구조가 확정된 뒤 순차적으로 공개합니다.
-          </p>
-        </section>
+        <HeroSection
+          copy={copy.hero}
+          updates={copy.updates}
+          showcase={copy.showcase}
+        />
+        <ProjectIndexSection copy={copy.work} />
+        <SupportSection copy={copy.support} />
+        <UpdatesSection notes={copy.notes} updates={copy.updates} />
       </main>
 
-      <footer>
-        <div className="footer-mark">
-          <span>한파란</span>
-          <span>HANPARAN</span>
-        </div>
-        <p>WORLD · NARRATIVE · SYSTEM</p>
-        <a href="#top">맨 위로 ↑</a>
-      </footer>
+      <SiteFooter copy={copy.footer} />
     </>
   );
 }

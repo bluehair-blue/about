@@ -1,14 +1,14 @@
 .hero-scene {
   overflow: clip;
-  scroll-margin-top: 4.5rem;
+  scroll-margin-top: var(--header-height);
 }
 
 .hero {
   position: relative;
   width: 100%;
-  min-height: calc(100svh - 4.5rem);
+  min-height: calc(100svh - var(--header-height));
   margin: 0 auto;
-  padding-inline-start: max(1.5rem, calc((100vw - 92rem) / 2));
+  padding-inline-start: max(1.5rem, calc((100vw - var(--page-max)) / 2));
   display: grid;
   grid-template-columns: minmax(34rem, 0.98fr) minmax(32rem, 1.02fr);
   gap: 0;
@@ -147,7 +147,7 @@
 
   position: relative;
   min-width: 0;
-  min-height: calc(100svh - 4.5rem);
+  min-height: calc(100svh - var(--header-height));
   margin-inline-start: clamp(-5rem, -4vw, -2.5rem);
   overflow: hidden;
   background: linear-gradient(
