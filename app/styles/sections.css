@@ -236,6 +236,30 @@
   letter-spacing: -0.04em;
 }
 
+.support-row a {
+  min-height: 2.75rem;
+  padding-inline: 0.25rem;
+  display: inline-flex;
+  align-items: center;
+  color: inherit;
+  text-decoration-line: underline;
+  text-decoration-color: oklch(0.995 0.002 255 / 0.45);
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.35em;
+  transition: color 180ms ease, text-decoration-color 180ms ease;
+}
+
+.support-row a:hover {
+  color: var(--white);
+  text-decoration-color: currentColor;
+}
+
+.support-row a:focus-visible {
+  color: var(--white);
+  outline: 2px solid currentColor;
+  outline-offset: 0.25rem;
+}
+
 .support-note {
   max-width: 31rem;
   margin: 2rem 0 0;

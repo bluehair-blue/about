@@ -15,6 +15,7 @@
 - `app/globals.css`: 스타일 모듈 진입점
 - `app/styles/`: 기반·히어로·섹션·모션·반응형 스타일
 - `docs/architecture.md`: DOM 계약과 에이전트별 최소 컨텍스트
+- `docs/technical-index.md`: 기술 계약·직접 의존성·버전 결합·빌드/배포 인덱스
 - `worker/`: Cloudflare Worker 진입점
 - `tooling/`: 빌드 시 필요한 Sites 메타데이터 처리
 - `tests/`: 렌더링과 스크롤 모션 회귀 테스트

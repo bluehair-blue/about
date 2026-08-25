@@ -43,7 +43,12 @@ export type SiteCopy = {
     title: [string, string];
     description: string;
     panelLabel: string;
-    options: { title: string; status: string }[];
+    options: {
+      title: string;
+      status: string;
+      href?: string;
+      openLabel?: string;
+    }[];
     note: string;
   };
   notes: {
@@ -67,6 +72,8 @@ const project = {
   url: "https://intro.bluehair.blue",
   details: ["WORLD BUILDING", "20 PERSONAS", "INTERACTIVE FICTION"],
 };
+
+const patreonUrl = "https://www.patreon.com/bluehairblue";
 
 export const localeOptions: { value: Locale; label: string }[] = [
   { value: "ko", label: "한국어" },
@@ -112,10 +119,15 @@ export const siteContent = {
         "후원은 다음 캐릭터와 다음 세계를 만드는 시간으로 돌아옵니다.",
       panelLabel: "후원 방법",
       options: [
-        { title: "한 번의 응원", status: "후원 링크 준비 중" },
-        { title: "정기 멤버십", status: "멤버십 구성 중" },
+        { title: "공개 제작로그", status: "누구나 읽을 수 있습니다" },
+        {
+          title: "Patreon 멤버십",
+          status: "제작실 응원하기 ↗",
+          href: patreonUrl,
+          openLabel: "Patreon 제작실 페이지를 새 탭에서 열기",
+        },
       ],
-      note: "현재는 포트폴리오 구조를 확인하기 위한 안내입니다. 결제 기능은 다음 버전에서 연결됩니다.",
+      note: "작품과 공개 제작로그는 계속 누구나 볼 수 있습니다. 멤버십에는 별도의 AI 채팅 이용권이 포함되지 않습니다.",
     },
     notes: {
       sectionTitle: "Making notes",
@@ -193,10 +205,15 @@ export const siteContent = {
         "その応援は、次のキャラクターと次の世界をつくる時間になります。",
       panelLabel: "応援方法",
       options: [
-        { title: "一度だけ応援", status: "支援ページを準備中" },
-        { title: "継続メンバーシップ", status: "内容を準備中" },
+        { title: "公開制作ノート", status: "どなたでも読めます" },
+        {
+          title: "Patreon メンバーシップ",
+          status: "制作室を応援する ↗",
+          href: patreonUrl,
+          openLabel: "Patreonの制作室ページを新しいタブで開く",
+        },
       ],
-      note: "現在はポートフォリオの構成をご覧いただくためのご案内です。決済機能は次回の更新で公開します。",
+      note: "作品と公開制作ノートは、これからも誰でも見られる形で続けます。メンバーシップに限定AIチャットへのアクセス権は含まれません。",
     },
     notes: {
       sectionTitle: "Making notes",
@@ -274,10 +291,15 @@ export const siteContent = {
         "Your support becomes time to create the next character—and the next world.",
       panelLabel: "Ways to support",
       options: [
-        { title: "One-time support", status: "Support link coming soon" },
-        { title: "Ongoing membership", status: "Membership plans in progress" },
+        { title: "Public studio notes", status: "Open to everyone" },
+        {
+          title: "Patreon membership",
+          status: "Support the studio ↗",
+          href: patreonUrl,
+          openLabel: "Open the studio Patreon page in a new tab",
+        },
       ],
-      note: "These options currently preview the portfolio structure. Payments will be added in the next release.",
+      note: "Artwork and public studio notes will remain open to everyone. Membership does not include access to gated AI chat experiences.",
     },
     notes: {
       sectionTitle: "Making notes",

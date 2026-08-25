@@ -25,7 +25,20 @@ export function SupportSection({ copy }: { copy: SiteCopy["support"] }) {
                 <span>{String(index + 1).padStart(2, "0")}</span>
                 <h3>{option.title}</h3>
               </div>
-              <p>{option.status}</p>
+              <p>
+                {option.href ? (
+                  <a
+                    href={option.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={option.openLabel}
+                  >
+                    {option.status}
+                  </a>
+                ) : (
+                  option.status
+                )}
+              </p>
             </div>
           ))}
           <p className="support-note">{copy.note}</p>

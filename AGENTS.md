@@ -1,6 +1,7 @@
 # Repository agent contract
 
 작업 전에 `docs/architecture.md`에서 배정된 파트의 컨텍스트 패킷과 DOM 계약만 확인한다.
+dependency·빌드·배포 작업은 `docs/technical-index.md`의 버전 묶음과 완료 계약도 확인한다.
 
 - 한 작업은 한 섹션 또는 한 런타임 계약을 소유한다. 배정되지 않은 파일은 수정하지 않는다.
 - `app/page.tsx`는 조합 루트다. 섹션 구현을 다시 이 파일에 넣지 않는다.
