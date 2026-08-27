@@ -11,6 +11,7 @@
 | 실행 명령·직접 의존성 | [`package.json`](../package.json) |
 | 재현 가능한 설치 버전 | [`package-lock.json`](../package-lock.json) |
 | 모듈·DOM·에이전트 경계 | [`architecture.md`](./architecture.md) |
+| Creator CRM 구현 순서 | [`creator-crm-hub-plan.md`의 Phase A–D 실행 문서](./creator-crm-hub-plan.md#구현-실행-문서) |
 | 저장소 작업 규칙 | [`AGENTS.md`](../AGENTS.md) |
 | 페이지 조합 | [`app/page.tsx`](../app/page.tsx) |
 | 콘텐츠·locale 타입 | [`app/content.ts`](../app/content.ts) |

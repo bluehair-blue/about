@@ -63,6 +63,8 @@ usePortfolioLocale ───────────┘
 | footer | `site-footer.tsx`, `content.ts`의 footer 필드 | footer 구간의 `sections.css`·`motion.css`·`responsive.css` | 렌더 테스트 |
 | 배포 | `package.json`, `vite.config.ts`, `wrangler.jsonc`, `.openai/hosting.json` | 없음 | build + 공개 도메인 확인 |
 
+Creator CRM 구현은 [`creator-crm-hub-plan.md`의 실행 문서 표](./creator-crm-hub-plan.md#구현-실행-문서)에서 현재 Phase 하나를 선택한다. 해당 Phase 문서와 그 문서가 지정한 파일만 기본 컨텍스트로 사용하고, 전체 설계 기록이나 다음 Phase 문서는 현재 계약이 비어 있을 때만 확인한다.
+
 ## 확장 순서
 
 - 새 locale: `Locale`, `localeOptions`, `siteContent` 항목을 같은 변경에서 추가한다.
