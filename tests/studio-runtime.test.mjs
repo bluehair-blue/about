@@ -9,6 +9,10 @@ const draftMigration = readFileSync(
   new URL("../migrations/0001_phase_a_drafts.sql", import.meta.url),
   "utf8",
 );
+const assetMigration = readFileSync(
+  new URL("../migrations/0002_phase_a_assets.sql", import.meta.url),
+  "utf8",
+);
 
 class SqliteD1Statement {
   constructor(database, query, values = []) {
@@ -41,6 +45,7 @@ class SqliteD1 {
   constructor() {
     this.database = new DatabaseSync(":memory:");
     this.database.exec(draftMigration);
+    this.database.exec(assetMigration);
   }
 
   prepare(query) {
@@ -63,6 +68,89 @@ class SqliteD1 {
   close() {
     this.database.close();
   }
+}
+
+class MemoryR2 {
+  constructor() {
+    this.objects = new Map();
+    this.deleteCalls = [];
+    this.failPut = false;
+    this.failDelete = false;
+  }
+
+  async get(key) {
+    return this.objects.get(key) ?? null;
+  }
+
+  async put(key, value, options = {}) {
+    if (this.failPut) throw new Error("R2 put failed");
+    if (options.onlyIf?.get("if-none-match") === "*" && this.objects.has(key)) {
+      return null;
+    }
+    const bytes = value instanceof ArrayBuffer
+      ? new Uint8Array(value)
+      : value instanceof Blob
+      ? new Uint8Array(await value.arrayBuffer())
+      : new Uint8Array(await new Response(value).arrayBuffer());
+    const stored = { bytes: bytes.slice(), options };
+    this.objects.set(key, stored);
+    return { key, size: stored.bytes.byteLength };
+  }
+
+  async delete(keys) {
+    const exactKeys = Array.isArray(keys) ? [...keys] : [keys];
+    this.deleteCalls.push(exactKeys);
+    if (this.failDelete) throw new Error("R2 delete failed");
+    for (const key of exactKeys) this.objects.delete(key);
+  }
+
+  async list({ prefix = "", limit = 1_000 } = {}) {
+    return {
+      objects: [...this.objects.keys()]
+        .filter((key) => key.startsWith(prefix))
+        .slice(0, limit)
+        .map((key) => ({ key })),
+    };
+  }
+}
+
+class FakeImages {
+  constructor(result = { format: "png", width: 1, height: 1 }) {
+    this.result = result;
+    this.calls = [];
+  }
+
+  async info(stream) {
+    const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    this.calls.push(bytes);
+    if (this.result instanceof Error) throw this.result;
+    return {
+      ...this.result,
+      fileSize: this.result.fileSize ?? bytes.byteLength,
+    };
+  }
+}
+
+const staticPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+
+function animatedPng() {
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const animationControl = Buffer.alloc(20);
+  animationControl.writeUInt32BE(8, 0);
+  animationControl.write("acTL", 4, "ascii");
+  return Buffer.concat([signature, animationControl]);
+}
+
+function animatedWebp() {
+  const bytes = Buffer.alloc(20);
+  bytes.write("RIFF", 0, "ascii");
+  bytes.writeUInt32LE(12, 4);
+  bytes.write("WEBP", 8, "ascii");
+  bytes.write("ANIM", 12, "ascii");
+  return bytes;
 }
 
 async function loadWorker() {
@@ -90,6 +178,7 @@ function phaseAEnv(overrides = {}) {
     DISCORD_NOTIFY_ROLE_ID: "100000000000000007",
     STUDIO_DB: { prepare() {}, batch() {} },
     STUDIO_MEDIA: { get() {}, put() {}, delete() {}, list() {} },
+    IMAGES: { info() {} },
     PUBLISH_QUEUE: { send() {} },
     ...overrides,
   };
@@ -170,6 +259,83 @@ async function discordRequest(privateKey, payload, timestamp) {
     },
     body,
   });
+}
+
+function studioRequester(worker, env, keys, token) {
+  return async function request(pathname, init = {}) {
+    globalThis.fetch = async (input) => {
+      assert.equal(String(input), `${teamDomain}/cdn-cgi/access/certs`);
+      return Response.json({ keys: [keys.publicJwk] });
+    };
+    return worker.fetch(
+      new Request(`https://staging.example${pathname}`, {
+        ...init,
+        headers: {
+          "cf-access-jwt-assertion": token,
+          ...(init.headers ?? {}),
+        },
+      }),
+      env,
+      executionContext(),
+    );
+  };
+}
+
+async function createDraftFixture(request, title = "이미지 원본") {
+  const response = await request("/studio/api/drafts", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: "https://staging.example",
+      "x-studio-request": "1",
+    },
+    body: JSON.stringify({
+      postId: null,
+      revision: 0,
+      title,
+      body: "원본 업로드 경계를 검증하는 fixture입니다.",
+      kind: "work",
+      topics: ["illustration"],
+    }),
+  });
+  assert.equal(response.status, 201);
+  return response.json();
+}
+
+function sourceUpload(postId, ordinal, bytes, options = {}) {
+  const form = new FormData();
+  form.set("postId", postId);
+  form.set("ordinal", String(ordinal));
+  form.set("alt", options.alt ?? "푸른 머리 캐릭터 테스트 이미지");
+  form.set(
+    "file",
+    new File([bytes], options.name ?? "fixture.png", {
+      type: options.type ?? "image/png",
+    }),
+  );
+  return {
+    method: "POST",
+    headers: {
+      origin: options.origin ?? "https://staging.example",
+      "x-studio-request": "1",
+    },
+    body: form,
+  };
+}
+
+function deleteSource(assetId) {
+  return {
+    pathname: `/studio/api/assets/${assetId}`,
+    init: {
+      method: "DELETE",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://staging.example",
+        "x-studio-request": "1",
+      },
+      body: "{}",
+    },
+  };
 }
 
 test("fails closed before Phase A bindings and configuration exist", async () => {
@@ -607,6 +773,296 @@ test("persists one D1 draft and rejects stale revisions without mutation", async
         new Date().toISOString(),
       );
     }, /UNIQUE constraint failed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("stores private sources under exact R2 keys and deletes them idempotently", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const media = new MemoryR2();
+  const images = new FakeImages();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: media,
+    IMAGES: images,
+  });
+  const keys = await accessKeys();
+  const request = studioRequester(worker, env, keys, await keys.token());
+  const originalFetch = globalThis.fetch;
+
+  try {
+    const draft = await createDraftFixture(request);
+    const empty = await request(`/studio/api/assets?postId=${draft.postId}`);
+    assert.equal(empty.status, 200);
+    assert.deepEqual(await empty.json(), { assets: [] });
+
+    const firstResponse = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng),
+    );
+    assert.equal(firstResponse.status, 201);
+    const first = await firstResponse.json();
+    assert.equal(first.status, "processing");
+    assert.equal(first.sourceMime, "image/png");
+    assert.equal(first.sourceBytes, staticPng.byteLength);
+    assert.equal(first.ordinal, 0);
+
+    const row = database.database.prepare(`
+      SELECT * FROM studio_assets WHERE id = ?
+    `).get(first.assetId);
+    const compactTime = `${row.created_at.slice(0, 19).replaceAll(/[-:]/g, "")}Z`;
+    const expectedPrefix = `posts/${row.created_at.slice(0, 4)}/${row.created_at.slice(5, 7)}/${row.created_at.slice(8, 10)}/${compactTime}--${draft.postId}--이미지-원본`;
+    assert.equal(row.status, "processing");
+    assert.equal(row.created_prefix, expectedPrefix);
+    assert.equal(
+      row.private_source_key,
+      `${expectedPrefix}/private/${first.assetId}/source.png`,
+    );
+    assert.equal(
+      row.discord_r2_key,
+      `${expectedPrefix}/private/${first.assetId}/discord-v1.webp`,
+    );
+    assert.equal(
+      row.public_r2_key,
+      `${expectedPrefix}/public/${first.assetId}/portfolio-v1.webp`,
+    );
+
+    const stored = media.objects.get(row.private_source_key);
+    assert.deepEqual(stored.bytes, new Uint8Array(staticPng));
+    assert.equal(stored.options.onlyIf.get("if-none-match"), "*");
+    assert.deepEqual(stored.options.httpMetadata, { contentType: "image/png" });
+    assert.deepEqual(
+      Object.keys(stored.options.customMetadata).sort(),
+      ["asset_id", "created_at", "post_id", "source_sha256", "title_snapshot"],
+    );
+    assert.deepEqual(stored.options.customMetadata, {
+      post_id: draft.postId,
+      asset_id: first.assetId,
+      created_at: row.created_at,
+      title_snapshot: "이미지-원본",
+      source_sha256: row.source_sha256,
+    });
+    const expectedHash = Buffer.from(
+      await crypto.subtle.digest("SHA-256", staticPng),
+    ).toString("hex");
+    assert.equal(row.source_sha256, expectedHash);
+    assert.equal(
+      Buffer.from(stored.options.sha256).toString("hex"),
+      expectedHash,
+    );
+
+    const secondResponse = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 1, staticPng, { alt: "두 번째 이미지" }),
+    );
+    assert.equal(secondResponse.status, 201);
+    const second = await secondResponse.json();
+
+    const listedResponse = await request(
+      `/studio/api/assets?postId=${draft.postId}`,
+    );
+    assert.equal(listedResponse.status, 200);
+    const listed = await listedResponse.json();
+    assert.deepEqual(
+      listed.assets.map(({ assetId, ordinal, alt, status }) => ({
+        assetId,
+        ordinal,
+        alt,
+        status,
+      })),
+      [
+        {
+          assetId: first.assetId,
+          ordinal: 0,
+          alt: "푸른 머리 캐릭터 테스트 이미지",
+          status: "processing",
+        },
+        {
+          assetId: second.assetId,
+          ordinal: 1,
+          alt: "두 번째 이미지",
+          status: "processing",
+        },
+      ],
+    );
+
+    const firstDelete = deleteSource(first.assetId);
+    const deleted = await request(firstDelete.pathname, firstDelete.init);
+    assert.equal(deleted.status, 204);
+    assert.deepEqual(media.deleteCalls[0], [
+      row.private_source_key,
+      row.discord_r2_key,
+      row.public_r2_key,
+    ]);
+    assert.equal(media.objects.has(row.private_source_key), false);
+    assert.equal(
+      database.database.prepare("SELECT count(*) AS count FROM studio_assets WHERE id = ?")
+        .get(first.assetId).count,
+      0,
+    );
+    assert.deepEqual(
+      database.database.prepare(`
+        SELECT asset_id, ordinal
+        FROM studio_post_version_assets
+        ORDER BY ordinal
+      `).all().map(({ asset_id, ordinal }) => ({ asset_id, ordinal })),
+      [{ asset_id: second.assetId, ordinal: 0 }],
+    );
+
+    const secondDelete = deleteSource(second.assetId);
+    media.failDelete = true;
+    const failedDelete = await request(secondDelete.pathname, secondDelete.init);
+    assert.equal(failedDelete.status, 503);
+    assert.equal(
+      database.database.prepare("SELECT status FROM studio_assets WHERE id = ?")
+        .get(second.assetId).status,
+      "deleting",
+    );
+
+    media.failDelete = false;
+    const retriedDelete = await request(secondDelete.pathname, secondDelete.init);
+    assert.equal(retriedDelete.status, 204);
+    assert.equal(
+      database.database.prepare("SELECT count(*) AS count FROM studio_assets")
+        .get().count,
+      0,
+    );
+    assert.equal(media.deleteCalls.length, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("rejects unsafe image inputs and records recoverable R2 failures", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const media = new MemoryR2();
+  const images = new FakeImages();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: media,
+    IMAGES: images,
+  });
+  const keys = await accessKeys();
+  const request = studioRequester(worker, env, keys, await keys.token());
+  const originalFetch = globalThis.fetch;
+
+  try {
+    const draft = await createDraftFixture(request, "입력 검증");
+
+    const crossOrigin = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng, {
+        origin: "https://attacker.example",
+      }),
+    );
+    assert.equal(crossOrigin.status, 403);
+    assert.equal(images.calls.length, 0);
+
+    const oversizedEnvelope = await request("/studio/api/assets", {
+      method: "POST",
+      headers: {
+        "content-length": String(20 * 1024 * 1024 + 64 * 1024 + 1),
+        "content-type": "multipart/form-data; boundary=test-boundary",
+        origin: "https://staging.example",
+        "x-studio-request": "1",
+      },
+      body: "--test-boundary--\r\n",
+    });
+    assert.equal(oversizedEnvelope.status, 413);
+
+    const blankAlt = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng, { alt: "   " }),
+    );
+    assert.equal(blankAlt.status, 400);
+
+    images.result = { format: "gif", width: 1, height: 1 };
+    const gif = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, Buffer.from("GIF89a"), {
+        name: "animated.gif",
+        type: "image/gif",
+      }),
+    );
+    assert.equal(gif.status, 400);
+    assert.deepEqual(await gif.json(), { error: "unsupported_image_format" });
+
+    images.result = { format: "png", width: 8_000, height: 5_001 };
+    const tooManyPixels = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng),
+    );
+    assert.equal(tooManyPixels.status, 400);
+    assert.deepEqual(await tooManyPixels.json(), {
+      error: "invalid_image_dimensions",
+    });
+
+    images.result = { format: "png", width: 1, height: 1 };
+    const apng = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, animatedPng(), { name: "animated.png" }),
+    );
+    assert.equal(apng.status, 400);
+    assert.deepEqual(await apng.json(), {
+      error: "animated_image_not_allowed",
+    });
+
+    images.result = { format: "webp", width: 1, height: 1 };
+    const webp = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, animatedWebp(), {
+        name: "animated.webp",
+        type: "image/webp",
+      }),
+    );
+    assert.equal(webp.status, 400);
+    assert.deepEqual(await webp.json(), {
+      error: "animated_image_not_allowed",
+    });
+
+    images.result = { format: "png", width: 1, height: 1 };
+    const wrongOrder = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 1, staticPng),
+    );
+    assert.equal(wrongOrder.status, 409);
+    assert.deepEqual(await wrongOrder.json(), {
+      error: "asset_order_conflict",
+    });
+    assert.equal(
+      database.database.prepare("SELECT count(*) AS count FROM studio_assets")
+        .get().count,
+      0,
+    );
+
+    media.failPut = true;
+    const failedStorage = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng),
+    );
+    assert.equal(failedStorage.status, 503);
+    const failedBody = await failedStorage.json();
+    assert.match(failedBody.assetId, /^[0-9a-f-]{36}$/i);
+    const failedRow = database.database.prepare(`
+      SELECT status, private_source_key, discord_r2_key, public_r2_key
+      FROM studio_assets WHERE id = ?
+    `).get(failedBody.assetId);
+    assert.equal(failedRow.status, "failed");
+    assert.equal(media.objects.size, 0);
+
+    const listed = await request(`/studio/api/assets?postId=${draft.postId}`);
+    assert.equal(listed.status, 200);
+    const manifest = await listed.json();
+    assert.equal(manifest.assets.length, 1);
+    assert.equal(manifest.assets[0].assetId, failedBody.assetId);
+    assert.equal(manifest.assets[0].status, "failed");
+    assert.equal("privateSourceKey" in manifest.assets[0], false);
+    assert.equal("sourceSha256" in manifest.assets[0], false);
   } finally {
     globalThis.fetch = originalFetch;
     database.close();

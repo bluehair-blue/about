@@ -6,10 +6,12 @@ import {
   upsertDiscordRolePanel,
 } from "./discord-interactions";
 import { phaseAEnvironmentErrors, type PhaseAEnv } from "./phase-a-env";
+import { handleStudioAssetRequest } from "./studio-assets";
 import { handleStudioDraftRequest } from "./studio-drafts";
 
 const INTERACTIONS_PATH = "/api/discord/interactions";
 const DRAFTS_PATH = "/studio/api/drafts";
+const ASSETS_PATH = "/studio/api/assets";
 const STUDIO_WRITE_HEADER = "x-studio-request";
 type VinextContext = Parameters<typeof handler.fetch>[2];
 
@@ -39,12 +41,17 @@ function forbidden() {
   });
 }
 
-function isValidStudioWrite(request: Request) {
-  const contentType = request.headers.get("content-type")?.split(";", 1)[0];
+function isValidStudioWrite(request: Request, pathname: string) {
+  const contentType = request.headers.get("content-type") ?? "";
+  const validSourceUpload =
+    pathname === ASSETS_PATH &&
+    request.method === "POST" &&
+    /^multipart\/form-data\s*;\s*boundary=/iu.test(contentType);
   return (
     request.headers.get("origin") === new URL(request.url).origin &&
     request.headers.get(STUDIO_WRITE_HEADER) === "1" &&
-    contentType?.toLowerCase() === "application/json"
+    (validSourceUpload ||
+      contentType.split(";", 1)[0].toLowerCase() === "application/json")
   );
 }
 
@@ -86,7 +93,7 @@ const worker = {
         url.pathname.startsWith("/studio/api/") &&
         request.method !== "GET" &&
         request.method !== "HEAD" &&
-        !isValidStudioWrite(request)
+        !isValidStudioWrite(request, url.pathname)
       ) {
         return forbidden();
       }
@@ -103,6 +110,13 @@ const worker = {
 
       if (url.pathname === DRAFTS_PATH) {
         return privateResponse(await handleStudioDraftRequest(request, env));
+      }
+
+      if (
+        url.pathname === ASSETS_PATH ||
+        url.pathname.startsWith(`${ASSETS_PATH}/`)
+      ) {
+        return privateResponse(await handleStudioAssetRequest(request, env));
       }
 
       return privateResponse(

@@ -40,6 +40,10 @@ if (
   );
 }
 
+if (config.images?.binding !== "IMAGES") {
+  throw new Error(`Refusing ${target} deploy without the IMAGES binding`);
+}
+
 if (target === "staging" && config.routes?.length !== 0) {
   throw new Error("Refusing staging deploy with public routes");
 }

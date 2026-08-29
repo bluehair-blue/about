@@ -59,6 +59,7 @@
 
 .draftForm {
   display: grid;
+  gap: 1rem;
 }
 
 .card {
@@ -170,6 +171,83 @@
   font-weight: 700;
 }
 
+.assetList {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.assetItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 0.8rem;
+  background: rgb(5 7 13 / 48%);
+}
+
+.assetItem > div:first-child,
+.assetAlt {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.assetItem strong,
+.assetItem small {
+  overflow-wrap: anywhere;
+}
+
+.assetItem small,
+.assetState,
+.assetMessage,
+.assetItem > p[role="alert"] {
+  margin: 0;
+  color: #a8adbd;
+  font-size: 0.82rem;
+}
+
+.assetAlt span {
+  color: #dfe4f4;
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.assetAlt input {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 0.65rem;
+  color: inherit;
+  background: rgb(5 7 13 / 64%);
+  font: inherit;
+}
+
+.assetAlt input:focus-visible {
+  border-color: #8baaff;
+  outline: 2px solid rgb(139 170 255 / 30%);
+  outline-offset: 2px;
+}
+
+.assetButtons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.assetMessage {
+  margin-top: 1rem;
+  color: #cdd8ff;
+}
+
+.assetItem > p[role="alert"] {
+  grid-column: 1 / -1;
+  color: #ffbd8b;
+}
+
 .note {
   margin-top: 0.85rem;
   line-height: 1.6;
@@ -181,7 +259,8 @@
 
 .actions button,
 .saveBar button,
-.retryButton {
+.retryButton,
+.assetItem button {
   min-height: 2.75rem;
   padding: 0 1rem;
   border: 0;
@@ -228,12 +307,14 @@
 
 .actions button:focus-visible,
 .saveBar button:focus-visible,
-.retryButton:focus-visible {
+.retryButton:focus-visible,
+.assetItem button:focus-visible {
   outline: 2px solid #dfe4f4;
   outline-offset: 3px;
 }
 
-.actions button:disabled {
+.actions button:disabled,
+.assetItem button:disabled {
   color: #727788;
   background: #242733;
   cursor: wait;
@@ -265,6 +346,14 @@
   .saveBar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .assetItem {
+    grid-template-columns: 1fr;
+  }
+
+  .assetButtons {
+    flex-wrap: wrap;
   }
 
   .rolePanelAction {

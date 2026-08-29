@@ -7,6 +7,15 @@ export const draftTopics = [
 ] as const;
 
 export const draftSchemaVersion = 1;
+export const assetStatuses = [
+  "uploading",
+  "processing",
+  "ready",
+  "orphan",
+  "failed",
+  "deleting",
+] as const;
 
 export type DraftKind = (typeof draftKinds)[number];
 export type DraftTopic = (typeof draftTopics)[number];
+export type AssetStatus = (typeof assetStatuses)[number];

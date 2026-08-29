@@ -24,30 +24,6 @@ export default function StudioPage() {
 
       <div className={styles.form}>
         <DraftEditor />
-        <section className={styles.card} aria-labelledby="media-heading">
-          <div className={styles.sectionHeading}>
-            <div>
-              <p className={styles.step}>02</p>
-              <h2 id="media-heading">이미지</h2>
-            </div>
-            <p>JPEG · PNG · static WebP · 최대 10장</p>
-          </div>
-
-          <label className={styles.upload}>
-            <span>fixture 이미지 선택</span>
-            <input
-              type="file"
-              name="images"
-              accept="image/jpeg,image/png,image/webp"
-              multiple
-            />
-          </label>
-          <p className={styles.note}>
-            제목·본문·종류·주제는 staging D1에 자동 저장됩니다. 이미지별 alt와
-            순서, R2 업로드, Discord 전송은 다음 slice에서 활성화됩니다.
-          </p>
-        </section>
-
         <footer className={styles.actions}>
           <p>
             Access·same-origin 경계 안에서 draft revision과 Discord 역할 패널을

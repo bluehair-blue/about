@@ -15,6 +15,38 @@ export interface StudioD1 {
   batch(statements: StudioD1Statement[]): Promise<StudioD1Result[]>;
 }
 
+export interface StudioR2Object {
+  key: string;
+  size: number;
+}
+
+export interface StudioR2 {
+  get(key: string): Promise<unknown>;
+  put(
+    key: string,
+    value: ArrayBuffer | Blob | ReadableStream<Uint8Array>,
+    options?: {
+      onlyIf?: Headers;
+      httpMetadata?: { contentType?: string };
+      customMetadata?: Record<string, string>;
+      sha256?: ArrayBuffer | string;
+    },
+  ): Promise<StudioR2Object | null>;
+  delete(keys: string | string[]): Promise<void>;
+  list(options?: { prefix?: string; limit?: number }): Promise<unknown>;
+}
+
+export interface StudioImageInfo {
+  format: string;
+  fileSize?: number;
+  width: number;
+  height: number;
+}
+
+export interface StudioImages {
+  info(stream: ReadableStream<Uint8Array>): Promise<StudioImageInfo>;
+}
+
 export interface PhaseAEnv {
   ASSETS?: {
     fetch(request: Request): Promise<Response> | Response;
@@ -32,7 +64,8 @@ export interface PhaseAEnv {
   DISCORD_ANNOUNCEMENTS_CHANNEL_ID?: string;
   DISCORD_NOTIFY_ROLE_ID?: string;
   STUDIO_DB?: StudioD1;
-  STUDIO_MEDIA?: unknown;
+  STUDIO_MEDIA?: StudioR2;
+  IMAGES?: StudioImages;
   PUBLISH_QUEUE?: unknown;
 }
 
@@ -126,6 +159,9 @@ export function phaseAEnvironmentErrors(env: PhaseAEnv) {
   }
   if (!hasMethods(env.STUDIO_MEDIA, ["get", "put", "delete", "list"])) {
     errors.push("Missing STUDIO_MEDIA binding");
+  }
+  if (!hasMethods(env.IMAGES, ["info"])) {
+    errors.push("Missing IMAGES binding");
   }
   if (!hasMethods(env.PUBLISH_QUEUE, ["send"])) {
     errors.push("Missing PUBLISH_QUEUE binding");

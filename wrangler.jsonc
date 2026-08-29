@@ -6,6 +6,9 @@
   "assets": {
     "directory": "dist/client"
   },
+  "images": {
+    "binding": "IMAGES"
+  },
   "d1_databases": [
     {
       "binding": "STUDIO_DB",
@@ -41,6 +44,9 @@
   "env": {
     "staging": {
       "name": "about-staging",
+      "images": {
+        "binding": "IMAGES"
+      },
       "vars": {
         "CF_ACCESS_TEAM_DOMAIN": "https://green-cake-5dc9.cloudflareaccess.com",
         "CF_ACCESS_AUD": "6d8022a690a64c18fe67ba658ebc358a7b663f5a34272b1ee5150833f11929d9",

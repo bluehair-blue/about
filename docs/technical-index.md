@@ -32,7 +32,7 @@
 - 브라우저 상태: locale만 `localStorage`의 `hanparan-locale` 키에 저장
 - 공개 route 인증: 없음
 - Studio 인증: `worker/index.ts`가 `/studio*`의 Cloudflare Access JWT와 `/api/discord/interactions`의 Discord Ed25519 signature를 server에서 검증
-- 서버 저장소: direct Cloudflare의 production·staging D1·R2·Queue physical resource와 producer binding은 `wrangler.jsonc`에 분리 연결됨. staging D1에는 Phase A draft migration이 적용됐고 R2 asset pipeline과 Queue consumer·DLQ routing은 아직 미연결이라 해당 delivery 경로는 계속 fail closed함
+- 서버 저장소: direct Cloudflare의 production·staging D1·R2·Queue physical resource와 producer binding은 `wrangler.jsonc`에 분리 연결됨. staging D1에는 Phase A draft·asset manifest migration, Worker에는 Images info와 private R2 source ingest가 연결됨. image derivative와 Queue consumer·DLQ routing은 아직 미구현이라 asset은 `processing`에서 publish를 계속 fail closed함
 
 ## 직접 의존성
 
@@ -106,7 +106,7 @@ vinext()
 
 - [`worker/index.ts`](../worker/index.ts)는 공개 route의 Vinext App Router handler를 보존하는 얇은 wrapper다. `/studio*` Access·same-origin 경계와 `/api/discord/interactions`만 handler 앞에서 처리한다.
 - [`tooling/sites-vite-plugin.ts`](../tooling/sites-vite-plugin.ts)는 build 종료 시 `.openai/hosting.json`을 `dist/.openai/hosting.json`으로 복사한다.
-- `--mode staging` build는 Cloudflare Vite plugin이 `env.staging`을 직렬화하도록 `CLOUDFLARE_ENV=staging`을 설정한다. [`tooling/verify-deploy-target.mjs`](../tooling/verify-deploy-target.mjs)는 redirected Wrangler config의 target·Worker 이름·세 physical binding·staging 무경로 계약이 맞지 않으면 배포를 거부한다.
+- `--mode staging` build는 Cloudflare Vite plugin이 `env.staging`을 직렬화하도록 `CLOUDFLARE_ENV=staging`을 설정한다. [`tooling/verify-deploy-target.mjs`](../tooling/verify-deploy-target.mjs)는 redirected Wrangler config의 target·Worker 이름·세 physical binding·`IMAGES` binding·staging 무경로 계약이 맞지 않으면 배포를 거부한다. Wrangler environment는 `images`를 상속하지 않으므로 production과 `env.staging`에 각각 명시한다.
 - `CODEX_SANDBOX=seatbelt`일 때만 HMR polling을 켠다.
 - [`next.config.ts`](../next.config.ts)는 현재 활성 옵션이 없는 빈 계약이다.
 - `dist`, `.vinext`, `.wrangler`, `.next`, `node_modules`, `.env*`는 Git 추적 대상이 아니다.
@@ -146,7 +146,7 @@ vinext()
 ### Cloudflare 공개 서비스
 
 - Worker 이름: `about`
-- staging Worker 이름: `about-staging` (`env.staging`; Phase A Access 보호 Studio D1 draft editor와 Discord role panel action 배포됨)
+- staging Worker 이름: `about-staging` (`env.staging`; Phase A Access 보호 Studio D1 draft editor, private source ingest와 Discord role panel action 배포됨)
 - Worker entry: `dist/server/index.js`
 - 정적 자산: `dist/client`
 - compatibility date: `2026-05-15`
@@ -155,6 +155,7 @@ vinext()
 - `workers_dev`, preview URL, observability 활성화
 - `STUDIO_DB`: `about-studio-production` / staging `about-studio-staging`
 - `STUDIO_MEDIA`: `about-studio-media-production` / staging `about-studio-media-staging`
+- `IMAGES`: production / staging 환경에 각각 명시한 Cloudflare Images binding
 - `PUBLISH_QUEUE`: `about-studio-publish-production` / staging `about-studio-publish-staging`
 - publish DLQ는 두 environment에 생성되어 있으나 consumer handler와 retry 계약을 구현할 때 binding한다.
 
@@ -168,7 +169,7 @@ vinext()
 
 ## 테스트·완료 계약
 
-`tests/rendered-html.test.mjs`와 `tests/studio-runtime.test.mjs`는 빌드된 Worker를 직접 import한다. 전자는 `/` HTML을 렌더하고 후자는 mock binding·서명 key와 실제 SQLite migration adapter로 Phase A 보안·draft revision 경계를 검증한다.
+`tests/rendered-html.test.mjs`와 `tests/studio-runtime.test.mjs`는 빌드된 Worker를 직접 import한다. 전자는 `/` HTML을 렌더하고 후자는 mock binding·서명 key와 실제 SQLite migration adapter로 Phase A 보안·draft revision·source ingest 경계를 검증한다.
 
 - HTTP 200과 HTML content type
 - 기본 `<html lang="ko">`와 ko/ja/en copy
@@ -181,6 +182,7 @@ vinext()
 - Access JWT signature·issuer·audience·expiry·관리자 email과 same-origin JSON write 경계
 - Discord Ed25519 signature·5분 timestamp·PING·role add/remove·guild/channel/message/component allowlist
 - Phase A migration SQL, draft create·restore·update, stale revision 409 후 불변성, active draft 고유 제약
+- source MIME·dimension·animation·alt·order·request size, private R2 exact key·SHA·metadata, D1 asset manifest, 삭제 재정렬·멱등 재시도와 R2 put 실패 복구 상태
 
 완료 조건:
 
