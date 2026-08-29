@@ -1,6 +1,6 @@
 # Phase A — Studio Console ↔ Discord vertical slice
 
-> 상태: 착수 전
+> 상태: 진행 중 — Access·Discord BOT TEST·staging D1 draft·role panel 연결 완료, Forum·asset·Queue delivery 미구현
 >
 > 목적: 관리자 전용 test 환경에서 Studio 입력 한 건이 Discord Forum에 생성·수정·삭제되는 실제 delivery 계약을 증명한다.
 >
@@ -79,7 +79,7 @@ Markdown은 문단·줄바꿈·굵게·기울임·취소선·목록·인용·inl
    - 누락·중복·production ID가 하나라도 있으면 시작을 거부한다.
 3. **Access 보호**
    - `/studio`, `/studio/*`, `/studio/api/*`에서 Access JWT signature·`iss`·`aud`·expiry·정확한 관리자 email을 server에서 검증한다.
-   - write는 same-origin JSON과 custom request header만 허용하고 CORS를 열지 않는다.
+   - write는 same-origin JSON과 `X-Studio-Request: 1`만 허용하고 CORS를 열지 않는다.
 4. **Discord interaction 경계**
    - raw body parse 전에 Ed25519 signature와 timestamp를 검증한다.
    - PING과 test role add·remove button만 구현하고 3초 안에 ephemeral 응답한다.
@@ -118,22 +118,34 @@ Markdown은 문단·줄바꿈·굵게·기울임·취소선·목록·인용·inl
 
 ## 7. 완료 증거
 
-- [ ] Access 비인증 page·write 요청이 거부됨
-- [ ] PING, 유효·무효 signature, 3초 이내 ephemeral 응답 확인
-- [ ] role add·remove와 정확한 role allowlist 확인
+- [x] Access 비인증 page·write 요청이 거부됨
+- [x] PING, 유효·무효 signature, 3초 이내 ephemeral 응답 확인
+- [x] role add·remove와 정확한 role allowlist 확인
+- [x] staging D1 migration과 draft create → restore → revision update → stale conflict 불변성 확인
 - [ ] 한 fixture의 create → update → attachment/tag 교체 → delete 확인
 - [ ] delete 재시도 404와 Queue retry·DLQ 확인
 - [ ] R2 날짜·post ID·제목 prefix 검색과 D1 exact-key 삭제 확인
 - [ ] test resource 밖의 D1 row·R2 object·Queue depth가 변하지 않음
-- [ ] `npm run lint`와 `npm test` 통과
-- [ ] `dist/server/index.js`, `dist/client`, `dist/.openai/hosting.json` 존재
-- [ ] secret과 `.dev.vars`가 build output에 없음
+- [x] `npm run lint`와 `npm test` 통과
+- [x] `dist/server/index.js`, `dist/client`, `dist/.openai/hosting.json` 존재
+- [x] secret과 `.dev.vars`가 build output에 없음
 
 ## 8. 완료 기록
 
-- commit: 미기록
-- staging origin: 미기록
-- Discord fixture/thread: 미기록
+- baseline: `4e345013961c1d430a2017f65b83bee6e99bc508` · Node `v25.5.0` · npm `11.8.0`
+- local slice: Phase A environment/binding 존재·형식·중복 preflight, Access JWT, same-origin write, Discord PING·role add/remove 경계, 보호된 Studio editor와 role panel upsert action. editor는 title·body·kind·topic을 1.5초 debounce와 `Ctrl/Cmd+S`로 저장하고 IME 조합 중에는 저장하지 않으며 stale revision에서 로컬 입력을 보존한 채 자동 저장을 중단함
+- local verification: build된 Worker 회귀 test로 누락 preflight, 유효·무효 Access JWT, 유효·무효 Discord signature, 5분 timestamp, exact target allowlist와 role panel create 경계를 확인함. 실제 SQLite에 production과 같은 migration SQL을 적용해 draft create·restore·update·stale conflict 후 본문·topic 불변성과 active draft 고유 제약을 검증했으며 lint와 전체 test 11개가 통과함
+- Cloudflare bootstrap: `about-studio-{staging,production}` D1, `about-studio-media-{staging,production}` R2, `about-studio-publish-{staging,production}` Queue와 `about-studio-publish-dlq-{staging,production}` DLQ를 각각 생성함. 생성 직후 D1은 table 0개, Queue는 producer·consumer 0개이며 기존 `about` Worker는 배포하지 않음
+- Cloudflare Access bootstrap: Zero Trust Free 구독, staging self-hosted Access application·AUD와 관리자 email 한 주소 Allow policy를 연결함. Worker에서 Access JWT issuer·audience·email·signature를 검증하며 `/studio` authorized render를 실제 origin에서 확인함
+- Discord bootstrap: `Studio Bot Test` application·Bot을 생성하고 User Install을 끄고 Guild Install만 유지했으며 privileged Gateway Intent를 모두 끔. 최소 권한 Bot을 `한파란 TEST` server의 비공개 `BOT TEST` surface에 설치하고 start·announcements·Forum channel과 test notify role을 staging allowlist에 연결함. Bot token은 `about-staging`의 secret으로만 저장함
+- binding verification: `wrangler.jsonc`의 production·`env.staging`이 동일한 `STUDIO_DB`·`STUDIO_MEDIA`·`PUBLISH_QUEUE` 논리 이름과 서로 다른 physical resource를 가리킴. 기본 build의 redirected Wrangler config가 `--env staging`을 무시하는 위험을 재현했고, staging build mode·deploy target guard로 고쳐 dry-run에서 staging 세 binding만 확인함
+- staging D1 draft: `0001_phase_a_drafts.sql`을 `about-studio-staging`에 적용함. Phase B가 이어 쓰는 `studio_posts`, `studio_post_versions`, `studio_taxonomy`, `studio_post_version_topics`와 active draft partial unique index만 만들었고 taxonomy 6개를 seed함. 적용 직후 post·version·topic link는 모두 0개이고 `PRAGMA foreign_key_check` 결과는 비어 있으며 production D1은 table 0개를 유지함
+- staging Worker bootstrap: Phase A 앱을 `about-staging`에 배포함. Cloudflare Workers에서 지원하지 않는 JWKS fetch의 `redirect: "error"`가 Access 검증을 `Forbidden`으로 만들던 원인을 `redirect: "manual"`과 non-2xx 거부로 고쳐 fail closed를 유지했고, `/studio` authorized render를 확인함. D1 draft editor 배포 version은 `6ec74c8e-4bbe-4621-a056-5150ae0f7fcc`
+- role panel verification: protected Studio action이 `#bot-test-start`에 message `1543216853948698666`을 생성한 뒤 ID를 staging allowlist에 고정함. 재배포 후 같은 action이 새 message를 만들지 않고 기존 message를 PATCH해 `연결됨`을 반환했으며 Discord desktop에서 정확한 본문·`알림 받기`·`알림 끄기` component와 수정 표시를 확인함. HTTP Interaction endpoint의 PING 등록과 live component signature 경계가 동작하는 상태에서 실제 관리자 계정으로 add를 2회 실행해 두 번 모두 `알림을 켰어요.`, remove를 2회 실행해 두 번 모두 `알림을 껐어요.` ephemeral 응답을 3초 이내에 받았고, 최종 member row에 `Bot Test 알림` role이 남지 않음을 확인함. invalid signature는 build된 Worker 회귀 test에서 거부됨
+- external state remaining: 실제 browser의 한국어 IME·debounce·reload restore 확인, asset pipeline, Forum delivery, Queue consumer·retry·DLQ, production ID 거부 비교와 member row·token·user log 비저장 audit가 미완료
+- commit: 구현 commit 미기록
+- staging origin: `https://about-staging.odeye3217.workers.dev/studio`
+- Discord fixture/thread: role panel `1543216853948698666`; Forum fixture/thread 미기록
 - attachment budget: 미확정
 - Go/No-Go: 미통과
 

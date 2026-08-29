@@ -1,0 +1,273 @@
+.shell {
+  min-height: 100svh;
+  padding: clamp(1.5rem, 4vw, 4rem);
+  color: #f4f6fb;
+  background:
+    radial-gradient(circle at 82% 4%, rgb(65 100 255 / 24%), transparent 30rem),
+    #090b12;
+}
+
+.header,
+.sectionHeading,
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.header {
+  width: min(100%, 72rem);
+  margin: 0 auto 2.5rem;
+}
+
+.header h1,
+.sectionHeading h2,
+.header p,
+.sectionHeading p,
+.actions p,
+.note {
+  margin: 0;
+}
+
+.header h1 {
+  font-size: clamp(2.25rem, 6vw, 5rem);
+  letter-spacing: -0.06em;
+}
+
+.eyebrow,
+.step {
+  color: #8baaff;
+  font: 700 0.75rem/1.4 ui-monospace, monospace;
+  letter-spacing: 0.14em;
+}
+
+.status {
+  padding: 0.65rem 0.9rem;
+  border: 1px solid rgb(139 170 255 / 42%);
+  border-radius: 999px;
+  color: #cdd8ff;
+  font-size: 0.85rem;
+}
+
+.form {
+  display: grid;
+  width: min(100%, 72rem);
+  margin: 0 auto;
+  gap: 1rem;
+}
+
+.draftForm {
+  display: grid;
+}
+
+.card {
+  padding: clamp(1.25rem, 3vw, 2.25rem);
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 1.25rem;
+  background: rgb(255 255 255 / 5%);
+  box-shadow: 0 1.5rem 5rem rgb(0 0 0 / 28%);
+}
+
+.sectionHeading {
+  align-items: flex-end;
+  margin-bottom: 1.75rem;
+}
+
+.sectionHeading h2 {
+  font-size: clamp(1.25rem, 3vw, 2rem);
+}
+
+.sectionHeading > p,
+.note,
+.actions p {
+  color: #a8adbd;
+  font-size: 0.9rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 1rem;
+  color: #dfe4f4;
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+.field small {
+  color: #8f96aa;
+  font: 500 0.78rem/1.4 ui-monospace, monospace;
+}
+
+.field input,
+.field textarea,
+.upload {
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 0.8rem;
+  color: inherit;
+  background: rgb(5 7 13 / 64%);
+}
+
+.field input,
+.field textarea {
+  width: 100%;
+  padding: 0.9rem 1rem;
+  font: inherit;
+}
+
+.field textarea {
+  resize: vertical;
+  line-height: 1.65;
+}
+
+.field input:focus-visible,
+.field textarea:focus-visible,
+.upload:focus-within {
+  border-color: #8baaff;
+  outline: 2px solid rgb(139 170 255 / 30%);
+  outline-offset: 2px;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.split fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 0.8rem;
+}
+
+.split legend {
+  padding: 0 0.35rem;
+  color: #dfe4f4;
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+.split label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #c7ccda;
+  font-size: 0.9rem;
+}
+
+.upload {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1.25rem;
+  cursor: pointer;
+}
+
+.upload span {
+  font-weight: 700;
+}
+
+.note {
+  margin-top: 0.85rem;
+  line-height: 1.6;
+}
+
+.actions {
+  padding: 1rem 0;
+}
+
+.actions button,
+.saveBar button,
+.retryButton {
+  min-height: 2.75rem;
+  padding: 0 1rem;
+  border: 0;
+  border-radius: 999px;
+  color: #090b12;
+  background: #8baaff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 750;
+}
+
+.saveBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid rgb(255 255 255 / 10%);
+}
+
+.saveBar p {
+  margin: 0;
+  font: 650 0.82rem/1.5 ui-monospace, monospace;
+}
+
+.saveStatus {
+  color: #cdd8ff;
+}
+
+.conflictStatus {
+  color: #ffbd8b;
+}
+
+.saveBar button:disabled {
+  color: #727788;
+  background: #242733;
+  cursor: not-allowed;
+}
+
+.retryButton {
+  margin-bottom: 0.75rem;
+}
+
+.actions button:focus-visible,
+.saveBar button:focus-visible,
+.retryButton:focus-visible {
+  outline: 2px solid #dfe4f4;
+  outline-offset: 3px;
+}
+
+.actions button:disabled {
+  color: #727788;
+  background: #242733;
+  cursor: wait;
+}
+
+.rolePanelAction {
+  display: grid;
+  justify-items: end;
+  gap: 0.5rem;
+}
+
+.rolePanelAction p {
+  color: #cdd8ff;
+  font: 650 0.8rem/1.4 ui-monospace, monospace;
+}
+
+@media (max-width: 46rem) {
+  .header,
+  .sectionHeading,
+  .actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .split {
+    grid-template-columns: 1fr;
+  }
+
+  .saveBar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .rolePanelAction {
+    justify-items: start;
+  }
+}

@@ -11,7 +11,7 @@ const localBindingConfig = {
   compatibility_flags: ["nodejs_compat"],
 };
 
-export default defineConfig(async ({ command }) => {
+export default defineConfig(async ({ command, mode }) => {
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";
@@ -21,6 +21,10 @@ export default defineConfig(async ({ command }) => {
   // The Cloudflare plugin otherwise serializes local dotenv secrets into the
   // deployable server output. Development still loads `.env*` as usual.
   if (command === "build") {
+    if (mode === "staging") {
+      process.env.CLOUDFLARE_ENV = "staging";
+    }
+
     const localDevVarFiles = (await readdir(".")).filter(
       (name) => name === ".dev.vars" || name.startsWith(".dev.vars."),
     );

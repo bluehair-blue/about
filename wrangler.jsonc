@@ -6,6 +6,27 @@
   "assets": {
     "directory": "dist/client"
   },
+  "d1_databases": [
+    {
+      "binding": "STUDIO_DB",
+      "database_name": "about-studio-production",
+      "database_id": "15698560-789e-483b-89dd-54ba8ab78093"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "STUDIO_MEDIA",
+      "bucket_name": "about-studio-media-production"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "PUBLISH_QUEUE",
+        "queue": "about-studio-publish-production"
+      }
+    ]
+  },
   "routes": [
     {
       "pattern": "about.bluehair.blue",
@@ -16,5 +37,45 @@
   "preview_urls": true,
   "observability": {
     "enabled": true
+  },
+  "env": {
+    "staging": {
+      "name": "about-staging",
+      "vars": {
+        "CF_ACCESS_TEAM_DOMAIN": "https://green-cake-5dc9.cloudflareaccess.com",
+        "CF_ACCESS_AUD": "6d8022a690a64c18fe67ba658ebc358a7b663f5a34272b1ee5150833f11929d9",
+        "STUDIO_ADMIN_EMAIL": "odeye3217@gmail.com",
+        "DISCORD_APPLICATION_ID": "1543135676873052190",
+        "DISCORD_APPLICATION_PUBLIC_KEY": "0ea41df30fc04aaa431e93e17614e835d6bb1cf0cc81a9857e5b379e297179e2",
+        "DISCORD_GUILD_ID": "1543144659243630623",
+        "DISCORD_START_CHANNEL_ID": "1543147311197192222",
+        "DISCORD_ROLE_PANEL_MESSAGE_ID": "1543216853948698666",
+        "DISCORD_FORUM_CHANNEL_ID": "1543147628605472858",
+        "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": "1543147430189465691",
+        "DISCORD_NOTIFY_ROLE_ID": "1543147861443616778"
+      },
+      "d1_databases": [
+        {
+          "binding": "STUDIO_DB",
+          "database_name": "about-studio-staging",
+          "database_id": "db93207e-34eb-4369-9aba-b0b2cc193c1d"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "STUDIO_MEDIA",
+          "bucket_name": "about-studio-media-staging"
+        }
+      ],
+      "queues": {
+        "producers": [
+          {
+            "binding": "PUBLISH_QUEUE",
+            "queue": "about-studio-publish-staging"
+          }
+        ]
+      },
+      "routes": []
+    }
   }
 }
