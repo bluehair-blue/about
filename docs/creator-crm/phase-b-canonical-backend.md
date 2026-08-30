@@ -1,6 +1,6 @@
 # Phase B — canonical publishing backend
 
-> 상태: 진행 중 — 1–3. schema·D1 domain helper·taxonomy local 완료, staging 적용 대기
+> 상태: 진행 중 — 1–4. schema·D1 domain helper·taxonomy·asset manifest/retention local 완료, staging 적용 대기
 >
 > 목적: D1/R2를 유일한 기준 원본으로 만들고 Studio Console의 초안·이미지·게시·수정·보관 작업을 완성한다.
 >
@@ -86,6 +86,7 @@ post lifecycle:
 - public media route는 `published` current version이 참조한 Portfolio derivative만 반환
 - R2 key identity는 D1 manifest의 exact key이며 title prefix로 재조합하지 않음
 - orphan upload 7일, superseded metadata·derivative 30일; 값이 없거나 잘못되면 cleanup 중단
+- global single-file purge에 필요한 public origin·Cloudflare zone ID·API token이 없거나 잘못되면 cleanup 중단
 
 R2 key:
 
@@ -107,7 +108,7 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 3. **taxonomy — local 완료**
    - 초기 kind·topic seed와 Discord tag ID mapping을 넣는다.
    - add·rename·reorder·archive를 구현하되 stable key는 바꾸지 않는다.
-4. **asset manifest와 cleanup**
+4. **asset manifest와 cleanup — local 완료**
    - upload 상태 `uploading / processing / ready / orphan / failed / deleting`을 복원 가능하게 저장한다.
    - exact-key delete, prefix empty 검증과 public cache purge를 구현한다.
 5. **draft autosave**
@@ -164,14 +165,15 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 
 ## 9. 완료 기록
 
-- commit: schema·D1 domain helper `b5d2a33`; taxonomy는 본 checkpoint
+- commit: schema·D1 domain helper `b5d2a33`; taxonomy `e58dbfa`; asset manifest/retention은 현재 local working tree checkpoint
 - migration: `0004_phase_b_canonical_schema.sql`. Phase A 7-table row를 보존하는 outbox rebuild와 notification·cache 작업 pair, pointer·outbox post ownership, 승인본과 job-bound candidate snapshot·state·delete 및 outbox identity 불변성, active delivery 중 비검증 current·Discord mapping 이동 차단, topic·asset 상한과 같은-post asset, 단일 pin·Hero rank, lowercase SHA-256, version·asset cleanup·reverse asset·delivery query index를 추가함. fresh `0001`–`0004`와 기존 `0001`–`0003` 정상 row upgrade를 local SQLite에서 재현하고, 기존 비정상 hash·taxonomy·asset/outbox ownership row와 진행 중인 구형 Discord create/update job은 rebuild 전에 fail closed함. `PRAGMA foreign_key_check`와 representative `EXPLAIN QUERY PLAN`을 통과했고 Wrangler local migration ledger에서도 적용 뒤 재실행이 `No migrations to apply`로 끝남. remote staging·production에는 아직 미적용
 - D1 domain helper: `worker/studio-domain.ts`가 draft create·revision CAS, exact draft/topic/asset snapshot 기반 candidate와 outbox 생성, archive 시작, 검증 완료 delivery의 current pointer finalization만 소유함. Discord·R2·Queue I/O는 기존 runtime에 유지함. 게시 준비와 no-change 판정 중 revision/source/topic/asset 또는 mapping이 바뀌면 candidate·job·`publishing` 전이를 모두 거부하고, active delivery 중 검증 job과 일치하지 않는 current/mapping 이동을 DB에서도 막음. job payload의 exact asset manifest를 처리 전에 다시 대조하며, Queue send와 실패 기록이 함께 실패해 `queued` outbox만 남아도 관리자 retry로 다시 enqueue할 수 있음. `finalizing` 재시도는 delivery 상태를 `queued`로 되돌리지 않아 Discord create/update/delete를 반복하지 않고 D1 finalization만 다시 수행함
 - taxonomy: forward migration `0005_phase_b_taxonomy.sql`이 `stable_key`·dimension 불변, kind lifecycle의 명시적 migration 요구, active label·Discord snowflake 제약과 post 없는 전역 taxonomy outbox 한 건의 직렬화를 추가함. `/studio/api/taxonomy`는 기존 Access·same-origin write 경계를 재사용해 list·topic add·label rename·dimension reorder·topic archive·sync retry를 제공하고, 동적 active topic을 draft save에서도 허용함. Queue consumer는 D1 active catalog 전체를 Discord Forum `available_tags` 한 묶음으로 PATCH한 뒤 fresh GET의 ID·label·순서를 검증하고 mapping과 job을 함께 완료함. archive된 topic은 새 draft와 Forum 선택지에서는 제외하되 과거 version link와 마지막 tag ID는 보존함. publish는 label 추측 대신 저장된 tag ID와 fresh remote label이 모두 일치할 때만 진행함. local SQLite와 fake Forum에서 add → rename → reorder → archive, Queue send 실패, 429, processing 중복·stale lease 복구를 검증했으며 remote staging에는 아직 미적용
-- rollback: Wrangler migration ledger로 한 번만 적용한다. 원격 적용 뒤 `0004`를 수정·삭제하거나 이전 migration을 재실행하지 않고, 문제가 생기면 영향 trigger·index 또는 outbox CHECK를 되돌리는 새 forward migration을 작성한다
+- asset manifest/retention: forward migration `0006_phase_b_asset_manifest_cleanup.sql`이 세 R2 key의 asset ID 기반 exact identity와 cross-role collision 차단, `ready` 파생본 manifest 완전성, 승인 snapshot의 manifest 불변성, 최초 게시 시각의 비가역 marker와 current pointer gate를 추가함. 게시 payload는 public·Discord key/bytes/SHA-256을 함께 고정하고 Queue 처리 전과 Discord 검증 뒤 finalization 직전에 두 R2 object를 다시 읽어 byte/hash를 검증하므로 public 파생본이 없거나 바뀌면 기존 current를 유지함. 편집기 삭제는 미게시·무참조 asset을 즉시 지우지 않고 `orphaned_at`을 기록하며, `/studio/api/assets/cleanup`은 검증된 7일·30일 environment value로 미게시 orphan과 superseded version 후보를 outbox에만 등록함. consumer는 삭제 직전 D1 reference·active job·retention을 재검증하고 exact R2 delete → strong read → asset prefix 검사 → Cloudflare global single-file purge 뒤에만 manifest 또는 rollback metadata를 완료함. 30일 superseded cleanup은 old public·Discord derivative와 version snapshot만 제거하고 `first_published_at`이 있는 private source와 exact key manifest는 private archive로 보존하며, version metadata 삭제 뒤 R2 실패도 surviving job payload로 재개함. local SQLite/fake R2/Cloudflare API에서 missing public derivative, conditional derivative collision, 7일 이전 보존, 잘못되거나 누락된 cleanup configuration의 fail-closed, residual prefix, R2 실패·재시도, 보존기간 연장 후 재개 차단과 30일 version cleanup 재개를 검증함. Wrangler local ledger에서도 fresh `0001`–`0006` 적용과 재실행 `No migrations to apply`를 확인함. `STUDIO_PUBLIC_ORIGIN`, `CLOUDFLARE_ZONE_ID`, secret `CLOUDFLARE_CACHE_PURGE_TOKEN`의 staging 설정과 global purge·scheduled trigger·remote D1/R2 실행 증거는 staging 운영 단계에 남김
+- rollback: Wrangler migration ledger로 한 번만 적용한다. 원격 적용 뒤 `0004`–`0006`을 수정·삭제하거나 이전 migration을 재실행하지 않고, 문제가 생기면 영향 trigger·index 또는 outbox CHECK를 되돌리는 새 forward migration을 작성한다
 - staging publish/update fixture: 미기록
 - archive/restore/purge fixture: 미기록
-- Go/No-Go: schema·D1 domain helper·taxonomy 단계 local Go. Phase B 전체와 staging migration은 미통과
+- Go/No-Go: schema·D1 domain helper·taxonomy·asset manifest/retention 단계 local Go. Phase B 전체와 staging migration은 미통과
 
 ## 다음 Phase
 

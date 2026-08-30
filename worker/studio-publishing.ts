@@ -48,6 +48,9 @@ type PublishAsset = {
   status: string;
   ordinal: number;
   alt: string;
+  public_r2_key: string;
+  public_bytes: number | null;
+  public_sha256: string | null;
   discord_r2_key: string;
   discord_bytes: number | null;
   discord_sha256: string | null;
@@ -163,6 +166,7 @@ async function loadDraftSnapshot(database: StudioD1, postId: string) {
   const [assetRows, topicRows, taxonomyRows] = await Promise.all([
     database.prepare(`
       SELECT asset.id, asset.status, selected.ordinal, selected.alt,
+        asset.public_r2_key, asset.public_bytes, asset.public_sha256,
         asset.discord_r2_key, asset.discord_bytes, asset.discord_sha256
       FROM studio_post_version_assets AS selected
       JOIN studio_assets AS asset ON asset.id = selected.asset_id
@@ -283,6 +287,8 @@ async function preparePublish(
   if (
     snapshot.assets.some((asset) =>
       asset.status !== "ready" ||
+      !asset.public_bytes ||
+      !asset.public_sha256 ||
       !asset.discord_bytes ||
       !asset.discord_sha256
     )
@@ -348,6 +354,9 @@ async function preparePublish(
       id: asset.id,
       ordinal: asset.ordinal,
       alt: asset.alt,
+      publicR2Key: asset.public_r2_key,
+      publicBytes: asset.public_bytes as number,
+      publicSha256: asset.public_sha256 as string,
       discordR2Key: asset.discord_r2_key,
       discordBytes: asset.discord_bytes as number,
       discordSha256: asset.discord_sha256 as string,
@@ -601,6 +610,9 @@ type DeliveryAsset = {
   status: string;
   ordinal: number;
   alt: string;
+  public_r2_key: string;
+  public_bytes: number;
+  public_sha256: string;
   discord_r2_key: string;
   discord_bytes: number;
   discord_sha256: string;
@@ -637,6 +649,13 @@ function parsePayloadAssets(value: unknown): PublishCandidateAsset[] | null {
       !Number.isSafeInteger(item.ordinal) ||
       item.ordinal < 0 ||
       typeof item.alt !== "string" ||
+      typeof item.publicR2Key !== "string" ||
+      item.publicR2Key === "" ||
+      typeof item.publicBytes !== "number" ||
+      !Number.isSafeInteger(item.publicBytes) ||
+      item.publicBytes < 1 ||
+      typeof item.publicSha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(item.publicSha256) ||
       typeof item.discordR2Key !== "string" ||
       item.discordR2Key === "" ||
       typeof item.discordBytes !== "number" ||
@@ -651,6 +670,9 @@ function parsePayloadAssets(value: unknown): PublishCandidateAsset[] | null {
       id: item.id,
       ordinal: item.ordinal,
       alt: item.alt,
+      publicR2Key: item.publicR2Key,
+      publicBytes: item.publicBytes,
+      publicSha256: item.publicSha256,
       discordR2Key: item.discordR2Key,
       discordBytes: item.discordBytes,
       discordSha256: item.discordSha256,
@@ -732,7 +754,9 @@ async function loadDeliveryAssets(
 ) {
   if (!job.version_id) return [];
   const rows = await database.prepare(`
-    SELECT asset.id, asset.status, selected.ordinal, selected.alt, asset.discord_r2_key,
+    SELECT asset.id, asset.status, selected.ordinal, selected.alt,
+      asset.public_r2_key, asset.public_bytes, asset.public_sha256,
+      asset.discord_r2_key,
       asset.discord_bytes, asset.discord_sha256
     FROM studio_post_version_assets AS selected
     JOIN studio_assets AS asset ON asset.id = selected.asset_id
@@ -748,6 +772,9 @@ async function loadDeliveryAssets(
         asset.id !== expected.id ||
         asset.ordinal !== expected.ordinal ||
         asset.alt !== expected.alt ||
+        asset.public_r2_key !== expected.publicR2Key ||
+        asset.public_bytes !== expected.publicBytes ||
+        asset.public_sha256 !== expected.publicSha256 ||
         asset.discord_r2_key !== expected.discordR2Key ||
         asset.discord_bytes !== expected.discordBytes ||
         asset.discord_sha256 !== expected.discordSha256;
@@ -759,20 +786,42 @@ async function loadDeliveryAssets(
   for (const asset of assets) {
     if (
       asset.status !== "ready" ||
+      !Number.isSafeInteger(asset.public_bytes) ||
+      asset.public_bytes < 1 ||
+      typeof asset.public_sha256 !== "string" ||
       !Number.isSafeInteger(asset.discord_bytes) ||
       asset.discord_bytes < 1 ||
       typeof asset.discord_sha256 !== "string"
     ) {
       throw new Error("assets_not_ready");
     }
-    const object = await media.get(asset.discord_r2_key);
-    if (!object) throw new Error("discord_derivative_missing");
-    const bytes = await object.arrayBuffer();
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    const hash = Array.from(new Uint8Array(digest), (byte) =>
+    const [publicObject, discordObject] = await Promise.all([
+      media.get(asset.public_r2_key),
+      media.get(asset.discord_r2_key),
+    ]);
+    if (!publicObject) throw new Error("public_derivative_missing");
+    if (!discordObject) throw new Error("discord_derivative_missing");
+    const [publicBytes, bytes] = await Promise.all([
+      publicObject.arrayBuffer(),
+      discordObject.arrayBuffer(),
+    ]);
+    const [publicDigest, discordDigest] = await Promise.all([
+      crypto.subtle.digest("SHA-256", publicBytes),
+      crypto.subtle.digest("SHA-256", bytes),
+    ]);
+    const publicHash = Array.from(new Uint8Array(publicDigest), (byte) =>
       byte.toString(16).padStart(2, "0")
     ).join("");
-    if (bytes.byteLength !== asset.discord_bytes || hash !== asset.discord_sha256) {
+    const discordHash = Array.from(new Uint8Array(discordDigest), (byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("");
+    if (
+      publicBytes.byteLength !== asset.public_bytes ||
+      publicHash !== asset.public_sha256
+    ) {
+      throw new Error("public_derivative_mismatch");
+    }
+    if (bytes.byteLength !== asset.discord_bytes || discordHash !== asset.discord_sha256) {
       throw new Error("discord_derivative_mismatch");
     }
     loaded.push({
@@ -1152,7 +1201,7 @@ async function verifyDiscordDelivery(
         updated_at = ?
       WHERE id = ? AND status = 'verifying'
     `).bind(finalizedAt, job.id).run();
-    return finalizeDiscordDelivery(job.id, database);
+    return finalizeDiscordDelivery(job.id, database, env.STUDIO_MEDIA);
   }
 
   const checkedThread = await verificationResponse(
@@ -1218,12 +1267,13 @@ async function verifyDiscordDelivery(
     job.id,
   ).run();
   if (verified.meta?.changes !== 1) throw new Error("delivery_manifest_unavailable");
-  return finalizeDiscordDelivery(job.id, database);
+  return finalizeDiscordDelivery(job.id, database, env.STUDIO_MEDIA);
 }
 
 async function finalizeDiscordDelivery(
   jobId: string,
   database: StudioD1,
+  media?: StudioR2,
 ): Promise<StudioQueueOutcome> {
   const job = await loadDeliveryJob(database, jobId);
   if (!job || job.status !== "finalizing") return { action: "ack" };
@@ -1273,6 +1323,8 @@ async function finalizeDiscordDelivery(
     await setJobState(database, job.id, "outcome_unknown", "discord_mapping_missing");
     return { action: "ack" };
   }
+  if (!media) throw new Error("asset_storage_unavailable");
+  await loadDeliveryAssets(database, media, job, payload.assets);
   const finalized = await finalizeVerifiedDelivery(database, {
     kind: "publish",
     jobId: job.id,
@@ -1308,7 +1360,7 @@ export async function processStudioDiscordJob(
       UPDATE delivery_jobs SET attempts = attempts + 1, updated_at = ?
       WHERE id = ? AND status = 'finalizing'
     `).bind(new Date().toISOString(), job.id).run();
-    return finalizeDiscordDelivery(job.id, database);
+    return finalizeDiscordDelivery(job.id, database, env.STUDIO_MEDIA);
   }
   if (job.status === "verifying") {
     await database.prepare(`

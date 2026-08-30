@@ -28,6 +28,9 @@ export type PublishCandidateAsset = {
   id: string;
   ordinal: number;
   alt: string;
+  publicR2Key: string;
+  publicBytes: number;
+  publicSha256: string;
   discordR2Key: string;
   discordBytes: number;
   discordSha256: string;
@@ -327,6 +330,9 @@ function publishSnapshotMatch(input: PublishCandidateInput) {
         AND selected_asset.ordinal = ?
         AND selected_asset.alt = ?
         AND asset.status = 'ready'
+        AND asset.public_r2_key = ?
+        AND asset.public_bytes = ?
+        AND asset.public_sha256 = ?
         AND asset.discord_r2_key = ?
         AND asset.discord_bytes = ?
         AND asset.discord_sha256 = ?
@@ -386,6 +392,9 @@ function publishSnapshotMatch(input: PublishCandidateInput) {
         asset.id,
         asset.ordinal,
         asset.alt,
+        asset.publicR2Key,
+        asset.publicBytes,
+        asset.publicSha256,
         asset.discordR2Key,
         asset.discordBytes,
         asset.discordSha256,
@@ -592,7 +601,8 @@ export async function queueArchive(
   const results = await database.batch([
     database.prepare(`
       UPDATE studio_posts
-      SET status = 'archiving', discord_delivery_state = 'queued', updated_at = ?
+      SET status = 'archiving', pinned_at = NULL, hero_rank = NULL,
+        discord_delivery_state = 'queued', updated_at = ?
       WHERE id = ?
         AND status = 'published'
         AND current_version_id = ?
@@ -795,6 +805,37 @@ async function finalizePublish(
       ),
     );
   }
+  statements.push(
+    database.prepare(`
+      UPDATE studio_assets
+      SET first_published_at = coalesce(first_published_at, ?), updated_at = ?
+      WHERE first_published_at IS NULL
+        AND id IN (
+          SELECT asset_id
+          FROM studio_post_version_assets
+          WHERE version_id = ?
+        )
+        AND EXISTS (
+          SELECT 1
+          FROM studio_post_versions
+          WHERE id = ? AND post_id = ? AND state = 'published'
+        )
+        AND EXISTS (
+          SELECT 1
+          FROM delivery_jobs
+          WHERE id = ? AND version_id = ? AND status = 'finalizing'
+            AND delivered_hash = expected_hash
+        )
+    `).bind(
+      input.completedAt,
+      input.completedAt,
+      input.candidateVersionId,
+      input.candidateVersionId,
+      input.postId,
+      input.jobId,
+      input.candidateVersionId,
+    ),
+  );
   statements.push(
     database.prepare(`
       UPDATE studio_posts

@@ -5,6 +5,9 @@ import test from "node:test";
 
 const teamDomain = "https://hanparan-test.cloudflareaccess.com";
 const adminEmail = "studio-admin@example.com";
+const cloudflareZoneId = "f".repeat(32);
+const cachePurgeToken = "test-cache-purge-token-000000000000";
+const cachePurgeEndpoint = `https://api.cloudflare.com/client/v4/zones/${cloudflareZoneId}/purge_cache`;
 const draftMigration = readFileSync(
   new URL("../migrations/0001_phase_a_drafts.sql", import.meta.url),
   "utf8",
@@ -23,6 +26,10 @@ const canonicalSchemaMigration = readFileSync(
 );
 const taxonomyMigration = readFileSync(
   new URL("../migrations/0005_phase_b_taxonomy.sql", import.meta.url),
+  "utf8",
+);
+const assetCleanupMigration = readFileSync(
+  new URL("../migrations/0006_phase_b_asset_manifest_cleanup.sql", import.meta.url),
   "utf8",
 );
 
@@ -82,6 +89,7 @@ class SqliteD1 {
     this.database.exec(deliveryMigration);
     this.database.exec(canonicalSchemaMigration);
     this.database.exec(taxonomyMigration);
+    this.database.exec(assetCleanupMigration);
     const tagIds = {
       update: "300000000000000001",
       work: "300000000000000002",
@@ -178,6 +186,7 @@ class MemoryR2 {
         .filter((key) => key.startsWith(prefix))
         .slice(0, limit)
         .map((key) => ({ key })),
+      truncated: false,
     };
   }
 }
@@ -424,6 +433,11 @@ function phaseAEnv(overrides = {}) {
     DISCORD_FORUM_CHANNEL_ID: "100000000000000005",
     DISCORD_ANNOUNCEMENTS_CHANNEL_ID: "100000000000000006",
     DISCORD_NOTIFY_ROLE_ID: "100000000000000007",
+    ASSET_ORPHAN_RETENTION_DAYS: "7",
+    VERSION_ROLLBACK_RETENTION_DAYS: "30",
+    STUDIO_PUBLIC_ORIGIN: "https://staging.example",
+    CLOUDFLARE_ZONE_ID: cloudflareZoneId,
+    CLOUDFLARE_CACHE_PURGE_TOKEN: cachePurgeToken,
     STUDIO_DB: { prepare() {}, batch() {} },
     STUDIO_MEDIA: { get() {}, put() {}, delete() {}, list() {} },
     IMAGES: { info() {}, input() {} },
@@ -509,11 +523,23 @@ async function discordRequest(privateKey, payload, timestamp) {
   });
 }
 
-function studioRequester(worker, env, keys, token) {
+function studioRequester(worker, env, keys, token, purgeCalls = null) {
   return async function request(pathname, init = {}) {
-    globalThis.fetch = async (input) => {
-      assert.equal(String(input), `${teamDomain}/cdn-cgi/access/certs`);
-      return Response.json({ keys: [keys.publicJwk] });
+    globalThis.fetch = async (input, fetchInit = {}) => {
+      const url = String(input);
+      if (url === `${teamDomain}/cdn-cgi/access/certs`) {
+        return Response.json({ keys: [keys.publicJwk] });
+      }
+      if (url === cachePurgeEndpoint && purgeCalls) {
+        assert.equal(fetchInit.method, "POST");
+        const headers = new Headers(fetchInit.headers);
+        assert.equal(headers.get("authorization"), `Bearer ${cachePurgeToken}`);
+        const body = JSON.parse(String(fetchInit.body));
+        assert.deepEqual(body, { files: [body.files[0]] });
+        purgeCalls.push(body.files[0]);
+        return Response.json({ success: true, result: { id: cloudflareZoneId } });
+      }
+      assert.fail(`unexpected fetch: ${url}`);
     };
     return worker.fetch(
       new Request(`https://staging.example${pathname}`, {
@@ -1385,18 +1411,27 @@ test("recovers a taxonomy outbox after Queue failure and Discord rate limiting",
   }
 });
 
-test("stores private sources under exact R2 keys and deletes them idempotently", async () => {
+test("retains orphan sources, then verifies exact cleanup and cache purge", async () => {
   const worker = await loadWorker();
   const database = new SqliteD1();
   const media = new MemoryR2();
   const images = new FakeImages();
+  const queue = new MemoryQueue();
+  const purgeCalls = [];
   const env = phaseAEnv({
     STUDIO_DB: database,
     STUDIO_MEDIA: media,
     IMAGES: images,
+    PUBLISH_QUEUE: queue,
   });
   const keys = await accessKeys();
-  const request = studioRequester(worker, env, keys, await keys.token());
+  const request = studioRequester(
+    worker,
+    env,
+    keys,
+    await keys.token(),
+    purgeCalls,
+  );
   const originalFetch = globalThis.fetch;
 
   try {
@@ -1495,19 +1530,26 @@ test("stores private sources under exact R2 keys and deletes them idempotently",
       ],
     );
 
+    for (const body of queue.messages.splice(0)) {
+      const message = queueMessage(body);
+      await worker.queue({ messages: [message] }, env);
+      assert.equal(message.acked, true);
+    }
+
     const firstDelete = deleteSource(first.assetId);
     const deleted = await request(firstDelete.pathname, firstDelete.init);
     assert.equal(deleted.status, 204);
-    assert.deepEqual(media.deleteCalls[0], [
-      row.private_source_key,
-      row.discord_r2_key,
-      row.public_r2_key,
-    ]);
-    assert.equal(media.objects.has(row.private_source_key), false);
+    assert.equal(media.deleteCalls.length, 0);
+    const orphan = database.database.prepare(`
+      SELECT status, orphaned_at FROM studio_assets WHERE id = ?
+    `).get(first.assetId);
+    assert.equal(orphan.status, "orphan");
+    assert.match(orphan.orphaned_at, /^\d{4}-\d{2}-\d{2}T/u);
+    assert.equal(media.objects.has(row.private_source_key), true);
     assert.equal(
       database.database.prepare("SELECT count(*) AS count FROM studio_assets WHERE id = ?")
         .get(first.assetId).count,
-      0,
+      1,
     );
     assert.deepEqual(
       database.database.prepare(`
@@ -1518,10 +1560,96 @@ test("stores private sources under exact R2 keys and deletes them idempotently",
       [{ asset_id: second.assetId, ordinal: 0 }],
     );
 
+    env.ASSET_ORPHAN_RETENTION_DAYS = "0";
+    const invalidCleanupConfiguration = await request(
+      "/studio/api/assets/cleanup",
+      studioJsonWrite({}),
+    );
+    assert.equal(invalidCleanupConfiguration.status, 503);
+    assert.deepEqual(await invalidCleanupConfiguration.json(), {
+      error: "asset_cleanup_configuration_invalid",
+    });
+    assert.equal(queue.messages.length, 0);
+    env.ASSET_ORPHAN_RETENTION_DAYS = "7";
+
+    const cachePurgeToken = env.CLOUDFLARE_CACHE_PURGE_TOKEN;
+    env.CLOUDFLARE_CACHE_PURGE_TOKEN = "";
+    const missingPurgeCredentials = await request(
+      "/studio/api/assets/cleanup",
+      studioJsonWrite({}),
+    );
+    assert.equal(missingPurgeCredentials.status, 503);
+    assert.deepEqual(await missingPurgeCredentials.json(), {
+      error: "asset_cleanup_configuration_invalid",
+    });
+    assert.equal(queue.messages.length, 0);
+    env.CLOUDFLARE_CACHE_PURGE_TOKEN = cachePurgeToken;
+
+    const tooEarly = await request(
+      "/studio/api/assets/cleanup",
+      studioJsonWrite({}),
+    );
+    assert.equal(tooEarly.status, 202);
+    assert.deepEqual(await tooEarly.json(), { queued: 0, queueFailed: 0, scanned: 0 });
+
+    database.database.prepare(`
+      UPDATE studio_assets SET orphaned_at = ? WHERE id = ?
+    `).run(new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString(), first.assetId);
+    const residualKey = `${row.created_prefix}/private/${first.assetId}/residual.bin`;
+    media.objects.set(residualKey, { bytes: new Uint8Array([1]), options: {} });
+    const queuedCleanup = await request(
+      "/studio/api/assets/cleanup",
+      studioJsonWrite({}),
+    );
+    assert.equal(queuedCleanup.status, 202);
+    assert.equal((await queuedCleanup.json()).queued, 1);
+    const cleanupBody = queue.messages.shift();
+    assert.deepEqual(cleanupBody, {
+      type: "asset_cleanup",
+      jobId: cleanupBody.jobId,
+      assetId: first.assetId,
+    });
+    const residualAttempt = queueMessage(cleanupBody);
+    await worker.queue({ messages: [residualAttempt] }, env);
+    assert.equal(residualAttempt.acked, false);
+    assert.deepEqual(residualAttempt.retryOptions, { delaySeconds: 5 });
+    assert.equal(
+      database.database.prepare("SELECT status FROM studio_assets WHERE id = ?")
+        .get(first.assetId).status,
+      "deleting",
+    );
+    assert.equal(media.objects.has(residualKey), true);
+    assert.equal(purgeCalls.length, 0);
+
+    media.objects.delete(residualKey);
+    const residualRetry = queueMessage(cleanupBody, 2);
+    await worker.queue({ messages: [residualRetry] }, env);
+    assert.equal(residualRetry.acked, true);
+    assert.equal(
+      database.database.prepare("SELECT count(*) AS count FROM studio_assets WHERE id = ?")
+        .get(first.assetId).count,
+      0,
+    );
+    assert.deepEqual(purgeCalls, [
+      `https://staging.example/media/${first.assetId}/portfolio-v1.webp`,
+    ]);
+
     const secondDelete = deleteSource(second.assetId);
+    const secondOrphaned = await request(secondDelete.pathname, secondDelete.init);
+    assert.equal(secondOrphaned.status, 204);
+    database.database.prepare(`
+      UPDATE studio_assets SET orphaned_at = ? WHERE id = ?
+    `).run(new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString(), second.assetId);
+    const secondCleanup = await request(
+      "/studio/api/assets/cleanup",
+      studioJsonWrite({}),
+    );
+    assert.equal(secondCleanup.status, 202);
+    const secondCleanupBody = queue.messages.shift();
     media.failDelete = true;
-    const failedDelete = await request(secondDelete.pathname, secondDelete.init);
-    assert.equal(failedDelete.status, 503);
+    const failedDelete = queueMessage(secondCleanupBody);
+    await worker.queue({ messages: [failedDelete] }, env);
+    assert.equal(failedDelete.acked, false);
     assert.equal(
       database.database.prepare("SELECT status FROM studio_assets WHERE id = ?")
         .get(second.assetId).status,
@@ -1529,14 +1657,15 @@ test("stores private sources under exact R2 keys and deletes them idempotently",
     );
 
     media.failDelete = false;
-    const retriedDelete = await request(secondDelete.pathname, secondDelete.init);
-    assert.equal(retriedDelete.status, 204);
+    const retriedDelete = queueMessage(secondCleanupBody, 2);
+    await worker.queue({ messages: [retriedDelete] }, env);
+    assert.equal(retriedDelete.acked, true);
     assert.equal(
       database.database.prepare("SELECT count(*) AS count FROM studio_assets")
         .get().count,
       0,
     );
-    assert.equal(media.deleteCalls.length, 3);
+    assert.equal(media.deleteCalls.length, 4);
   } finally {
     globalThis.fetch = originalFetch;
     database.close();
@@ -1703,6 +1832,13 @@ test("creates both derivatives and records Queue retry exhaustion for the DLQ", 
     assert.deepEqual(queue.messages, [
       { type: "asset_process", jobId: uploaded.jobId, assetId: uploaded.assetId },
     ]);
+    const processing = database.database.prepare(`
+      SELECT discord_r2_key FROM studio_assets WHERE id = ?
+    `).get(uploaded.assetId);
+    media.objects.set(processing.discord_r2_key, {
+      bytes: Uint8Array.from(Buffer.from("RIFF-2048x2048-80-WEBP")),
+      options: { preexisting: true },
+    });
 
     const message = queueMessage(queue.messages.shift());
     await worker.queue({ messages: [message] }, env);
@@ -1728,6 +1864,13 @@ test("creates both derivatives and records Queue retry exhaustion for the DLQ", 
       media.objects.get(ready.public_r2_key).options.httpMetadata.contentType,
       "image/webp",
     );
+    assert.equal(
+      media.objects.get(ready.public_r2_key).options.onlyIf.get("if-none-match"),
+      "*",
+    );
+    assert.deepEqual(media.objects.get(ready.discord_r2_key).options, {
+      preexisting: true,
+    });
     assert.equal(
       database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
         .get(uploaded.jobId).status,
@@ -1832,10 +1975,19 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
   const keys = await accessKeys();
   const token = await keys.token();
   const discord = new FakeDiscordForum(env);
+  const purgeCalls = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init = {}) => {
-    if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+    const url = String(input);
+    if (url === `${teamDomain}/cdn-cgi/access/certs`) {
       return Response.json({ keys: [keys.publicJwk] });
+    }
+    if (url === cachePurgeEndpoint) {
+      const headers = new Headers(init.headers);
+      assert.equal(headers.get("authorization"), `Bearer ${cachePurgeToken}`);
+      const body = JSON.parse(String(init.body));
+      purgeCalls.push(body.files[0]);
+      return Response.json({ success: true, result: { id: cloudflareZoneId } });
     }
     return discord.fetch(input, init);
   };
@@ -1897,6 +2049,12 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
     assert.equal(published.discord_thread_id, discord.threadId);
     assert.equal(published.discord_starter_message_id, discord.starterMessageId);
     assert.equal(published.discord_remote_hash, create.expectedHash);
+    assert.match(
+      database.database.prepare(`
+        SELECT first_published_at FROM studio_assets WHERE id = ?
+      `).get(firstAsset.assetId).first_published_at,
+      /^\d{4}-\d{2}-\d{2}T/u,
+    );
 
     const detach = deleteSource(firstAsset.assetId);
     const detached = await request(detach.pathname, detach.init);
@@ -1942,7 +2100,26 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
     `).get(draft.postId);
     assert.equal(pendingUpdate.status, "publishing");
     assert.equal(pendingUpdate.current_version_id, published.current_version_id);
-    const updateMessage = queueMessage(queue.messages.shift());
+    const updateBody = queue.messages.shift();
+    const publicKey = database.database.prepare(`
+      SELECT public_r2_key FROM studio_assets WHERE id = ?
+    `).get(secondAsset.assetId).public_r2_key;
+    const publicDerivative = media.objects.get(publicKey);
+    media.objects.delete(publicKey);
+    const missingPublic = queueMessage(updateBody);
+    await worker.queue({ messages: [missingPublic] }, env);
+    assert.equal(missingPublic.acked, false);
+    assert.deepEqual(missingPublic.retryOptions, { delaySeconds: 5 });
+    assert.equal(discord.updateCalls, 0);
+    assert.equal(
+      database.database.prepare(`
+        SELECT current_version_id FROM studio_posts WHERE id = ?
+      `).get(draft.postId).current_version_id,
+      published.current_version_id,
+    );
+
+    media.objects.set(publicKey, publicDerivative);
+    const updateMessage = queueMessage(updateBody, 2);
     await worker.queue({ messages: [updateMessage] }, env);
     assert.equal(updateMessage.acked, true);
     assert.equal(discord.createCalls, 1);
@@ -1968,6 +2145,96 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
       `).get(draft.postId, secondAsset.assetId).count,
       1,
     );
+
+    const retiredAsset = database.database.prepare(`
+      SELECT private_source_key, discord_r2_key, public_r2_key
+      FROM studio_assets WHERE id = ?
+    `).get(firstAsset.assetId);
+    database.database.prepare(`
+      UPDATE studio_post_versions SET superseded_at = ?, updated_at = ?
+      WHERE id = ? AND state = 'superseded'
+    `).run(
+      new Date(Date.now() - 31 * 24 * 60 * 60 * 1_000).toISOString(),
+      new Date().toISOString(),
+      published.current_version_id,
+    );
+    const cleanupResponse = await request(
+      "/studio/api/assets/cleanup",
+      jsonWrite({}),
+    );
+    assert.equal(cleanupResponse.status, 202);
+    assert.deepEqual(await cleanupResponse.json(), {
+      queued: 1,
+      queueFailed: 0,
+      scanned: 1,
+    });
+    const cleanupBody = queue.messages.shift();
+    assert.deepEqual(cleanupBody, {
+      type: "version_cleanup",
+      jobId: cleanupBody.jobId,
+      versionId: published.current_version_id,
+    });
+    media.failDelete = true;
+    const cleanupMessage = queueMessage(cleanupBody);
+    await worker.queue({ messages: [cleanupMessage] }, env);
+    assert.equal(cleanupMessage.acked, false);
+    assert.deepEqual(cleanupMessage.retryOptions, { delaySeconds: 5 });
+    assert.equal(
+      database.database.prepare(`
+        SELECT count(*) AS count FROM studio_post_versions WHERE id = ?
+      `).get(published.current_version_id).count,
+      0,
+    );
+    assert.equal(
+      database.database.prepare(`
+        SELECT processing_error FROM studio_assets WHERE id = ?
+      `).get(firstAsset.assetId).processing_error,
+      "asset_delete_failed",
+    );
+    media.failDelete = false;
+    env.VERSION_ROLLBACK_RETENTION_DAYS = "60";
+    const extendedRetention = await request(
+      "/studio/api/assets/cleanup",
+      jsonWrite({}),
+    );
+    assert.equal(extendedRetention.status, 202);
+    assert.deepEqual(await extendedRetention.json(), {
+      queued: 0,
+      queueFailed: 0,
+      scanned: 0,
+    });
+    assert.equal(media.objects.has(retiredAsset.discord_r2_key), true);
+    assert.equal(media.objects.has(retiredAsset.public_r2_key), true);
+
+    env.VERSION_ROLLBACK_RETENTION_DAYS = "30";
+    const resumedCleanup = await request(
+      "/studio/api/assets/cleanup",
+      jsonWrite({}),
+    );
+    assert.equal(resumedCleanup.status, 202);
+    assert.deepEqual(await resumedCleanup.json(), {
+      queued: 1,
+      queueFailed: 0,
+      scanned: 1,
+    });
+    const resumedBody = queue.messages.shift();
+    assert.deepEqual(resumedBody, cleanupBody);
+    const resumedMessage = queueMessage(resumedBody, 2);
+    await worker.queue({ messages: [resumedMessage] }, env);
+    assert.equal(resumedMessage.acked, true);
+    const privateArchive = database.database.prepare(`
+      SELECT status, first_published_at, processing_error
+      FROM studio_assets WHERE id = ?
+    `).get(firstAsset.assetId);
+    assert.equal(privateArchive.status, "orphan");
+    assert.match(privateArchive.first_published_at, /^\d{4}-\d{2}-\d{2}T/u);
+    assert.equal(privateArchive.processing_error, null);
+    assert.equal(media.objects.has(retiredAsset.private_source_key), true);
+    assert.equal(media.objects.has(retiredAsset.discord_r2_key), false);
+    assert.equal(media.objects.has(retiredAsset.public_r2_key), false);
+    assert.deepEqual(purgeCalls, [
+      `https://staging.example/media/${firstAsset.assetId}/portfolio-v1.webp`,
+    ]);
 
     const deleteResponse = await request(
       "/studio/api/publish",

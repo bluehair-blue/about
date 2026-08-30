@@ -43,7 +43,7 @@ export const deliveryOperations = {
 } as const;
 
 export const draftSchemaVersion = 1;
-export const canonicalDatabaseSchemaVersion = 2;
+export const canonicalDatabaseSchemaVersion = 3;
 export const assetStatuses = [
   "uploading",
   "processing",

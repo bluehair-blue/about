@@ -1,7 +1,11 @@
 import { phaseAEnvironmentErrors, type PhaseAEnv, type StudioQueueBatch } from "./phase-a-env";
 import {
+  processStudioAssetCleanupJob,
   processStudioAssetJob,
+  processStudioVersionCleanupJob,
   recordStudioAssetQueueFailure,
+  recoverStudioAssetCleanupFailure,
+  recoverStudioVersionCleanupFailure,
 } from "./studio-assets";
 import {
   processStudioDiscordJob,
@@ -31,6 +35,30 @@ function parseMessage(value: unknown) {
       type: "asset_process" as const,
       jobId: value.jobId,
       assetId: value.assetId,
+    };
+  }
+  if (
+    value.type === "asset_cleanup" &&
+    typeof value.jobId === "string" &&
+    typeof value.assetId === "string" &&
+    Object.keys(value).every((key) => ["type", "jobId", "assetId"].includes(key))
+  ) {
+    return {
+      type: "asset_cleanup" as const,
+      jobId: value.jobId,
+      assetId: value.assetId,
+    };
+  }
+  if (
+    value.type === "version_cleanup" &&
+    typeof value.jobId === "string" &&
+    typeof value.versionId === "string" &&
+    Object.keys(value).every((key) => ["type", "jobId", "versionId"].includes(key))
+  ) {
+    return {
+      type: "version_cleanup" as const,
+      jobId: value.jobId,
+      versionId: value.versionId,
     };
   }
   if (
@@ -88,6 +116,49 @@ export async function handleStudioQueue(
         );
         retry(message);
       }
+      continue;
+    }
+
+    if (body.type === "asset_cleanup") {
+      let outcome: StudioQueueOutcome;
+      try {
+        outcome = await processStudioAssetCleanupJob(
+          body.jobId,
+          body.assetId,
+          env,
+        );
+      } catch (error) {
+        outcome = await recoverStudioAssetCleanupFailure(
+          body.jobId,
+          body.assetId,
+          env,
+          error,
+          terminal,
+        );
+      }
+      if (outcome.action === "ack") message.ack();
+      else retry(message, outcome);
+      continue;
+    }
+
+    if (body.type === "version_cleanup") {
+      let outcome: StudioQueueOutcome;
+      try {
+        outcome = await processStudioVersionCleanupJob(
+          body.jobId,
+          body.versionId,
+          env,
+        );
+      } catch (error) {
+        outcome = await recoverStudioVersionCleanupFailure(
+          body.jobId,
+          env,
+          error,
+          terminal,
+        );
+      }
+      if (outcome.action === "ack") message.ack();
+      else retry(message, outcome);
       continue;
     }
 

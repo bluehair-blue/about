@@ -9,6 +9,7 @@ import type {
 import type { AssetStatus } from "../db/schema";
 
 const ASSETS_PATH = "/studio/api/assets";
+const ASSET_CLEANUP_PATH = `${ASSETS_PATH}/cleanup`;
 const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 const MAX_MULTIPART_BYTES = MAX_SOURCE_BYTES + 64 * 1024;
 const MAX_PORTFOLIO_BYTES = 12 * 1024 * 1024;
@@ -16,6 +17,9 @@ export const MAX_DISCORD_ASSET_BYTES = 8 * 1024 * 1024;
 export const MAX_DISCORD_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const PORTFOLIO_WIDTH = 2_560;
 const DISCORD_WIDTH = 2_048;
+const CLEANUP_BATCH_SIZE = 50;
+const DAY_MS = 24 * 60 * 60 * 1_000;
+const PROCESSING_LEASE_MS = 60_000;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type SourceMime = "image/jpeg" | "image/png" | "image/webp";
@@ -38,6 +42,7 @@ type AssetRow = {
   discord_bytes: number | null;
   ordinal: number;
   alt: string;
+  processing_error: string | null;
   created_at: string;
 };
 
@@ -70,10 +75,66 @@ type DeletingAssetRow = {
   version_id: string;
   ordinal: number;
   status: string;
+  created_prefix: string;
   private_source_key: string;
   discord_r2_key: string;
   public_r2_key: string;
   retained: number;
+};
+
+type CleanupCandidateRow = {
+  id: string;
+  post_id: string;
+  job_id: string | null;
+  job_status: string | null;
+};
+
+type CleanupJobRow = {
+  id: string;
+  post_id: string;
+  asset_id: string;
+  status: string;
+  asset_status: AssetStatus;
+  created_prefix: string;
+  private_source_key: string;
+  discord_r2_key: string;
+  public_r2_key: string;
+  orphaned_at: string | null;
+  first_published_at: string | null;
+};
+
+type VersionCleanupCandidateRow = {
+  id: string;
+  post_id: string;
+  superseded_at: string;
+  job_id: string | null;
+  job_status: string | null;
+  payload_json: string | null;
+  version_exists: number;
+  job_updated_at: string | null;
+};
+
+type VersionCleanupJobRow = {
+  id: string;
+  post_id: string;
+  status: string;
+  payload_json: string;
+};
+
+type VersionCleanupAssetRow = {
+  id: string;
+  status: AssetStatus;
+  created_prefix: string;
+  private_source_key: string;
+  discord_r2_key: string;
+  public_r2_key: string;
+  first_published_at: string | null;
+};
+
+type VersionCleanupPayload = {
+  versionId: string;
+  supersededAt: string;
+  assetIds: string[];
 };
 
 function json(value: unknown, status = 200) {
@@ -241,7 +302,8 @@ async function listAssets(request: Request, database: StudioD1) {
   const rows = await database.prepare(`
     SELECT asset.id, asset.status, asset.width, asset.height,
       asset.source_mime, asset.source_bytes, asset.public_bytes,
-      asset.discord_bytes, selected.ordinal, selected.alt, asset.created_at
+      asset.discord_bytes, selected.ordinal, selected.alt, asset.created_at,
+      asset.processing_error
     FROM studio_post_version_assets AS selected
     JOIN studio_assets AS asset ON asset.id = selected.asset_id
     WHERE selected.version_id = ? AND asset.post_id = ?
@@ -260,6 +322,7 @@ async function listAssets(request: Request, database: StudioD1) {
       discordBytes: asset.discord_bytes,
       ordinal: asset.ordinal,
       alt: asset.alt,
+      processingError: asset.processing_error,
       createdAt: asset.created_at,
     })),
   });
@@ -274,13 +337,13 @@ function exactUploadFields(form: FormData) {
   );
 }
 
-async function markFailed(database: StudioD1, assetId: string) {
+async function markFailed(database: StudioD1, assetId: string, code: string) {
   try {
     await database.prepare(`
       UPDATE studio_assets
-      SET status = 'failed', updated_at = ?
+      SET status = 'failed', processing_error = ?, updated_at = ?
       WHERE id = ? AND status = 'uploading'
-    `).bind(new Date().toISOString(), assetId).run();
+    `).bind(code, new Date().toISOString(), assetId).run();
   } catch {
     // The uploading row and exact key remain recoverable if this write fails.
   }
@@ -402,11 +465,11 @@ async function uploadSource(
       sha256: sourceHash.digest,
     });
     if (!stored || stored.key !== privateSourceKey || stored.size !== source.byteLength) {
-      await markFailed(database, assetId);
+      await markFailed(database, assetId, "asset_storage_failed");
       return json({ error: "asset_storage_failed", assetId }, 503);
     }
   } catch {
-    await markFailed(database, assetId);
+    await markFailed(database, assetId, "asset_storage_failed");
     return json({ error: "asset_storage_failed", assetId }, 503);
   }
 
@@ -436,7 +499,7 @@ async function uploadSource(
       ),
     ]);
   } catch {
-    await markFailed(database, assetId);
+    await markFailed(database, assetId, "asset_manifest_unavailable");
     return json({ error: "asset_manifest_unavailable", assetId }, 503);
   }
   if (queued[0]?.meta?.changes !== 1) {
@@ -507,13 +570,23 @@ async function storeDerivative(
 ) {
   const hash = await hashBytes(bytes);
   const stored = await media.put(key, bytes, {
+    onlyIf: new Headers({ "if-none-match": "*" }),
     httpMetadata: { contentType: "image/webp" },
     customMetadata: metadata,
     sha256: hash.digest,
   });
-  if (!stored || stored.key !== key || stored.size !== bytes.byteLength) {
+  if (stored && stored.key === key && stored.size === bytes.byteLength) {
+    return hash.hex;
+  }
+  if (stored) {
     throw new Error("derivative_storage_failed");
   }
+  const existing = await media.get(key);
+  if (!existing || existing.size !== bytes.byteLength) {
+    throw new Error("derivative_collision");
+  }
+  const existingHash = await hashBytes(await existing.arrayBuffer());
+  if (existingHash.hex !== hash.hex) throw new Error("derivative_collision");
   return hash.hex;
 }
 
@@ -526,6 +599,7 @@ function assetProcessingCode(error: unknown) {
     "portfolio_derivative_too_large",
     "discord_derivative_too_large",
     "derivative_storage_failed",
+    "derivative_collision",
     "asset_manifest_unavailable",
   ].includes(code)
     ? code
@@ -607,8 +681,16 @@ export async function processStudioAssetJob(
     SET status = 'processing', attempts = attempts + 1,
       error_code = NULL, last_error = NULL, updated_at = ?
     WHERE id = ? AND asset_id = ? AND target = 'asset' AND action = 'process'
-      AND status IN ('queued', 'retrying', 'processing')
-  `).bind(new Date().toISOString(), jobId, assetId).run();
+      AND (
+        status IN ('queued', 'retrying')
+        OR (status = 'processing' AND updated_at <= ?)
+      )
+  `).bind(
+    new Date().toISOString(),
+    jobId,
+    assetId,
+    new Date(Date.now() - PROCESSING_LEASE_MS).toISOString(),
+  ).run();
   if (claimed.meta?.changes !== 1) return;
 
   const asset = await database.prepare(`
@@ -777,29 +859,41 @@ function assetStatusesCanRetry(status: AssetStatus) {
   return status === "failed" || status === "processing";
 }
 
+function detachAssetStatements(
+  database: StudioD1,
+  versionId: string,
+  assetId: string,
+  ordinal: number,
+) {
+  return [
+    database.prepare(`
+      DELETE FROM studio_post_version_assets
+      WHERE version_id = ? AND asset_id = ?
+    `).bind(versionId, assetId),
+    database.prepare(`
+      UPDATE studio_post_version_assets
+      SET ordinal = ordinal + 100
+      WHERE version_id = ? AND ordinal > ?
+    `).bind(versionId, ordinal),
+    database.prepare(`
+      UPDATE studio_post_version_assets
+      SET ordinal = ordinal - 101
+      WHERE version_id = ? AND ordinal >= 100
+    `).bind(versionId),
+  ];
+}
+
 async function deleteAsset(
   request: Request,
   assetId: string,
   database: StudioD1,
-  media: StudioR2,
 ) {
   if (!uuidPattern.test(assetId)) return json({ error: "invalid_asset_id" }, 400);
-  try {
-    const body = await request.json();
-    if (
-      typeof body !== "object" ||
-      body === null ||
-      Array.isArray(body) ||
-      Object.keys(body as object).length !== 0
-    ) {
-      return json({ error: "invalid_json_object" }, 400);
-    }
-  } catch {
-    return json({ error: "invalid_json" }, 400);
-  }
+  if (!(await parseEmptyJson(request))) return json({ error: "invalid_json_object" }, 400);
 
   const asset = await database.prepare(`
     SELECT asset.post_id, selected.version_id, selected.ordinal, asset.status,
+      asset.created_prefix,
       asset.private_source_key, asset.discord_r2_key, asset.public_r2_key,
       CASE WHEN EXISTS (
         SELECT 1
@@ -816,39 +910,584 @@ async function deleteAsset(
   `).bind(assetId).first<DeletingAssetRow>();
   if (!asset) return json({ error: "asset_not_found" }, 404);
   if (asset.retained === 1) {
-    await database.batch([
-      database.prepare(`
-        DELETE FROM studio_post_version_assets
-        WHERE version_id = ? AND asset_id = ?
-      `).bind(asset.version_id, assetId),
-      database.prepare(`
-        UPDATE studio_post_version_assets
-        SET ordinal = ordinal + 100
-        WHERE version_id = ? AND ordinal > ?
-      `).bind(asset.version_id, asset.ordinal),
-      database.prepare(`
-        UPDATE studio_post_version_assets
-        SET ordinal = ordinal - 101
-        WHERE version_id = ? AND ordinal >= 100
-      `).bind(asset.version_id),
-    ]);
+    await database.batch(
+      detachAssetStatements(database, asset.version_id, assetId, asset.ordinal),
+    );
     return new Response(null, { status: 204 });
   }
-  if (asset.status !== "deleting") {
-    const marked = await database.prepare(`
+  const orphanedAt = new Date().toISOString();
+  const results = await database.batch([
+    ...detachAssetStatements(database, asset.version_id, assetId, asset.ordinal),
+    database.prepare(`
       UPDATE studio_assets
-      SET status = 'deleting', updated_at = ?
+      SET status = 'orphan', orphaned_at = ?, processing_error = NULL,
+        updated_at = ?
       WHERE id = ? AND post_id = ? AND status = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM studio_post_version_assets WHERE asset_id = ?
+        )
     `).bind(
-      new Date().toISOString(),
+      orphanedAt,
+      orphanedAt,
       assetId,
       asset.post_id,
       asset.status,
-    ).run();
-    if (marked.meta?.changes !== 1) {
-      return json({ error: "asset_delete_conflict" }, 409);
+      assetId,
+    ),
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'failed', error_code = 'asset_orphaned',
+        last_error = 'asset_orphaned', updated_at = ?, completed_at = ?
+      WHERE asset_id = ? AND target = 'asset' AND action = 'process'
+        AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+    `).bind(orphanedAt, orphanedAt, assetId),
+  ]);
+  if (results[3]?.meta?.changes !== 1) {
+    return json({ error: "asset_delete_conflict" }, 409);
+  }
+  return new Response(null, { status: 204 });
+}
+
+function retentionDays(value: string | undefined) {
+  if (!value || !/^[1-9]\d{0,3}$/u.test(value)) return null;
+  const days = Number(value);
+  return Number.isSafeInteger(days) && days <= 3_650 ? days : null;
+}
+
+function cleanupConfiguration(env: PhaseAEnv) {
+  const orphanDays = retentionDays(env.ASSET_ORPHAN_RETENTION_DAYS);
+  const rollbackDays = retentionDays(env.VERSION_ROLLBACK_RETENTION_DAYS);
+  const zoneId = env.CLOUDFLARE_ZONE_ID;
+  const cachePurgeToken = env.CLOUDFLARE_CACHE_PURGE_TOKEN;
+  if (
+    !orphanDays ||
+    !rollbackDays ||
+    !env.STUDIO_PUBLIC_ORIGIN ||
+    !zoneId ||
+    !/^[0-9a-f]{32}$/iu.test(zoneId) ||
+    !cachePurgeToken ||
+    cachePurgeToken.length < 20 ||
+    cachePurgeToken.length > 200 ||
+    /\s/u.test(cachePurgeToken)
+  ) {
+    return null;
+  }
+  try {
+    const origin = new URL(env.STUDIO_PUBLIC_ORIGIN);
+    if (
+      origin.protocol !== "https:" ||
+      origin.pathname !== "/" ||
+      origin.search ||
+      origin.hash ||
+      origin.username ||
+      origin.password ||
+      origin.origin !== env.STUDIO_PUBLIC_ORIGIN
+    ) {
+      return null;
+    }
+    return {
+      orphanDays,
+      rollbackDays,
+      publicOrigin: origin.origin,
+      zoneId,
+      cachePurgeToken,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseVersionCleanupPayload(value: string): VersionCleanupPayload | null {
+  try {
+    const payload = JSON.parse(value) as Record<string, unknown>;
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      Object.keys(payload).length !== 3 ||
+      typeof payload.versionId !== "string" ||
+      !uuidPattern.test(payload.versionId) ||
+      typeof payload.supersededAt !== "string" ||
+      !Number.isFinite(Date.parse(payload.supersededAt)) ||
+      !Array.isArray(payload.assetIds) ||
+      payload.assetIds.length > 10 ||
+      !payload.assetIds.every((id) => typeof id === "string" && uuidPattern.test(id)) ||
+      new Set(payload.assetIds).size !== payload.assetIds.length
+    ) {
+      return null;
+    }
+    return {
+      versionId: payload.versionId,
+      supersededAt: payload.supersededAt,
+      assetIds: payload.assetIds,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function markCleanupQueueFailure(
+  database: StudioD1,
+  jobId: string,
+  assetId: string,
+) {
+  await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'queue_failed', error_code = 'queue_send_failed',
+      last_error = 'queue_send_failed', updated_at = ?
+    WHERE id = ? AND asset_id = ? AND target = 'asset' AND action = 'delete'
+      AND status = 'queued'
+  `).bind(new Date().toISOString(), jobId, assetId).run();
+}
+
+async function markVersionCleanupQueueFailure(
+  database: StudioD1,
+  jobId: string,
+) {
+  await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'queue_failed', error_code = 'queue_send_failed',
+      last_error = 'queue_send_failed', updated_at = ?
+    WHERE id = ? AND target = 'version' AND action = 'cleanup'
+      AND status = 'queued'
+  `).bind(new Date().toISOString(), jobId).run();
+}
+
+async function queueExpiredRetentionCleanup(
+  request: Request,
+  env: PhaseAEnv,
+  database: StudioD1,
+  queue: StudioQueueProducer,
+) {
+  if (!(await parseEmptyJson(request))) return json({ error: "invalid_json_object" }, 400);
+  const config = cleanupConfiguration(env);
+  if (!config) return json({ error: "asset_cleanup_configuration_invalid" }, 503);
+  const cutoff = new Date(Date.now() - config.orphanDays * DAY_MS).toISOString();
+  const assetRows = await database.prepare(`
+    SELECT asset.id, asset.post_id, cleanup.id AS job_id,
+      cleanup.status AS job_status
+    FROM studio_assets AS asset
+    LEFT JOIN delivery_jobs AS cleanup
+      ON cleanup.dedupe_key = 'asset:' || asset.id || ':cleanup:v1'
+    WHERE asset.status IN ('orphan', 'deleting')
+      AND asset.orphaned_at IS NOT NULL
+      AND asset.orphaned_at <= ?
+      AND asset.first_published_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM studio_post_version_assets WHERE asset_id = asset.id
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM delivery_jobs AS active
+        WHERE active.asset_id = asset.id
+          AND active.id IS NOT cleanup.id
+          AND active.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+      )
+    ORDER BY asset.orphaned_at ASC, asset.id ASC
+    LIMIT ?
+  `).bind(cutoff, CLEANUP_BATCH_SIZE).all<CleanupCandidateRow>();
+
+  const versionCutoff = new Date(
+    Date.now() - config.rollbackDays * DAY_MS,
+  ).toISOString();
+  const versionRows = await database.prepare(`
+    SELECT * FROM (
+      SELECT version.id, version.post_id, version.superseded_at,
+        cleanup.id AS job_id, cleanup.status AS job_status,
+        cleanup.payload_json, 1 AS version_exists,
+        cleanup.updated_at AS job_updated_at
+      FROM studio_post_versions AS version
+      JOIN studio_posts AS post ON post.id = version.post_id
+      LEFT JOIN delivery_jobs AS cleanup
+        ON cleanup.dedupe_key = 'version:' || version.id || ':cleanup:' || version.superseded_at
+      WHERE version.state = 'superseded'
+        AND version.superseded_at IS NOT NULL
+        AND version.superseded_at <= ?
+        AND post.current_version_id IS NOT version.id
+        AND post.draft_version_id IS NOT version.id
+        AND NOT EXISTS (
+          SELECT 1
+          FROM delivery_jobs AS active
+          WHERE active.version_id = version.id
+            AND active.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+        )
+      UNION ALL
+      SELECT json_extract(cleanup.payload_json, '$.versionId') AS id,
+        cleanup.post_id,
+        json_extract(cleanup.payload_json, '$.supersededAt') AS superseded_at,
+        cleanup.id AS job_id, cleanup.status AS job_status,
+        cleanup.payload_json, 0 AS version_exists,
+        cleanup.updated_at AS job_updated_at
+      FROM delivery_jobs AS cleanup
+      WHERE cleanup.target = 'version' AND cleanup.action = 'cleanup'
+        AND cleanup.status IN ('queued', 'processing', 'retrying', 'queue_failed', 'failed')
+        AND json_type(cleanup.payload_json, '$.versionId') = 'text'
+        AND json_extract(cleanup.payload_json, '$.supersededAt') <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM studio_post_versions
+          WHERE id = json_extract(cleanup.payload_json, '$.versionId')
+        )
+    )
+    ORDER BY superseded_at ASC, id ASC
+    LIMIT ?
+  `).bind(
+    versionCutoff,
+    versionCutoff,
+    CLEANUP_BATCH_SIZE,
+  ).all<VersionCleanupCandidateRow>();
+
+  let queued = 0;
+  let queueFailed = 0;
+  for (const candidate of assetRows.results ?? []) {
+    if (candidate.job_status === "processing") continue;
+    const jobId = candidate.job_id ?? crypto.randomUUID();
+    const queuedAt = new Date().toISOString();
+    if (!candidate.job_id) {
+      const inserted = await database.prepare(`
+        INSERT INTO delivery_jobs (
+          id, dedupe_key, post_id, asset_id, target, action, status,
+          attempts, created_at, updated_at
+        )
+        SELECT ?, ?, asset.post_id, asset.id, 'asset', 'delete', 'queued',
+          0, ?, ?
+        FROM studio_assets AS asset
+        WHERE asset.id = ? AND asset.status IN ('orphan', 'deleting')
+          AND asset.orphaned_at IS NOT NULL AND asset.orphaned_at <= ?
+          AND asset.first_published_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM studio_post_version_assets WHERE asset_id = asset.id
+          )
+      `).bind(
+        jobId,
+        `asset:${candidate.id}:cleanup:v1`,
+        queuedAt,
+        queuedAt,
+        candidate.id,
+        cutoff,
+      ).run();
+      if (inserted.meta?.changes !== 1) continue;
+    } else if (["queue_failed", "retrying", "failed"].includes(candidate.job_status ?? "")) {
+      const requeued = await database.prepare(`
+        UPDATE delivery_jobs
+        SET status = 'queued', error_code = NULL, last_error = NULL,
+          completed_at = NULL, updated_at = ?
+        WHERE id = ? AND asset_id = ? AND target = 'asset' AND action = 'delete'
+          AND status IN ('queue_failed', 'retrying', 'failed')
+          AND EXISTS (
+            SELECT 1 FROM studio_assets AS asset
+            WHERE asset.id = ? AND asset.status IN ('orphan', 'deleting')
+              AND asset.orphaned_at IS NOT NULL AND asset.orphaned_at <= ?
+              AND asset.first_published_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM studio_post_version_assets
+                WHERE asset_id = asset.id
+              )
+          )
+      `).bind(queuedAt, jobId, candidate.id, candidate.id, cutoff).run();
+      if (requeued.meta?.changes !== 1) continue;
+    } else if (candidate.job_status !== "queued") {
+      continue;
+    }
+
+    try {
+      await queue.send({ type: "asset_cleanup", jobId, assetId: candidate.id });
+      queued += 1;
+    } catch {
+      queueFailed += 1;
+      await markCleanupQueueFailure(database, jobId, candidate.id);
     }
   }
+
+  for (const candidate of versionRows.results ?? []) {
+    if (candidate.job_status === "processing" && candidate.version_exists === 1) continue;
+    if (
+      candidate.job_status === "processing" &&
+      candidate.job_updated_at &&
+      Date.now() - Date.parse(candidate.job_updated_at) < PROCESSING_LEASE_MS
+    ) {
+      continue;
+    }
+    let payload = candidate.payload_json;
+    if (candidate.job_id) {
+      const parsed = payload ? parseVersionCleanupPayload(payload) : null;
+      if (
+        !parsed ||
+        parsed.versionId !== candidate.id ||
+        parsed.supersededAt !== candidate.superseded_at
+      ) {
+        continue;
+      }
+    } else {
+      const selected = await database.prepare(`
+        SELECT asset_id
+        FROM studio_post_version_assets
+        WHERE version_id = ?
+        ORDER BY ordinal ASC
+      `).bind(candidate.id).all<{ asset_id: string }>();
+      payload = JSON.stringify({
+        versionId: candidate.id,
+        supersededAt: candidate.superseded_at,
+        assetIds: (selected.results ?? []).map(({ asset_id }) => asset_id),
+      });
+    }
+    if (!payload) continue;
+    const dedupeKey = `version:${candidate.id}:cleanup:${candidate.superseded_at}`;
+    const jobId = candidate.job_id ?? crypto.randomUUID();
+    const queuedAt = new Date().toISOString();
+    if (!candidate.job_id) {
+      const inserted = await database.prepare(`
+        INSERT INTO delivery_jobs (
+          id, dedupe_key, post_id, target, action, payload_json,
+          status, attempts, created_at, updated_at
+        )
+        SELECT ?, ?, version.post_id, 'version', 'cleanup', ?,
+          'queued', 0, ?, ?
+        FROM studio_post_versions AS version
+        JOIN studio_posts AS post ON post.id = version.post_id
+        WHERE version.id = ? AND version.state = 'superseded'
+          AND version.superseded_at = ? AND version.superseded_at <= ?
+          AND post.current_version_id IS NOT version.id
+          AND post.draft_version_id IS NOT version.id
+          AND NOT EXISTS (
+            SELECT 1
+            FROM delivery_jobs AS active
+            WHERE active.version_id = version.id
+              AND active.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+          )
+      `).bind(
+        jobId,
+        dedupeKey,
+        payload,
+        queuedAt,
+        queuedAt,
+        candidate.id,
+        candidate.superseded_at,
+        versionCutoff,
+      ).run();
+      if (inserted.meta?.changes !== 1) continue;
+    } else if (["queue_failed", "retrying", "failed"].includes(candidate.job_status ?? "")) {
+      const requeued = await database.prepare(`
+        UPDATE delivery_jobs
+        SET status = 'queued', error_code = NULL, last_error = NULL,
+          completed_at = NULL, updated_at = ?
+        WHERE id = ? AND post_id = ? AND target = 'version' AND action = 'cleanup'
+          AND payload_json = ? AND status IN ('queue_failed', 'retrying', 'failed')
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM studio_post_versions AS version
+              JOIN studio_posts AS post ON post.id = version.post_id
+              WHERE version.id = ? AND version.state = 'superseded'
+                AND version.superseded_at = ? AND version.superseded_at <= ?
+                AND post.current_version_id IS NOT version.id
+                AND post.draft_version_id IS NOT version.id
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM delivery_jobs AS active
+                  WHERE active.version_id = version.id
+                    AND active.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+                )
+            ) OR (
+              json_extract(payload_json, '$.versionId') = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM studio_post_versions WHERE id = ?
+              )
+            )
+          )
+      `).bind(
+        queuedAt,
+        jobId,
+        candidate.post_id,
+        payload,
+        candidate.id,
+        candidate.superseded_at,
+        versionCutoff,
+        candidate.id,
+        candidate.id,
+      ).run();
+      if (requeued.meta?.changes !== 1) continue;
+    } else if (
+      candidate.job_status !== "queued" &&
+      !(candidate.job_status === "processing" && candidate.version_exists === 0)
+    ) {
+      continue;
+    }
+
+    try {
+      await queue.send({
+        type: "version_cleanup",
+        jobId,
+        versionId: candidate.id,
+      });
+      queued += 1;
+    } catch {
+      queueFailed += 1;
+      await markVersionCleanupQueueFailure(database, jobId);
+    }
+  }
+  return json(
+    {
+      queued,
+      queueFailed,
+      scanned: (assetRows.results?.length ?? 0) + (versionRows.results?.length ?? 0),
+    },
+    queueFailed > 0 ? 503 : 202,
+  );
+}
+
+function cleanupErrorCode(error: unknown) {
+  const code = error instanceof Error ? error.message : "asset_cleanup_failed";
+  return [
+    "asset_cleanup_configuration_invalid",
+    "asset_cleanup_ineligible",
+    "asset_delete_failed",
+    "asset_delete_unverified",
+    "asset_prefix_not_empty",
+    "asset_cache_purge_failed",
+    "asset_manifest_unavailable",
+  ].includes(code) ? code : "asset_cleanup_failed";
+}
+
+async function recordCleanupFailure(
+  database: StudioD1,
+  jobId: string,
+  assetId: string,
+  code: string,
+  terminal: boolean,
+) {
+  const updatedAt = new Date().toISOString();
+  await database.batch([
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = ?, error_code = ?, last_error = ?, updated_at = ?,
+        completed_at = CASE WHEN ? = 1 THEN ? ELSE NULL END
+      WHERE id = ? AND asset_id = ? AND target = 'asset' AND action = 'delete'
+        AND status != 'succeeded'
+    `).bind(
+      terminal ? "failed" : "retrying",
+      code,
+      code,
+      updatedAt,
+      terminal ? 1 : 0,
+      updatedAt,
+      jobId,
+      assetId,
+    ),
+    database.prepare(`
+      UPDATE studio_assets
+      SET processing_error = ?, updated_at = ?
+      WHERE id = ? AND status IN ('orphan', 'deleting')
+    `).bind(code, updatedAt, assetId),
+  ]);
+}
+
+async function assetPrefixesEmpty(media: StudioR2, asset: CleanupJobRow) {
+  const prefixes = [
+    `${asset.created_prefix}/private/${asset.asset_id}/`,
+    `${asset.created_prefix}/public/${asset.asset_id}/`,
+  ];
+  const listed = await Promise.all(
+    prefixes.map((prefix) => media.list({ prefix, limit: 1 })),
+  );
+  if (listed.some((page) => page.truncated || page.objects.length !== 0)) {
+    throw new Error("asset_prefix_not_empty");
+  }
+}
+
+async function purgePublicAssetCache(
+  config: NonNullable<ReturnType<typeof cleanupConfiguration>>,
+  assetId: string,
+) {
+  const url = `${config.publicOrigin}/media/${assetId}/portfolio-v1.webp`;
+  try {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/zones/${config.zoneId}/purge_cache`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${config.cachePurgeToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ files: [url] }),
+        signal: AbortSignal.timeout(5_000),
+      },
+    );
+    const result = await response.json() as { success?: unknown };
+    if (!response.ok || result.success !== true) {
+      throw new Error("asset_cache_purge_failed");
+    }
+  } catch {
+    throw new Error("asset_cache_purge_failed");
+  }
+}
+
+export async function processStudioAssetCleanupJob(
+  jobId: string,
+  assetId: string,
+  env: PhaseAEnv,
+) {
+  if (!uuidPattern.test(jobId) || !uuidPattern.test(assetId)) {
+    return { action: "ack" as const };
+  }
+  const database = env.STUDIO_DB;
+  const media = env.STUDIO_MEDIA;
+  const config = cleanupConfiguration(env);
+  if (!database || !media || !config) {
+    throw new Error("asset_cleanup_configuration_invalid");
+  }
+  const claimedAt = new Date().toISOString();
+  const claimed = await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'processing', attempts = attempts + 1,
+      error_code = NULL, last_error = NULL, updated_at = ?
+    WHERE id = ? AND asset_id = ? AND target = 'asset' AND action = 'delete'
+      AND (
+        status IN ('queued', 'retrying')
+        OR (status = 'processing' AND updated_at <= ?)
+      )
+  `).bind(
+    claimedAt,
+    jobId,
+    assetId,
+    new Date(Date.now() - PROCESSING_LEASE_MS).toISOString(),
+  ).run();
+  if (claimed.meta?.changes !== 1) return { action: "ack" as const };
+
+  const cutoff = new Date(Date.now() - config.orphanDays * DAY_MS).toISOString();
+  const asset = await database.prepare(`
+    SELECT job.id, job.post_id, job.asset_id, job.status,
+      asset.status AS asset_status, asset.created_prefix,
+      asset.private_source_key, asset.discord_r2_key, asset.public_r2_key,
+      asset.orphaned_at, asset.first_published_at
+    FROM delivery_jobs AS job
+    JOIN studio_assets AS asset ON asset.id = job.asset_id
+    WHERE job.id = ? AND job.asset_id = ? AND job.status = 'processing'
+      AND job.target = 'asset' AND job.action = 'delete'
+      AND asset.status IN ('orphan', 'deleting')
+      AND asset.orphaned_at IS NOT NULL AND asset.orphaned_at <= ?
+      AND asset.first_published_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM studio_post_version_assets WHERE asset_id = asset.id
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM delivery_jobs AS active
+        WHERE active.asset_id = asset.id AND active.id != job.id
+          AND active.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+      )
+  `).bind(jobId, assetId, cutoff).first<CleanupJobRow>();
+  if (!asset) throw new Error("asset_cleanup_ineligible");
+
+  const marked = await database.prepare(`
+    UPDATE studio_assets
+    SET status = 'deleting', processing_error = NULL, updated_at = ?
+    WHERE id = ? AND status IN ('orphan', 'deleting')
+      AND first_published_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM studio_post_version_assets WHERE asset_id = studio_assets.id
+      )
+  `).bind(claimedAt, assetId).run();
+  if (marked.meta?.changes !== 1) throw new Error("asset_cleanup_ineligible");
 
   try {
     await media.delete([
@@ -857,33 +1496,359 @@ async function deleteAsset(
       asset.public_r2_key,
     ]);
   } catch {
-    return json({ error: "asset_delete_failed" }, 503);
+    throw new Error("asset_delete_failed");
+  }
+  const remaining = await Promise.all([
+    media.get(asset.private_source_key),
+    media.get(asset.discord_r2_key),
+    media.get(asset.public_r2_key),
+  ]);
+  if (remaining.some(Boolean)) throw new Error("asset_delete_unverified");
+  await assetPrefixesEmpty(media, asset);
+  await purgePublicAssetCache(config, assetId);
+
+  const removed = await database.prepare(`
+    DELETE FROM studio_assets
+    WHERE id = ? AND status = 'deleting' AND first_published_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM studio_post_version_assets WHERE asset_id = studio_assets.id
+      )
+      AND EXISTS (
+        SELECT 1 FROM delivery_jobs
+        WHERE id = ? AND asset_id = studio_assets.id
+          AND target = 'asset' AND action = 'delete' AND status = 'processing'
+      )
+  `).bind(assetId, jobId).run();
+  if (removed.meta?.changes !== 1) throw new Error("asset_manifest_unavailable");
+  return { action: "ack" as const };
+}
+
+export async function recoverStudioAssetCleanupFailure(
+  jobId: string,
+  assetId: string,
+  env: PhaseAEnv,
+  error: unknown,
+  terminal: boolean,
+) {
+  if (!env.STUDIO_DB) return { action: "retry" as const, delaySeconds: 5 };
+  await recordCleanupFailure(
+    env.STUDIO_DB,
+    jobId,
+    assetId,
+    cleanupErrorCode(error),
+    terminal,
+  );
+  return terminal
+    ? { action: "retry" as const }
+    : { action: "retry" as const, delaySeconds: 5 };
+}
+
+function sameAssetIds(left: string[], right: string[]) {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+async function verifyRetiredAssetPrefixes(
+  media: StudioR2,
+  asset: VersionCleanupAssetRow,
+) {
+  const [privateObjects, publicObjects] = await Promise.all([
+    media.list({
+      prefix: `${asset.created_prefix}/private/${asset.id}/`,
+      limit: 2,
+    }),
+    media.list({
+      prefix: `${asset.created_prefix}/public/${asset.id}/`,
+      limit: 1,
+    }),
+  ]);
+  if (
+    privateObjects.truncated ||
+    privateObjects.objects.length !== 1 ||
+    privateObjects.objects[0]?.key !== asset.private_source_key
+  ) {
+    throw new Error("asset_private_archive_invalid");
+  }
+  if (publicObjects.truncated || publicObjects.objects.length !== 0) {
+    throw new Error("asset_prefix_not_empty");
+  }
+}
+
+async function recordVersionCleanupFailure(
+  database: StudioD1,
+  jobId: string,
+  code: string,
+  terminal: boolean,
+) {
+  const updatedAt = new Date().toISOString();
+  const job = await database.prepare(`
+    SELECT payload_json
+    FROM delivery_jobs
+    WHERE id = ? AND target = 'version' AND action = 'cleanup'
+  `).bind(jobId).first<{ payload_json: string }>();
+  const payload = job ? parseVersionCleanupPayload(job.payload_json) : null;
+  const statements = [
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = ?, error_code = ?, last_error = ?, updated_at = ?,
+        completed_at = CASE WHEN ? = 1 THEN ? ELSE NULL END
+      WHERE id = ? AND target = 'version' AND action = 'cleanup'
+        AND status != 'succeeded'
+    `).bind(
+      terminal ? "failed" : "retrying",
+      code,
+      code,
+      updatedAt,
+      terminal ? 1 : 0,
+      updatedAt,
+      jobId,
+    ),
+    ...(payload?.assetIds ?? []).map((assetId) => database.prepare(`
+      UPDATE studio_assets
+      SET processing_error = ?, updated_at = ?
+      WHERE id = ? AND status = 'orphan' AND first_published_at IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM studio_post_version_assets
+          WHERE asset_id = studio_assets.id
+        )
+    `).bind(code, updatedAt, assetId)),
+  ];
+  await database.batch(statements);
+}
+
+export async function processStudioVersionCleanupJob(
+  jobId: string,
+  versionId: string,
+  env: PhaseAEnv,
+) {
+  if (!uuidPattern.test(jobId) || !uuidPattern.test(versionId)) {
+    return { action: "ack" as const };
+  }
+  const database = env.STUDIO_DB;
+  const media = env.STUDIO_MEDIA;
+  const config = cleanupConfiguration(env);
+  if (!database || !media || !config) {
+    throw new Error("asset_cleanup_configuration_invalid");
   }
 
-  const results = await database.batch([
-    database.prepare(`
-      DELETE FROM studio_post_version_assets
-      WHERE version_id = ? AND asset_id = ?
-    `).bind(asset.version_id, assetId),
-    database.prepare(`
-      UPDATE studio_post_version_assets
-      SET ordinal = ordinal + 100
-      WHERE version_id = ? AND ordinal > ?
-    `).bind(asset.version_id, asset.ordinal),
-    database.prepare(`
-      UPDATE studio_post_version_assets
-      SET ordinal = ordinal - 101
-      WHERE version_id = ? AND ordinal >= 100
-    `).bind(asset.version_id),
-    database.prepare(`
-      DELETE FROM studio_assets
-      WHERE id = ? AND post_id = ? AND status = 'deleting'
-    `).bind(assetId, asset.post_id),
-  ]);
-  if (results[3]?.meta?.changes !== 1) {
-    return json({ error: "asset_manifest_unavailable" }, 503);
+  const claimedAt = new Date().toISOString();
+  const claimed = await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'processing', attempts = attempts + 1,
+      error_code = NULL, last_error = NULL, updated_at = ?
+    WHERE id = ? AND target = 'version' AND action = 'cleanup'
+      AND (
+        status IN ('queued', 'retrying')
+        OR (status = 'processing' AND updated_at <= ?)
+      )
+  `).bind(
+    claimedAt,
+    jobId,
+    new Date(Date.now() - PROCESSING_LEASE_MS).toISOString(),
+  ).run();
+  if (claimed.meta?.changes !== 1) return { action: "ack" as const };
+
+  const job = await database.prepare(`
+    SELECT id, post_id, status, payload_json
+    FROM delivery_jobs
+    WHERE id = ? AND target = 'version' AND action = 'cleanup'
+      AND status = 'processing'
+  `).bind(jobId).first<VersionCleanupJobRow>();
+  const payload = job ? parseVersionCleanupPayload(job.payload_json) : null;
+  if (!job || !payload || payload.versionId !== versionId) {
+    throw new Error("version_cleanup_manifest_invalid");
   }
-  return new Response(null, { status: 204 });
+  const cutoff = new Date(Date.now() - config.rollbackDays * DAY_MS).toISOString();
+  if (payload.supersededAt > cutoff) {
+    throw new Error("version_cleanup_ineligible");
+  }
+  const version = await database.prepare(`
+    SELECT version.id, version.post_id, version.state, version.superseded_at,
+      post.current_version_id, post.draft_version_id
+    FROM studio_post_versions AS version
+    JOIN studio_posts AS post ON post.id = version.post_id
+    WHERE version.id = ? AND version.post_id = ?
+  `).bind(versionId, job.post_id).first<{
+    id: string;
+    post_id: string;
+    state: string;
+    superseded_at: string | null;
+    current_version_id: string | null;
+    draft_version_id: string | null;
+  }>();
+
+  if (version) {
+    if (
+      version.state !== "superseded" ||
+      version.superseded_at !== payload.supersededAt ||
+      version.superseded_at > cutoff ||
+      version.current_version_id === versionId ||
+      version.draft_version_id === versionId
+    ) {
+      throw new Error("version_cleanup_ineligible");
+    }
+    const selected = await database.prepare(`
+      SELECT selected.asset_id, asset.first_published_at
+      FROM studio_post_version_assets AS selected
+      JOIN studio_assets AS asset ON asset.id = selected.asset_id
+      WHERE selected.version_id = ?
+      ORDER BY selected.ordinal ASC
+    `).bind(versionId).all<{ asset_id: string; first_published_at: string | null }>();
+    const selectedRows = selected.results ?? [];
+    if (
+      !sameAssetIds(selectedRows.map(({ asset_id }) => asset_id), payload.assetIds) ||
+      selectedRows.some(({ first_published_at }) => first_published_at === null)
+    ) {
+      throw new Error("version_cleanup_manifest_invalid");
+    }
+    const active = await database.prepare(`
+      SELECT count(*) AS count
+      FROM delivery_jobs
+      WHERE version_id = ?
+        AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+    `).bind(versionId).first<{ count: number }>();
+    if ((active?.count ?? 0) !== 0) throw new Error("version_cleanup_ineligible");
+
+    const retiredAt = new Date().toISOString();
+    const retired = await database.batch([
+      database.prepare(`
+        DELETE FROM studio_post_versions
+        WHERE id = ? AND post_id = ? AND state = 'superseded'
+          AND superseded_at = ? AND superseded_at <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM studio_posts
+            WHERE id = ?
+              AND (current_version_id = ? OR draft_version_id = ?)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM delivery_jobs
+            WHERE version_id = ?
+              AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+          )
+          AND EXISTS (
+            SELECT 1 FROM delivery_jobs
+            WHERE id = ? AND post_id = ? AND target = 'version'
+              AND action = 'cleanup' AND status = 'processing'
+              AND json_extract(payload_json, '$.versionId') = ?
+          )
+      `).bind(
+        versionId,
+        job.post_id,
+        payload.supersededAt,
+        cutoff,
+        job.post_id,
+        versionId,
+        versionId,
+        versionId,
+        jobId,
+        job.post_id,
+        versionId,
+      ),
+      ...payload.assetIds.map((assetId) => database.prepare(`
+        UPDATE studio_assets
+        SET status = 'orphan', orphaned_at = coalesce(orphaned_at, ?),
+          processing_error = NULL, updated_at = ?
+        WHERE id = ? AND post_id = ? AND status = 'ready'
+          AND first_published_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM studio_post_version_assets
+            WHERE asset_id = studio_assets.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM delivery_jobs
+            WHERE asset_id = studio_assets.id
+              AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+          )
+      `).bind(retiredAt, retiredAt, assetId, job.post_id)),
+    ]);
+    if (retired[0]?.meta?.changes !== 1) {
+      throw new Error("version_cleanup_conflict");
+    }
+  }
+
+  for (const assetId of payload.assetIds) {
+    const asset = await database.prepare(`
+      SELECT id, status, created_prefix, private_source_key,
+        discord_r2_key, public_r2_key, first_published_at
+      FROM studio_assets
+      WHERE id = ? AND post_id = ? AND status = 'orphan'
+        AND first_published_at IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM studio_post_version_assets
+          WHERE asset_id = studio_assets.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_jobs
+          WHERE asset_id = studio_assets.id
+            AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+        )
+    `).bind(assetId, job.post_id).first<VersionCleanupAssetRow>();
+    if (!asset) continue;
+    if (!(await media.get(asset.private_source_key))) {
+      throw new Error("asset_private_source_missing");
+    }
+    try {
+      await media.delete([asset.discord_r2_key, asset.public_r2_key]);
+    } catch {
+      throw new Error("asset_delete_failed");
+    }
+    const remaining = await Promise.all([
+      media.get(asset.discord_r2_key),
+      media.get(asset.public_r2_key),
+    ]);
+    if (remaining.some(Boolean)) throw new Error("asset_delete_unverified");
+    await verifyRetiredAssetPrefixes(media, asset);
+    await purgePublicAssetCache(config, asset.id);
+  }
+
+  const completedAt = new Date().toISOString();
+  const completed = await database.batch([
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'succeeded', error_code = NULL, last_error = NULL,
+        updated_at = ?, completed_at = ?
+      WHERE id = ? AND target = 'version' AND action = 'cleanup'
+        AND status = 'processing'
+    `).bind(completedAt, completedAt, jobId),
+    ...payload.assetIds.map((assetId) => database.prepare(`
+      UPDATE studio_assets
+      SET processing_error = NULL, updated_at = ?
+      WHERE id = ? AND status = 'orphan' AND first_published_at IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM studio_post_version_assets
+          WHERE asset_id = studio_assets.id
+        )
+    `).bind(completedAt, assetId)),
+  ]);
+  if (completed[0]?.meta?.changes !== 1) {
+    throw new Error("version_cleanup_conflict");
+  }
+  return { action: "ack" as const };
+}
+
+export async function recoverStudioVersionCleanupFailure(
+  jobId: string,
+  env: PhaseAEnv,
+  error: unknown,
+  terminal: boolean,
+) {
+  if (!env.STUDIO_DB) return { action: "retry" as const, delaySeconds: 5 };
+  const rawCode = error instanceof Error ? error.message : "version_cleanup_failed";
+  const code = [
+    "asset_cleanup_configuration_invalid",
+    "version_cleanup_manifest_invalid",
+    "version_cleanup_ineligible",
+    "version_cleanup_conflict",
+    "asset_private_source_missing",
+    "asset_private_archive_invalid",
+    "asset_delete_failed",
+    "asset_delete_unverified",
+    "asset_prefix_not_empty",
+    "asset_cache_purge_failed",
+  ].includes(rawCode) ? rawCode : "version_cleanup_failed";
+  await recordVersionCleanupFailure(env.STUDIO_DB, jobId, code, terminal);
+  return terminal
+    ? { action: "retry" as const }
+    : { action: "retry" as const, delaySeconds: 5 };
 }
 
 export async function handleStudioAssetRequest(
@@ -911,6 +1876,16 @@ export async function handleStudioAssetRequest(
       });
     }
 
+    if (pathname === ASSET_CLEANUP_PATH) {
+      if (request.method === "POST") {
+        return queueExpiredRetentionCleanup(request, env, database, queue);
+      }
+      return new Response("Method not allowed", {
+        status: 405,
+        headers: { allow: "POST" },
+      });
+    }
+
     const assetId = pathname.slice(`${ASSETS_PATH}/`.length);
     if (!assetId || assetId.includes("/")) {
       return json({ error: "asset_not_found" }, 404);
@@ -924,7 +1899,7 @@ export async function handleStudioAssetRequest(
         headers: { allow: "POST, DELETE" },
       });
     }
-    return deleteAsset(request, assetId, database, media);
+    return deleteAsset(request, assetId, database);
   } catch {
     return json({ error: "asset_storage_unavailable" }, 503);
   }

@@ -25,6 +25,12 @@ export interface StudioR2ObjectBody extends StudioR2Object {
   arrayBuffer(): Promise<ArrayBuffer>;
 }
 
+export interface StudioR2Objects {
+  objects: StudioR2Object[];
+  truncated: boolean;
+  cursor?: string;
+}
+
 export interface StudioR2 {
   get(key: string): Promise<StudioR2ObjectBody | null>;
   put(
@@ -38,7 +44,11 @@ export interface StudioR2 {
     },
   ): Promise<StudioR2Object | null>;
   delete(keys: string | string[]): Promise<void>;
-  list(options?: { prefix?: string; limit?: number }): Promise<unknown>;
+  list(options?: {
+    prefix?: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<StudioR2Objects>;
 }
 
 export interface StudioImageInfo {
@@ -66,6 +76,8 @@ export interface StudioImages {
 
 export type StudioQueueBody =
   | { type: "asset_process"; jobId: string; assetId: string }
+  | { type: "asset_cleanup"; jobId: string; assetId: string }
+  | { type: "version_cleanup"; jobId: string; versionId: string }
   | { type: "discord_delivery"; jobId: string }
   | { type: "taxonomy_sync"; jobId: string };
 
@@ -103,6 +115,11 @@ export interface PhaseAEnv {
   DISCORD_FORUM_CHANNEL_ID?: string;
   DISCORD_ANNOUNCEMENTS_CHANNEL_ID?: string;
   DISCORD_NOTIFY_ROLE_ID?: string;
+  ASSET_ORPHAN_RETENTION_DAYS?: string;
+  VERSION_ROLLBACK_RETENTION_DAYS?: string;
+  STUDIO_PUBLIC_ORIGIN?: string;
+  CLOUDFLARE_ZONE_ID?: string;
+  CLOUDFLARE_CACHE_PURGE_TOKEN?: string;
   STUDIO_DB?: StudioD1;
   STUDIO_MEDIA?: StudioR2;
   IMAGES?: StudioImages;

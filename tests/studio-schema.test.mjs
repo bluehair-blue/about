@@ -9,6 +9,7 @@ const migrationUrls = [
   "../migrations/0003_phase_a_delivery.sql",
   "../migrations/0004_phase_b_canonical_schema.sql",
   "../migrations/0005_phase_b_taxonomy.sql",
+  "../migrations/0006_phase_b_asset_manifest_cleanup.sql",
 ];
 const migrations = migrationUrls.map((path) =>
   readFileSync(new URL(path, import.meta.url), "utf8")
@@ -43,25 +44,34 @@ function insertVersion(
 }
 
 function insertAsset(database, id, postId) {
-  const root = `posts/2026/08/30/fixture--${postId}--phase-b/private/${id}`;
+  const prefix = `posts/2026/08/30/fixture--${postId}--phase-b`;
+  const root = `${prefix}/private/${id}`;
+  const hash = "b".repeat(64);
   database.prepare(`
     INSERT INTO studio_assets (
       id, post_id, status, created_prefix, title_snapshot, width, height,
       source_mime, source_bytes, source_sha256, private_source_key,
-      discord_r2_key, public_r2_key, orphaned_at, created_at, updated_at
+      discord_r2_key, public_r2_key, orphaned_at, created_at, updated_at,
+      public_bytes, public_sha256, public_width, public_height,
+      discord_bytes, discord_sha256, discord_width, discord_height,
+      processing_error
     ) VALUES (
-      ?, ?, 'ready', 'posts/2026/08/30/fixture--', 'phase-b', 1, 1,
-      'image/png', 1, ?, ?, ?, ?, NULL, ?, ?
+      ?, ?, 'ready', ?, 'phase-b', 1, 1,
+      'image/png', 1, ?, ?, ?, ?, NULL, ?, ?,
+      1, ?, 1, 1, 1, ?, 1, 1, NULL
     )
   `).run(
     id,
     postId,
-    "b".repeat(64),
+    prefix,
+    hash,
     `${root}/source.png`,
     `${root}/discord-v1.webp`,
     `${root.replace("/private/", "/public/")}/portfolio-v1.webp`,
     now,
     now,
+    hash,
+    hash,
   );
 }
 
@@ -278,6 +288,14 @@ test("keeps the seven-table contract and uses the documented query indexes", () 
       "studio_taxonomy",
     ]);
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.equal(
+      database.prepare(`
+        SELECT count(*) AS count
+        FROM sqlite_schema
+        WHERE sql LIKE '%delivery_jobs_asset_previous%'
+      `).get().count,
+      0,
+    );
 
     assert.match(
       plan(
@@ -295,6 +313,14 @@ test("keeps the seven-table contract and uses the documented query indexes", () 
         "published",
       ),
       /idx_studio_post_versions_post_state_updated_at/,
+    );
+    assert.match(
+      plan(
+        database,
+        "SELECT id FROM studio_post_versions WHERE state = 'superseded' AND superseded_at <= ? ORDER BY superseded_at, id",
+        now,
+      ),
+      /idx_studio_post_versions_superseded_at/,
     );
     assert.match(
       plan(
@@ -456,6 +482,177 @@ test("protects taxonomy identity and serializes one global Discord sync", () => 
   }
 });
 
+test("protects canonical asset identity, readiness, and orphan lifecycle", () => {
+  const database = databaseThrough();
+  const postId = "10000000-0000-4000-8000-000000000051";
+  const assetId = "30000000-0000-4000-8000-000000000051";
+  try {
+    insertPost(database, postId, "asset-manifest");
+    insertAsset(database, assetId, postId);
+
+    assert.throws(
+      () => database.prepare(`
+        UPDATE studio_assets SET source_sha256 = ? WHERE id = ?
+      `).run("c".repeat(64), assetId),
+      /asset_identity_immutable/,
+    );
+    assert.throws(
+      () => database.prepare(`
+        UPDATE studio_assets SET status = 'orphan' WHERE id = ?
+      `).run(assetId),
+      /asset_state_invalid/,
+    );
+    database.prepare(`
+      UPDATE studio_assets
+      SET status = 'orphan', orphaned_at = ? WHERE id = ?
+    `).run(now, assetId);
+
+    const draftId = "20000000-0000-4000-8000-000000000051";
+    insertVersion(database, { id: draftId, postId });
+    assert.throws(
+      () => database.prepare(`
+        INSERT INTO studio_post_version_assets (version_id, asset_id, ordinal, alt)
+        VALUES (?, ?, 0, 'orphan')
+      `).run(draftId, assetId),
+      /asset_not_attachable/,
+    );
+
+    database.prepare(`
+      UPDATE studio_assets SET first_published_at = ? WHERE id = ?
+    `).run(now, assetId);
+    assert.throws(
+      () => database.prepare(`
+        UPDATE studio_assets SET first_published_at = NULL WHERE id = ?
+      `).run(assetId),
+      /asset_first_published_immutable/,
+    );
+
+    const invalidId = "30000000-0000-4000-8000-000000000052";
+    const invalidPrefix = `posts/2026/08/30/fixture--${postId}--invalid`;
+    assert.throws(
+      () => database.prepare(`
+        INSERT INTO studio_assets (
+          id, post_id, status, created_prefix, title_snapshot, width, height,
+          source_mime, source_bytes, source_sha256, private_source_key,
+          discord_r2_key, public_r2_key, created_at, updated_at
+        ) VALUES (?, ?, 'ready', ?, 'invalid', 1, 1, 'image/png', 1, ?, ?, ?, ?, ?, ?)
+      `).run(
+        invalidId,
+        postId,
+        invalidPrefix,
+        "d".repeat(64),
+        `${invalidPrefix}/private/${invalidId}/source.png`,
+        `${invalidPrefix}/private/${invalidId}/discord-v1.webp`,
+        `${invalidPrefix}/public/${invalidId}/portfolio-v1.webp`,
+        now,
+        now,
+      ),
+      /asset_state_invalid/,
+    );
+
+    const publishedPostId = "10000000-0000-4000-8000-000000000052";
+    const publishedId = "20000000-0000-4000-8000-000000000052";
+    const processingId = "30000000-0000-4000-8000-000000000053";
+    const processingPrefix = `posts/2026/08/30/fixture--${publishedPostId}--processing`;
+    insertPost(database, publishedPostId, "asset-current-manifest");
+    insertVersion(database, {
+      id: publishedId,
+      postId: publishedPostId,
+      state: "candidate",
+    });
+    database.prepare(`
+      INSERT INTO studio_assets (
+        id, post_id, status, created_prefix, title_snapshot, width, height,
+        source_mime, source_bytes, source_sha256, private_source_key,
+        discord_r2_key, public_r2_key, first_published_at, created_at, updated_at
+      ) VALUES (?, ?, 'processing', ?, 'processing', 1, 1, 'image/png', 1, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      processingId,
+      publishedPostId,
+      processingPrefix,
+      "e".repeat(64),
+      `${processingPrefix}/private/${processingId}/source.png`,
+      `${processingPrefix}/private/${processingId}/discord-v1.webp`,
+      `${processingPrefix}/public/${processingId}/portfolio-v1.webp`,
+      now,
+      now,
+      now,
+    );
+    database.prepare(`
+      INSERT INTO studio_post_version_assets (version_id, asset_id, ordinal, alt)
+      VALUES (?, ?, 0, 'processing')
+    `).run(publishedId, processingId);
+    database.prepare(`
+      UPDATE studio_post_versions SET state = 'published' WHERE id = ?
+    `).run(publishedId);
+    assert.throws(
+      () => database.prepare(`
+        UPDATE studio_posts SET status = 'published', current_version_id = ?
+        WHERE id = ?
+      `).run(publishedId, publishedPostId),
+      /current_asset_manifest_invalid/,
+    );
+
+    const cleanupPostId = "10000000-0000-4000-8000-000000000053";
+    const cleanupVersionId = "20000000-0000-4000-8000-000000000053";
+    const cleanupAssetId = "30000000-0000-4000-8000-000000000054";
+    const cleanupJobId = "40000000-0000-4000-8000-000000000053";
+    insertPost(database, cleanupPostId, "asset-version-cleanup");
+    insertVersion(database, {
+      id: cleanupVersionId,
+      postId: cleanupPostId,
+      state: "candidate",
+    });
+    insertAsset(database, cleanupAssetId, cleanupPostId);
+    database.prepare(`
+      INSERT INTO studio_post_version_assets (version_id, asset_id, ordinal, alt)
+      VALUES (?, ?, 0, 'retained source')
+    `).run(cleanupVersionId, cleanupAssetId);
+    database.prepare(`
+      UPDATE studio_post_versions
+      SET state = 'published' WHERE id = ?
+    `).run(cleanupVersionId);
+    database.prepare(`
+      UPDATE studio_assets SET first_published_at = ? WHERE id = ?
+    `).run(now, cleanupAssetId);
+    database.prepare(`
+      UPDATE studio_post_versions
+      SET state = 'superseded', superseded_at = ? WHERE id = ?
+    `).run(now, cleanupVersionId);
+    assert.throws(
+      () => database.prepare("DELETE FROM studio_post_versions WHERE id = ?")
+        .run(cleanupVersionId),
+      /approved_version_delete_invalid/,
+    );
+    database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, target, action, payload_json,
+        status, created_at, updated_at
+      ) VALUES (?, ?, ?, 'version', 'cleanup', ?, 'processing', ?, ?)
+    `).run(
+      cleanupJobId,
+      `version:${cleanupVersionId}:cleanup:${now}`,
+      cleanupPostId,
+      JSON.stringify({
+        versionId: cleanupVersionId,
+        supersededAt: now,
+        assetIds: [cleanupAssetId],
+      }),
+      now,
+      now,
+    );
+    database.prepare("DELETE FROM studio_post_versions WHERE id = ?")
+      .run(cleanupVersionId);
+    assert.equal(
+      database.prepare("SELECT count(*) AS count FROM delivery_jobs WHERE id = ?")
+        .get(cleanupJobId).count,
+      1,
+    );
+  } finally {
+    database.close();
+  }
+});
+
 test("enforces canonical pointers, snapshots, taxonomy, pin, and hash invariants", () => {
   const database = databaseThrough();
   const firstPost = "10000000-0000-4000-8000-000000000011";
@@ -570,9 +767,9 @@ test("enforces canonical pointers, snapshots, taxonomy, pin, and hash invariants
     );
     assert.throws(
       () => database.prepare(`
-        UPDATE studio_assets SET discord_bytes = 1 WHERE id = ?
+        UPDATE studio_assets SET discord_bytes = 2 WHERE id = ?
       `).run(assetId),
-      /candidate_asset_manifest_immutable/,
+      /approved_asset_manifest_immutable/,
     );
     assert.throws(
       () => database.prepare(`
@@ -624,6 +821,9 @@ test("enforces canonical pointers, snapshots, taxonomy, pin, and hash invariants
       UPDATE studio_post_versions SET state = 'published' WHERE id = ?
     `).run(approved);
     database.prepare(`
+      UPDATE studio_assets SET first_published_at = ? WHERE id = ?
+    `).run(now, assetId);
+    database.prepare(`
       UPDATE studio_posts SET current_version_id = ?, status = 'published' WHERE id = ?
     `).run(approved, firstPost);
 
@@ -668,7 +868,7 @@ test("enforces canonical pointers, snapshots, taxonomy, pin, and hash invariants
       () => database.prepare(`
         UPDATE studio_assets SET post_id = ? WHERE id = ?
       `).run(secondPost, assetId),
-      /asset_post_immutable/,
+      /asset_identity_immutable/,
     );
     assert.throws(
       () => database.prepare("UPDATE studio_posts SET current_version_id = ? WHERE id = ?")
