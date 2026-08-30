@@ -1,6 +1,6 @@
 # Phase B — canonical publishing backend
 
-> 상태: Phase A 완료 대기
+> 상태: 진행 중 — 1–2. schema·migration과 D1 domain helper local 완료, staging 적용 대기
 >
 > 목적: D1/R2를 유일한 기준 원본으로 만들고 Studio Console의 초안·이미지·게시·수정·보관 작업을 완성한다.
 >
@@ -98,10 +98,10 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 
 ## 6. 구현 순서
 
-1. **schema와 migration**
+1. **schema와 migration — local 완료**
    - 일곱 table, foreign key, unique·check constraint와 실제 query index를 추가한다.
    - staging migration 생성 SQL을 검토하고 재적용·rollback 전략을 기록한다.
-2. **D1 domain helper**
+2. **D1 domain helper — local 완료**
    - draft revision save, candidate 생성, pointer finalization, lifecycle 변경을 공통 transaction 경계로 만든다.
    - route마다 binding을 직접 읽거나 범용 repository/factory를 만들지 않는다.
 3. **taxonomy**
@@ -149,7 +149,7 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 
 ## 8. 완료 증거
 
-- [ ] migration 재현과 unique·foreign key·revision 충돌 검사 통과
+- [x] local migration 재현과 unique·foreign key·revision 충돌 검사 통과
 - [ ] browser 재시작·재로그인 뒤 draft·asset 상태 복원
 - [ ] 저장 실패·409·PIN 만료에서 작업 이동 차단과 내용 보존
 - [ ] 새 게시·수정 실패 중 이전 정상 current 유지
@@ -159,16 +159,18 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 - [ ] purge가 exact key·prefix empty·cache purge를 검증하고 tombstone을 남김
 - [ ] taxonomy archive가 새 선택지와 Discord available tag에서 제거됨
 - [ ] 비인증 Studio page·API와 잘못된 same-origin write 거부
-- [ ] `npm run lint`와 `npm test` 통과
-- [ ] `technical-index.md`와 generated binding·migration 계약 동기화
+- [x] `npm run lint`와 `npm test` 통과
+- [x] `technical-index.md`와 generated binding·migration 계약 동기화
 
 ## 9. 완료 기록
 
 - commit: 미기록
-- migration: 미기록
+- migration: `0004_phase_b_canonical_schema.sql`. Phase A 7-table row를 보존하는 outbox rebuild와 notification·cache 작업 pair, pointer·outbox post ownership, 승인본과 job-bound candidate snapshot·state·delete 및 outbox identity 불변성, active delivery 중 비검증 current·Discord mapping 이동 차단, topic·asset 상한과 같은-post asset, 단일 pin·Hero rank, lowercase SHA-256, version·asset cleanup·reverse asset·delivery query index를 추가함. fresh `0001`–`0004`와 기존 `0001`–`0003` 정상 row upgrade를 local SQLite에서 재현하고, 기존 비정상 hash·taxonomy·asset/outbox ownership row와 진행 중인 구형 Discord create/update job은 rebuild 전에 fail closed함. `PRAGMA foreign_key_check`와 representative `EXPLAIN QUERY PLAN`을 통과했고 Wrangler local migration ledger에서도 적용 뒤 재실행이 `No migrations to apply`로 끝남. remote staging·production에는 아직 미적용
+- D1 domain helper: `worker/studio-domain.ts`가 draft create·revision CAS, exact draft/topic/asset snapshot 기반 candidate와 outbox 생성, archive 시작, 검증 완료 delivery의 current pointer finalization만 소유함. Discord·R2·Queue I/O는 기존 runtime에 유지함. 게시 준비와 no-change 판정 중 revision/source/topic/asset 또는 mapping이 바뀌면 candidate·job·`publishing` 전이를 모두 거부하고, active delivery 중 검증 job과 일치하지 않는 current/mapping 이동을 DB에서도 막음. job payload의 exact asset manifest를 처리 전에 다시 대조하며, Queue send와 실패 기록이 함께 실패해 `queued` outbox만 남아도 관리자 retry로 다시 enqueue할 수 있음. `finalizing` 재시도는 delivery 상태를 `queued`로 되돌리지 않아 Discord create/update/delete를 반복하지 않고 D1 finalization만 다시 수행함
+- rollback: Wrangler migration ledger로 한 번만 적용한다. 원격 적용 뒤 `0004`를 수정·삭제하거나 이전 migration을 재실행하지 않고, 문제가 생기면 영향 trigger·index 또는 outbox CHECK를 되돌리는 새 forward migration을 작성한다
 - staging publish/update fixture: 미기록
 - archive/restore/purge fixture: 미기록
-- Go/No-Go: 미통과
+- Go/No-Go: schema·D1 domain helper 단계 local Go. Phase B 전체와 staging migration은 미통과
 
 ## 다음 Phase
 

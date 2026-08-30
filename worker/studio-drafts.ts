@@ -1,11 +1,14 @@
 import {
   draftKinds,
-  draftSchemaVersion,
   draftTopics,
   type DraftKind,
   type DraftTopic,
 } from "../db/schema";
 import type { PhaseAEnv, StudioD1 } from "./phase-a-env";
+import {
+  createDraftRecord,
+  saveDraftRevisionCas,
+} from "./studio-domain";
 
 const MAX_REQUEST_BYTES = 16_384;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -141,191 +144,6 @@ function parseDraft(value: unknown): Draft | string {
   };
 }
 
-async function hashDraft(draft: Draft) {
-  const source = JSON.stringify({
-    title: draft.title,
-    body: draft.body,
-    kind: draft.kind,
-    topics: draft.topics,
-  });
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(source),
-  );
-  return Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0")
-  ).join("");
-}
-
-function topicInsert(
-  database: StudioD1,
-  versionId: string,
-  topic: DraftTopic,
-  condition?: { postId: string; revision: number },
-) {
-  if (!condition) {
-    return database.prepare(`
-      INSERT INTO studio_post_version_topics (version_id, taxonomy_id)
-      SELECT ?, id
-      FROM studio_taxonomy
-      WHERE dimension = 'topic' AND stable_key = ? AND status = 'active'
-    `).bind(versionId, topic);
-  }
-
-  return database.prepare(`
-    INSERT INTO studio_post_version_topics (version_id, taxonomy_id)
-    SELECT ?, taxonomy.id
-    FROM studio_taxonomy AS taxonomy
-    WHERE taxonomy.dimension = 'topic'
-      AND taxonomy.stable_key = ?
-      AND taxonomy.status = 'active'
-      AND EXISTS (
-        SELECT 1
-        FROM studio_post_versions AS version
-        WHERE version.id = ?
-          AND version.post_id = ?
-          AND version.state = 'draft'
-          AND version.revision = ?
-      )
-  `).bind(
-    versionId,
-    topic,
-    versionId,
-    condition.postId,
-    condition.revision,
-  );
-}
-
-async function createDraft(database: StudioD1, draft: Draft) {
-  const postId = crypto.randomUUID();
-  const versionId = crypto.randomUUID();
-  const savedAt = new Date().toISOString();
-  const sourceHash = await hashDraft(draft);
-
-  await database.batch([
-    database.prepare(`
-      INSERT INTO studio_posts (id, status, created_at, updated_at)
-      VALUES (?, 'draft', ?, ?)
-    `).bind(postId, savedAt, savedAt),
-    database.prepare(`
-      INSERT INTO studio_post_versions (
-        id, post_id, state, revision, source_hash, title, body_markdown,
-        kind, locale, created_at, updated_at, schema_version
-      ) VALUES (?, ?, 'draft', 1, ?, ?, ?, ?, 'ko', ?, ?, ?)
-    `).bind(
-      versionId,
-      postId,
-      sourceHash,
-      draft.title,
-      draft.body,
-      draft.kind,
-      savedAt,
-      savedAt,
-      draftSchemaVersion,
-    ),
-    ...draft.topics.map((topic) => topicInsert(database, versionId, topic)),
-    database.prepare(`
-      UPDATE studio_posts
-      SET draft_version_id = ?
-      WHERE id = ? AND draft_version_id IS NULL
-    `).bind(versionId, postId),
-  ]);
-
-  return json({ postId, versionId, revision: 1, savedAt }, 201);
-}
-
-async function updateDraft(database: StudioD1, draft: Draft) {
-  const pointer = await database.prepare(`
-    SELECT draft_version_id
-    FROM studio_posts
-    WHERE id = ? AND status IN ('draft', 'published')
-  `).bind(draft.postId).first<{ draft_version_id: string }>();
-  if (!pointer) return json({ error: "draft_not_found" }, 404);
-
-  const versionId = pointer.draft_version_id;
-  const savedAt = new Date().toISOString();
-  const sourceHash = await hashDraft(draft);
-  const statements = [
-    database.prepare(`
-      DELETE FROM studio_post_version_topics
-      WHERE version_id = ?
-        AND EXISTS (
-          SELECT 1
-          FROM studio_post_versions
-          WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
-        )
-    `).bind(versionId, versionId, draft.postId, draft.revision),
-    ...draft.topics.map((topic) =>
-      topicInsert(database, versionId, topic, {
-        postId: draft.postId as string,
-        revision: draft.revision,
-      })
-    ),
-    database.prepare(`
-      UPDATE studio_posts
-      SET updated_at = ?
-      WHERE id = ?
-        AND draft_version_id = ?
-        AND EXISTS (
-          SELECT 1
-          FROM studio_post_versions
-          WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
-        )
-    `).bind(
-      savedAt,
-      draft.postId,
-      versionId,
-      versionId,
-      draft.postId,
-      draft.revision,
-    ),
-  ];
-  const updateIndex = statements.length;
-  statements.push(
-    database.prepare(`
-      UPDATE studio_post_versions
-      SET revision = revision + 1,
-        source_hash = ?,
-        title = ?,
-        body_markdown = ?,
-        kind = ?,
-        updated_at = ?,
-        schema_version = ?
-      WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
-    `).bind(
-      sourceHash,
-      draft.title,
-      draft.body,
-      draft.kind,
-      savedAt,
-      draftSchemaVersion,
-      versionId,
-      draft.postId,
-      draft.revision,
-    ),
-  );
-
-  const results = await database.batch(statements);
-  if (results[updateIndex]?.meta?.changes !== 1) {
-    const current = await database.prepare(`
-      SELECT revision
-      FROM studio_post_versions
-      WHERE id = ? AND post_id = ? AND state = 'draft'
-    `).bind(versionId, draft.postId).first<{ revision: number }>();
-    return json(
-      { error: "revision_conflict", currentRevision: current?.revision ?? null },
-      409,
-    );
-  }
-
-  return json({
-    postId: draft.postId,
-    versionId,
-    revision: draft.revision + 1,
-    savedAt,
-  });
-}
-
 async function readDraft(request: Request, database: StudioD1) {
   const requestedPostId = new URL(request.url).searchParams.get("postId");
   if (requestedPostId !== null && !uuidPattern.test(requestedPostId)) {
@@ -391,9 +209,33 @@ async function saveDraft(request: Request, database: StudioD1) {
   const draft = parseDraft(decoded);
   if (typeof draft === "string") return json({ error: draft }, 400);
 
-  return draft.postId
-    ? updateDraft(database, draft)
-    : createDraft(database, draft);
+  const savedAt = new Date().toISOString();
+  if (!draft.postId) {
+    return json(await createDraftRecord(database, draft, savedAt), 201);
+  }
+
+  const result = await saveDraftRevisionCas(
+    database,
+    draft.postId,
+    draft.revision,
+    draft,
+    savedAt,
+  );
+  if (result.outcome === "not_found") {
+    return json({ error: "draft_not_found" }, 404);
+  }
+  if (result.outcome === "revision_conflict") {
+    return json(
+      { error: "revision_conflict", currentRevision: result.currentRevision },
+      409,
+    );
+  }
+  return json({
+    postId: result.postId,
+    versionId: result.versionId,
+    revision: result.revision,
+    savedAt: result.savedAt,
+  });
 }
 
 export async function handleStudioDraftRequest(
