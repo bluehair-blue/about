@@ -181,7 +181,7 @@ vinext()
 - Phase A 필수 environment·binding이 없을 때 `/studio*`가 `503`으로 fail closed하는지
 - Access JWT signature·issuer·audience·expiry·관리자 email과 same-origin JSON write 경계
 - Discord Ed25519 signature·5분 timestamp·PING·role add/remove·guild/channel/message/component allowlist
-- Phase A migration SQL, draft create·restore·update, stale revision 409 후 불변성, active draft 고유 제약
+- Phase A migration SQL, draft create·restore·update, 1.5초 debounce·IME·single-flight·`Ctrl/Cmd+S`·native undo/redo와 동적 topic 보존 client 계약, Access 만료 상태, stale revision 409 후 불변성과 active draft 고유 제약
 - Phase B `0004` 정상 row 보존과 legacy invariant fail-closed preflight, canonical pointer/outbox ownership·승인본 state/snapshot·topic/asset 상한·single pin/Hero·SHA 제약과 query index plan
 - Phase B `0005` stable taxonomy identity·kind lifecycle·active label·Discord ID 제약, post 없는 global outbox 직렬화, 동적 topic draft, add·rename·reorder·archive의 Forum full-tag fresh verification과 Queue/429/processing lease 복구
 - Phase B `0006` asset ID 기반 exact three-key identity·cross-role collision 차단, ready manifest 완전성·승인 snapshot 불변성·비가역 first-published marker, superseded cleanup 전용 outbox와 query plan

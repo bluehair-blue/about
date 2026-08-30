@@ -33,12 +33,22 @@ const assetCleanupMigration = readFileSync(
   "utf8",
 );
 
-test("keeps Studio text fields uncontrolled for native undo and redo", () => {
+test("keeps Studio autosave single-flight, IME-aware, and native", () => {
   const editor = readFileSync(
     new URL("../app/studio/draft-editor.tsx", import.meta.url),
     "utf8",
   );
 
+  assert.match(editor, /if \(savingRef\.current\) \{[\s\S]*?queuedSaveRef\.current = true;/);
+  assert.match(editor, /queuedSaveRef\.current = false;[\s\S]*?saveCurrentDraft\(\);/);
+  assert.match(editor, /window\.setTimeout\([\s\S]*?1_500\)/);
+  assert.match(editor, /event\.ctrlKey \|\| event\.metaKey/);
+  assert.match(editor, /onCompositionStart=\{handleCompositionStart\}/);
+  assert.match(editor, /onCompositionEnd=\{handleCompositionEnd\}/);
+  assert.match(editor, /다른 창에서 수정됨/);
+  assert.match(editor, /다시 로그인 필요/);
+  assert.match(editor, /topics: \[\.\.\.result\.topics\]/);
+  assert.doesNotMatch(editor, /topics: draftTopics\.filter/);
   assert.match(editor, /name="title"[\s\S]*?defaultValue=\{draft\.title\}/);
   assert.match(editor, /name="body"[\s\S]*?defaultValue=\{draft\.body\}/);
   assert.doesNotMatch(editor, /value=\{draft\.(?:title|body)\}/);
@@ -1145,6 +1155,11 @@ test("adds, renames, reorders, and archives one canonical Forum taxonomy", async
     );
     assert.equal(dynamicDraft.status, 201);
     const draft = await dynamicDraft.json();
+    const restoredDynamicDraft = await request(
+      `/studio/api/drafts?postId=${draft.postId}`,
+    );
+    assert.equal(restoredDynamicDraft.status, 200);
+    assert.deepEqual((await restoredDynamicDraft.json()).topics, ["music"]);
 
     const renameResponse = await request(
       "/studio/api/taxonomy",

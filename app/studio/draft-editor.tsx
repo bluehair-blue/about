@@ -32,7 +32,7 @@ type Draft = {
   title: string;
   body: string;
   kind: DraftKind;
-  topics: DraftTopic[];
+  topics: string[];
 };
 
 type SavedDraft = Draft & {
@@ -85,10 +85,12 @@ function isSavedDraft(value: unknown): value is SavedDraft {
     typeof draft.kind === "string" &&
     draftKinds.includes(draft.kind as DraftKind) &&
     Array.isArray(draft.topics) &&
+    draft.topics.length <= 4 &&
     draft.topics.every(
       (topic) =>
-        typeof topic === "string" && draftTopics.includes(topic as DraftTopic),
+        typeof topic === "string" && /^[a-z][a-z0-9-]{0,31}$/u.test(topic),
     ) &&
+    new Set(draft.topics).size === draft.topics.length &&
     typeof draft.savedAt === "string"
   );
 }
@@ -119,12 +121,25 @@ function savedTime(value: string) {
       })} 저장됨`;
 }
 
+function needsStudioLogin(status: number) {
+  return status === 401 || status === 403;
+}
+
+function draftLoadFailure(error: unknown) {
+  return error instanceof Error && error.message === "studio_access_required"
+    ? "다시 로그인 필요 · 로그인 후 초안을 다시 불러와 주세요"
+    : "초안을 불러오지 못했습니다 · 다시 시도해 주세요";
+}
+
 async function requestDraft() {
   const response = await fetch("/studio/api/drafts", {
     headers: { accept: "application/json" },
     cache: "no-store",
   });
   if (response.status === 204) return null;
+  if (needsStudioLogin(response.status)) {
+    throw new Error("studio_access_required");
+  }
 
   const result: unknown = await response.json();
   if (!response.ok || !isSavedDraft(result)) {
@@ -168,7 +183,7 @@ export function DraftEditor() {
         title: result.title,
         body: result.body,
         kind: result.kind,
-        topics: draftTopics.filter((topic) => result.topics.includes(topic)),
+        topics: [...result.topics],
       };
       draftRef.current = restored;
       dirtyRef.current = false;
@@ -185,9 +200,9 @@ export function DraftEditor() {
   const loadDraft = useCallback(async () => {
     try {
       restoreDraft(await requestDraft());
-    } catch {
+    } catch (error) {
       setLoadFailed(true);
-      setStatus("초안을 불러오지 못했습니다 · 다시 시도해 주세요");
+      setStatus(draftLoadFailure(error));
     }
   }, [restoreDraft]);
 
@@ -197,10 +212,10 @@ export function DraftEditor() {
       .then((result) => {
         if (active) restoreDraft(result);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (active) {
           setLoadFailed(true);
-          setStatus("초안을 불러오지 못했습니다 · 다시 시도해 주세요");
+          setStatus(draftLoadFailure(error));
         }
       });
     return () => {
@@ -254,6 +269,10 @@ export function DraftEditor() {
         },
         body: JSON.stringify(snapshot),
       });
+      if (needsStudioLogin(response.status)) {
+        setStatus("다시 로그인 필요 · 로그인 후 지금 저장을 눌러 주세요");
+        return;
+      }
       const result: unknown = await response.json();
 
       if (
@@ -264,7 +283,7 @@ export function DraftEditor() {
       ) {
         conflictRef.current = true;
         setConflict(true);
-        setStatus("저장 충돌 · 로컬 내용을 복사한 뒤 새로고침해 주세요");
+        setStatus("다른 창에서 수정됨 · 로컬 내용을 복사한 뒤 새로고침해 주세요");
         return;
       }
       if (!response.ok || !isSaveResult(result)) {
@@ -443,6 +462,9 @@ export function DraftEditor() {
                   name="topic"
                   value={topic}
                   checked={draft.topics.includes(topic)}
+                  disabled={
+                    !draft.topics.includes(topic) && draft.topics.length >= 4
+                  }
                   onChange={(event) =>
                     editDraft((current) => ({
                       ...current,
@@ -462,6 +484,7 @@ export function DraftEditor() {
           <p
             className={conflict ? styles.conflictStatus : styles.saveStatus}
             role="status"
+            aria-live="polite"
           >
             {status}
           </p>
