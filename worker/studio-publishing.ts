@@ -4,12 +4,17 @@ import type {
   StudioQueueProducer,
   StudioR2,
 } from "./phase-a-env";
-import { MAX_DISCORD_ATTACHMENT_BYTES } from "./studio-assets";
+import {
+  MAX_DISCORD_ATTACHMENT_BYTES,
+  queueStudioPostPurge,
+} from "./studio-assets";
 import {
   createPublishCandidate,
   finalizeVerifiedDelivery,
   isPublishSnapshotCurrent,
   queueArchive,
+  queueRestore,
+  setPortfolioVisibility,
   type PublishCandidateAsset,
 } from "./studio-domain";
 
@@ -17,7 +22,16 @@ const DISCORD_API = "https://discord.com/api/v10";
 const MAX_REQUEST_BYTES = 4_096;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-type PublishAction = "publish" | "delete" | "retry" | "reconcile";
+type PublishAction =
+  | "publish"
+  | "unpublish"
+  | "republish"
+  | "archive"
+  | "delete"
+  | "restore"
+  | "purge"
+  | "retry"
+  | "reconcile";
 type DiscordAction = "create" | "update" | "delete";
 type RetriableTarget = "discord" | "notification";
 
@@ -25,6 +39,7 @@ type PublishInput = {
   action: PublishAction;
   postId: string;
   jobId: string | null;
+  title: string | null;
 };
 
 type DraftSnapshot = {
@@ -42,6 +57,18 @@ type DraftSnapshot = {
   kind: string;
   locale: string;
   schema_version: number;
+};
+
+type ArchivedSnapshot = {
+  post_id: string;
+  current_version_id: string;
+  discord_thread_id: string;
+  discord_starter_message_id: string;
+  archived_at: string;
+  source_hash: string;
+  title: string;
+  body_markdown: string;
+  kind: string;
 };
 
 type PublishAsset = {
@@ -131,18 +158,38 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
   const action = value.action;
   const postId = value.postId;
   const jobId = value.jobId ?? null;
+  const title = value.title ?? null;
   if (
-    !["publish", "delete", "retry", "reconcile"].includes(String(action)) ||
+    ![
+      "publish",
+      "unpublish",
+      "republish",
+      "archive",
+      "delete",
+      "restore",
+      "purge",
+      "retry",
+      "reconcile",
+    ].includes(String(action)) ||
     typeof postId !== "string" ||
     !uuidPattern.test(postId) ||
     (jobId !== null && (typeof jobId !== "string" || !uuidPattern.test(jobId))) ||
     ((action === "retry" || action === "reconcile") && jobId === null) ||
     ((action !== "retry" && action !== "reconcile") && jobId !== null) ||
-    Object.keys(value).some((key) => !["action", "postId", "jobId"].includes(key))
+    (action === "purge" && (
+      typeof title !== "string" ||
+      Array.from(title).length < 1 ||
+      Array.from(title).length > 100 ||
+      title.normalize("NFC") !== title
+    )) ||
+    (action !== "purge" && title !== null) ||
+    Object.keys(value).some((key) =>
+      !["action", "postId", "jobId", "title"].includes(key)
+    )
   ) {
     return "invalid_publish_request";
   }
-  return { action: action as PublishAction, postId, jobId };
+  return { action: action as PublishAction, postId, jobId, title };
 }
 
 async function sha256(value: unknown) {
@@ -194,6 +241,53 @@ async function loadDraftSnapshot(database: StudioD1, postId: string) {
   ]);
   return {
     draft,
+    assets: assetRows.results ?? [],
+    topics: topicRows.results ?? [],
+    taxonomy: taxonomyRows.results ?? [],
+  };
+}
+
+async function loadArchivedSnapshot(database: StudioD1, postId: string) {
+  const post = await database.prepare(`
+    SELECT post.id AS post_id, post.current_version_id,
+      post.discord_thread_id, post.discord_starter_message_id, post.archived_at,
+      version.source_hash, version.title, version.body_markdown, version.kind
+    FROM studio_posts AS post
+    JOIN studio_post_versions AS version ON version.id = post.current_version_id
+    WHERE post.id = ? AND post.status = 'archived'
+      AND post.current_version_id IS NOT NULL
+      AND post.discord_thread_id IS NOT NULL
+      AND post.discord_starter_message_id IS NOT NULL
+      AND post.archived_at IS NOT NULL
+      AND version.state IN ('published', 'superseded')
+  `).bind(postId).first<ArchivedSnapshot>();
+  if (!post) return null;
+  const [assetRows, topicRows, taxonomyRows] = await Promise.all([
+    database.prepare(`
+      SELECT asset.id, asset.status, selected.ordinal, selected.alt,
+        asset.public_r2_key, asset.public_bytes, asset.public_sha256,
+        asset.discord_r2_key, asset.discord_bytes, asset.discord_sha256
+      FROM studio_post_version_assets AS selected
+      JOIN studio_assets AS asset ON asset.id = selected.asset_id
+      WHERE selected.version_id = ? AND asset.post_id = ?
+      ORDER BY selected.ordinal ASC, asset.id ASC
+    `).bind(post.current_version_id, postId).all<PublishAsset>(),
+    database.prepare(`
+      SELECT taxonomy.id, taxonomy.stable_key
+      FROM studio_post_version_topics AS selected
+      JOIN studio_taxonomy AS taxonomy ON taxonomy.id = selected.taxonomy_id
+      WHERE selected.version_id = ? AND taxonomy.dimension = 'topic'
+      ORDER BY taxonomy.ordinal ASC
+    `).bind(post.current_version_id).all<PublishTopic>(),
+    database.prepare(`
+      SELECT id, dimension, stable_key, label, ordinal, discord_tag_id
+      FROM studio_taxonomy
+      WHERE status = 'active'
+      ORDER BY CASE dimension WHEN 'kind' THEN 0 ELSE 1 END, ordinal ASC
+    `).all<TaxonomyRow>(),
+  ]);
+  return {
+    post,
     assets: assetRows.results ?? [],
     topics: topicRows.results ?? [],
     taxonomy: taxonomyRows.results ?? [],
@@ -406,7 +500,25 @@ async function preparePublish(
   );
 }
 
-async function prepareDelete(
+async function changePortfolioVisibility(
+  postId: string,
+  visible: boolean,
+  database: StudioD1,
+) {
+  const changed = await setPortfolioVisibility(database, {
+    postId,
+    visible,
+    changedAt: new Date().toISOString(),
+  });
+  if (!changed) return json({ error: "visibility_conflict" }, 409);
+  return json({
+    postId,
+    action: visible ? "republish" : "unpublish",
+    status: visible ? "published" : "unpublished",
+  });
+}
+
+async function prepareArchive(
   postId: string,
   database: StudioD1,
   queue: StudioQueueProducer,
@@ -415,7 +527,7 @@ async function prepareDelete(
     SELECT id, status, current_version_id, discord_thread_id,
       discord_starter_message_id
     FROM studio_posts
-    WHERE id = ? AND status = 'published'
+    WHERE id = ? AND status IN ('published', 'unpublished')
       AND current_version_id IS NOT NULL
       AND discord_thread_id IS NOT NULL
       AND discord_starter_message_id IS NOT NULL
@@ -439,18 +551,108 @@ async function prepareDelete(
       createdAt,
     });
   } catch {
-    return json({ error: "delete_conflict" }, 409);
+    return json({ error: "archive_conflict" }, 409);
   }
   if (!archived) {
-    return json({ error: "delete_conflict" }, 409);
+    return json({ error: "archive_conflict" }, 409);
   }
   const queued = await enqueue(database, queue, archived.jobId);
   return json(
     {
       postId,
       jobId: archived.jobId,
-      action: "delete",
+      action: "archive",
       status: queued ? "queued" : "queue_failed",
+    },
+    queued ? 202 : 503,
+  );
+}
+
+async function prepareRestore(
+  postId: string,
+  env: PhaseAEnv,
+  database: StudioD1,
+  queue: StudioQueueProducer,
+) {
+  const snapshot = await loadArchivedSnapshot(database, postId);
+  if (!snapshot) return json({ error: "archive_not_found" }, 404);
+  if (
+    snapshot.assets.some((asset) =>
+      asset.status !== "ready" ||
+      !asset.public_bytes ||
+      !asset.public_sha256 ||
+      !asset.discord_bytes ||
+      !asset.discord_sha256
+    )
+  ) {
+    return json({ error: "assets_not_ready" }, 409);
+  }
+  const attachmentBytes = snapshot.assets.reduce(
+    (sum, asset) => sum + (asset.discord_bytes ?? 0),
+    0,
+  );
+  if (attachmentBytes > MAX_DISCORD_ATTACHMENT_BYTES) {
+    return json({ error: "discord_attachment_budget" }, 413);
+  }
+  const tags = await forumTagIds(
+    env,
+    snapshot.taxonomy,
+    snapshot.post.kind,
+    snapshot.topics.map(({ stable_key }) => stable_key),
+  );
+  if ("error" in tags) {
+    return json(tags, tags.error === "discord_tags_missing" ? 409 : 502);
+  }
+  const expectedHash = await sha256({
+    title: snapshot.post.title,
+    body: snapshot.post.body_markdown,
+    kind: snapshot.post.kind,
+    topics: snapshot.topics.map(({ stable_key }) => stable_key),
+    tagIds: tags.tagIds,
+    assets: snapshot.assets.map((asset) => ({
+      assetId: asset.id,
+      ordinal: asset.ordinal,
+      alt: asset.alt,
+      r2Key: asset.discord_r2_key,
+      bytes: asset.discord_bytes,
+      sha256: asset.discord_sha256,
+    })),
+  });
+  let restored;
+  try {
+    restored = await queueRestore(database, {
+      postId,
+      currentVersionId: snapshot.post.current_version_id,
+      archivedThreadId: snapshot.post.discord_thread_id,
+      archivedStarterMessageId: snapshot.post.discord_starter_message_id,
+      archivedAt: snapshot.post.archived_at,
+      expectedHash,
+      tagIds: tags.tagIds,
+      assets: snapshot.assets.map((asset) => ({
+        id: asset.id,
+        ordinal: asset.ordinal,
+        alt: asset.alt,
+        publicR2Key: asset.public_r2_key,
+        publicBytes: asset.public_bytes as number,
+        publicSha256: asset.public_sha256 as string,
+        discordR2Key: asset.discord_r2_key,
+        discordBytes: asset.discord_bytes as number,
+        discordSha256: asset.discord_sha256 as string,
+      })),
+      createdAt: new Date().toISOString(),
+    });
+  } catch {
+    return json({ error: "restore_conflict" }, 409);
+  }
+  if (!restored) return json({ error: "restore_conflict" }, 409);
+  const queued = await enqueue(database, queue, restored.jobId);
+  return json(
+    {
+      postId,
+      jobId: restored.jobId,
+      action: "restore",
+      status: queued ? "queued" : "queue_failed",
+      expectedHash,
     },
     queued ? 202 : 503,
   );
@@ -463,7 +665,7 @@ async function retryDelivery(
   queue: StudioQueueProducer,
 ) {
   const job = await database.prepare(`
-    SELECT id, target, action, status
+    SELECT id, target, action, status, payload_json
     FROM delivery_jobs
     WHERE id = ? AND post_id = ? AND target IN ('discord', 'notification')
   `).bind(jobId, postId).first<{
@@ -471,6 +673,7 @@ async function retryDelivery(
     target: RetriableTarget;
     action: DiscordAction | "send";
     status: string;
+    payload_json: string;
   }>();
   if (!job) return json({ error: "delivery_job_not_found" }, 404);
   if (!["queued", "queue_failed", "retrying", "failed", "finalizing"].includes(job.status)) {
@@ -482,21 +685,42 @@ async function retryDelivery(
   if (job.status !== "queued" && job.status !== "finalizing") {
     const changedAt = new Date().toISOString();
     const statements = [];
+    let restore = false;
+    if (job.target === "discord" && job.action === "create") {
+      try {
+        const payload = JSON.parse(job.payload_json) as unknown;
+        restore = isRecord(payload) && payload.restore === true;
+      } catch {
+        restore = false;
+      }
+    }
     if (
       job.target === "discord" &&
       (job.action === "create" || job.action === "update")
     ) {
       statements.push(database.prepare(`
         UPDATE studio_posts
-        SET status = 'publishing', discord_delivery_state = 'queued', updated_at = ?
-        WHERE id = ? AND status IN ('draft', 'published', 'publishing')
+        SET status = ?, discord_delivery_state = 'queued', updated_at = ?
+        WHERE id = ?
+          AND (
+            (? = 1 AND status IN ('archived', 'restoring')) OR
+            (? = 0 AND status IN ('draft', 'published', 'publishing'))
+          )
           AND EXISTS (
             SELECT 1 FROM delivery_jobs
             WHERE id = ? AND post_id = studio_posts.id
               AND target = 'discord' AND action = ?
               AND status IN ('queue_failed', 'retrying', 'failed')
           )
-      `).bind(changedAt, postId, jobId, job.action));
+      `).bind(
+        restore ? "restoring" : "publishing",
+        changedAt,
+        postId,
+        restore ? 1 : 0,
+        restore ? 1 : 0,
+        jobId,
+        job.action,
+      ));
     }
     const jobIndex = statements.length;
     statements.push(database.prepare(`
@@ -508,9 +732,15 @@ async function retryDelivery(
         AND (? = 'notification' OR EXISTS (
           SELECT 1 FROM studio_posts
           WHERE studio_posts.id = delivery_jobs.post_id
-            AND studio_posts.status = 'publishing'
+            AND studio_posts.status = ?
         ))
-    `).bind(changedAt, jobId, postId, job.target));
+    `).bind(
+      changedAt,
+      jobId,
+      postId,
+      job.target,
+      restore ? "restoring" : "publishing",
+    ));
     const updated = await database.batch(statements);
     if (
       updated[jobIndex]?.meta?.changes !== 1 ||
@@ -694,7 +924,14 @@ async function readStatus(request: Request, database: StudioD1) {
     canPublish: ["draft", "published"].includes(post.status) &&
       latest?.status !== "outcome_unknown" &&
       notReadyCount === 0 && discordBytes <= MAX_DISCORD_ATTACHMENT_BYTES,
-    canDelete: post.status === "published" && Boolean(post.discord_thread_id),
+    canUnpublish: post.status === "published" && Boolean(post.current_version_id),
+    canRepublish: post.status === "unpublished" && Boolean(post.current_version_id),
+    canArchive: ["published", "unpublished"].includes(post.status) &&
+      Boolean(post.discord_thread_id),
+    canRestore: post.status === "archived" && Boolean(post.current_version_id),
+    canPurge: ["archived", "purging"].includes(post.status),
+    canDelete: ["published", "unpublished"].includes(post.status) &&
+      Boolean(post.discord_thread_id),
     latestJob: latest
       ? {
           jobId: latest.id,
@@ -742,8 +979,27 @@ export async function handleStudioPublishRequest(
     if (input.action === "publish") {
       return await preparePublish(input.postId, env, database, queue);
     }
-    if (input.action === "delete") {
-      return await prepareDelete(input.postId, database, queue);
+    if (input.action === "unpublish" || input.action === "republish") {
+      return await changePortfolioVisibility(
+        input.postId,
+        input.action === "republish",
+        database,
+      );
+    }
+    if (input.action === "archive" || input.action === "delete") {
+      return await prepareArchive(input.postId, database, queue);
+    }
+    if (input.action === "restore") {
+      return await prepareRestore(input.postId, env, database, queue);
+    }
+    if (input.action === "purge") {
+      return await queueStudioPostPurge(
+        input.postId,
+        input.title as string,
+        env,
+        database,
+        queue,
+      );
     }
     if (input.action === "reconcile") {
       return await reconcileDelivery(
@@ -883,6 +1139,9 @@ function parseDeliveryPayload(job: DeliveryJob) {
             tagIds: [] as string[],
             assets: [] as PublishCandidateAsset[],
             previousVersionId: null,
+            restore: false,
+            archivedThreadId: null,
+            archivedStarterMessageId: null,
           }
         : null;
     }
@@ -898,6 +1157,23 @@ function parseDeliveryPayload(job: DeliveryJob) {
     const assets = parsePayloadAssets(payload.assets);
     if (!assets) return null;
     if (job.action === "create") {
+      if (payload.restore === true) {
+        return typeof payload.previousVersionId === "string" &&
+            uuidPattern.test(payload.previousVersionId) &&
+            validDiscordId(payload.archivedThreadId) &&
+            validDiscordId(payload.archivedStarterMessageId)
+          ? {
+              threadId: null,
+              starterMessageId: null,
+              tagIds: payload.tagIds as string[],
+              assets,
+              previousVersionId: payload.previousVersionId,
+              restore: true,
+              archivedThreadId: payload.archivedThreadId,
+              archivedStarterMessageId: payload.archivedStarterMessageId,
+            }
+          : null;
+      }
       return payload.previousVersionId === null
         ? {
             threadId: null,
@@ -905,6 +1181,9 @@ function parseDeliveryPayload(job: DeliveryJob) {
             tagIds: payload.tagIds as string[],
             assets,
             previousVersionId: null,
+            restore: false,
+            archivedThreadId: null,
+            archivedStarterMessageId: null,
           }
         : null;
     }
@@ -920,6 +1199,9 @@ function parseDeliveryPayload(job: DeliveryJob) {
           tagIds: payload.tagIds as string[],
           assets,
           previousVersionId: payload.previousVersionId,
+          restore: false,
+          archivedThreadId: null,
+          archivedStarterMessageId: null,
         }
       : null;
   } catch {
@@ -1027,10 +1309,15 @@ function discordHeaders(env: PhaseAEnv, jsonBody = false) {
   };
 }
 
-function messagePayload(job: DeliveryJob, attachments: LoadedAttachment[]) {
+function messagePayload(
+  job: DeliveryJob,
+  attachments: LoadedAttachment[],
+  suppressNotifications = false,
+) {
   return {
     content: job.body_markdown,
     allowed_mentions: { parse: [] },
+    ...(suppressNotifications ? { flags: 1 << 12 } : {}),
     attachments: attachments.map((asset, index) => ({
       id: String(index),
       filename: asset.filename,
@@ -1092,12 +1379,18 @@ async function setJobState(
     statements.push(database.prepare(`
       UPDATE studio_posts
       SET status = CASE
+          WHEN EXISTS (
+            SELECT 1 FROM delivery_jobs AS restore_job
+            WHERE restore_job.id = ? AND restore_job.post_id = studio_posts.id
+              AND restore_job.action = 'create'
+              AND json_extract(restore_job.payload_json, '$.restore') = 1
+          ) THEN 'archived'
           WHEN current_version_id IS NOT NULL THEN 'published'
           WHEN ? = 'failed' THEN 'draft'
           ELSE status
         END,
         discord_delivery_state = ?, discord_checked_at = ?, updated_at = ?
-      WHERE status = 'publishing'
+      WHERE status IN ('publishing', 'restoring')
         AND EXISTS (
           SELECT 1
           FROM delivery_jobs
@@ -1106,6 +1399,7 @@ async function setJobState(
             AND status = ?
         )
     `).bind(
+      jobId,
       status,
       status,
       changedAt,
@@ -1186,10 +1480,11 @@ async function createDiscordPost(
   job: DeliveryJob,
   tagIds: string[],
   attachments: LoadedAttachment[],
+  suppressNotifications: boolean,
 ) {
   const payload = {
     name: job.title,
-    message: messagePayload(job, attachments),
+    message: messagePayload(job, attachments, suppressNotifications),
     applied_tags: tagIds,
   };
   let response: Response;
@@ -1456,6 +1751,9 @@ async function verifyDiscordDelivery(
     message.id !== starterMessageId ||
     message.channel_id !== threadId ||
     message.content !== job.body_markdown ||
+    (payload.restore && (
+      typeof message.flags !== "number" || (message.flags & (1 << 12)) === 0
+    )) ||
     !remoteFiles ||
     !attachmentsMatch(remoteFiles, attachments)
   ) {
@@ -1523,7 +1821,12 @@ async function finalizeDiscordDelivery(
     return { action: "ack" };
   }
   if (
-    (job.action === "create" && payload.previousVersionId !== null) ||
+    (job.action === "create" && !payload.restore && payload.previousVersionId !== null) ||
+    (job.action === "create" && payload.restore && (
+      payload.previousVersionId === null ||
+      payload.archivedThreadId !== job.discord_thread_id ||
+      payload.archivedStarterMessageId !== job.discord_starter_message_id
+    )) ||
     (job.action === "update" && (
       payload.threadId !== job.remote_id ||
       payload.starterMessageId !== job.remote_aux_id
@@ -1534,22 +1837,35 @@ async function finalizeDiscordDelivery(
   }
   if (!env.STUDIO_MEDIA) throw new Error("asset_storage_unavailable");
   await loadDeliveryAssets(database, env.STUDIO_MEDIA, job, payload.assets);
-  const finalized = await finalizeVerifiedDelivery(database, {
-    kind: "publish",
-    jobId: job.id,
-    postId: job.post_id,
-    candidateVersionId: job.version_id,
-    previousVersionId: payload.previousVersionId,
-    action: job.action,
-    remoteThreadId: job.remote_id,
-    remoteStarterMessageId: job.remote_aux_id,
-    expectedHash: job.expected_hash,
-    completedAt,
-  });
+  const finalized = payload.restore
+    ? await finalizeVerifiedDelivery(database, {
+        kind: "restore",
+        jobId: job.id,
+        postId: job.post_id,
+        currentVersionId: job.version_id,
+        archivedThreadId: payload.archivedThreadId as string,
+        archivedStarterMessageId: payload.archivedStarterMessageId as string,
+        remoteThreadId: job.remote_id,
+        remoteStarterMessageId: job.remote_aux_id,
+        expectedHash: job.expected_hash,
+        completedAt,
+      })
+    : await finalizeVerifiedDelivery(database, {
+        kind: "publish",
+        jobId: job.id,
+        postId: job.post_id,
+        candidateVersionId: job.version_id,
+        previousVersionId: payload.previousVersionId,
+        action: job.action,
+        remoteThreadId: job.remote_id,
+        remoteStarterMessageId: job.remote_aux_id,
+        expectedHash: job.expected_hash,
+        completedAt,
+      });
   if (!finalized) {
     throw new Error("delivery_finalization_failed");
   }
-  if (job.action === "create") {
+  if (job.action === "create" && !payload.restore) {
     const notification = await database.prepare(`
       SELECT id
       FROM delivery_jobs
@@ -1631,6 +1947,7 @@ export async function processStudioDiscordJob(
       job,
       payload.tagIds,
       attachments,
+      payload.restore,
     );
   }
   if (job.action === "update") {
@@ -1665,13 +1982,18 @@ type NotificationJob = {
   payload_json: string;
   status: string;
   attempts: number;
+  post_status: string;
+  current_version_id: string | null;
 };
 
 async function loadNotificationJob(database: StudioD1, jobId: string) {
   return database.prepare(`
-    SELECT id, dedupe_key, post_id, version_id, payload_json, status, attempts
-    FROM delivery_jobs
-    WHERE id = ? AND target = 'notification' AND action = 'send'
+    SELECT job.id, job.dedupe_key, job.post_id, job.version_id,
+      job.payload_json, job.status, job.attempts,
+      post.status AS post_status, post.current_version_id
+    FROM delivery_jobs AS job
+    JOIN studio_posts AS post ON post.id = job.post_id
+    WHERE job.id = ? AND job.target = 'notification' AND job.action = 'send'
   `).bind(jobId).first<NotificationJob>();
 }
 
@@ -1737,6 +2059,18 @@ export async function processStudioNotificationJob(
   if (!database) throw new Error("notification_unavailable");
   const job = await loadNotificationJob(database, jobId);
   if (!job || ["succeeded", "failed", "outcome_unknown"].includes(job.status)) {
+    return { action: "ack" };
+  }
+  if (
+    !job.current_version_id ||
+    !["published", "publishing"].includes(job.post_status)
+  ) {
+    await setNotificationState(
+      database,
+      job.id,
+      "failed",
+      "notification_post_not_public",
+    );
     return { action: "ack" };
   }
   const threadId = notificationThreadId(job);

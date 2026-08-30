@@ -66,6 +66,18 @@ export type ArchiveInput = {
   createdAt: string;
 };
 
+export type RestoreInput = {
+  postId: string;
+  currentVersionId: string;
+  archivedThreadId: string;
+  archivedStarterMessageId: string;
+  archivedAt: string;
+  expectedHash: string;
+  tagIds: string[];
+  assets: PublishCandidateAsset[];
+  createdAt: string;
+};
+
 export type DeliveryFinalization =
   | {
       kind: "publish";
@@ -86,6 +98,18 @@ export type DeliveryFinalization =
       currentVersionId: string;
       remoteThreadId: string;
       remoteStarterMessageId: string;
+      completedAt: string;
+    }
+  | {
+      kind: "restore";
+      jobId: string;
+      postId: string;
+      currentVersionId: string;
+      archivedThreadId: string;
+      archivedStarterMessageId: string;
+      remoteThreadId: string;
+      remoteStarterMessageId: string;
+      expectedHash: string;
       completedAt: string;
     };
 
@@ -616,7 +640,7 @@ export async function queueArchive(
       SET status = 'archiving', pinned_at = NULL, hero_rank = NULL,
         discord_delivery_state = 'queued', updated_at = ?
       WHERE id = ?
-        AND status = 'published'
+        AND status IN ('published', 'unpublished')
         AND current_version_id = ?
         AND discord_thread_id = ?
         AND discord_starter_message_id = ?
@@ -627,6 +651,13 @@ export async function queueArchive(
       input.threadId,
       input.starterMessageId,
     ),
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'failed', error_code = 'notification_post_archived',
+        last_error = 'notification_post_archived', updated_at = ?, completed_at = ?
+      WHERE post_id = ? AND target = 'notification' AND action = 'send'
+        AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+    `).bind(input.createdAt, input.createdAt, input.postId),
     database.prepare(`
       INSERT INTO delivery_jobs (
         id, dedupe_key, post_id, version_id, target, action, payload_json,
@@ -658,6 +689,114 @@ export async function queueArchive(
       input.currentVersionId,
       input.threadId,
       input.starterMessageId,
+      input.createdAt,
+    ),
+  ]);
+  return results[0]?.meta?.changes === 1 && results[2]?.meta?.changes === 1
+    ? { jobId }
+    : null;
+}
+
+export async function setPortfolioVisibility(
+  database: StudioD1,
+  input: { postId: string; visible: boolean; changedAt: string },
+) {
+  const expectedStatus = input.visible ? "unpublished" : "published";
+  const nextStatus = input.visible ? "published" : "unpublished";
+  const statements = [database.prepare(`
+    UPDATE studio_posts
+    SET status = ?, pinned_at = CASE WHEN ? = 1 THEN pinned_at ELSE NULL END,
+      hero_rank = CASE WHEN ? = 1 THEN hero_rank ELSE NULL END, updated_at = ?
+    WHERE id = ? AND status = ?
+      AND current_version_id IS NOT NULL
+      AND discord_thread_id IS NOT NULL
+      AND discord_starter_message_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM delivery_jobs
+        WHERE post_id = studio_posts.id
+          AND target = 'discord'
+          AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+      )
+  `).bind(
+    nextStatus,
+    input.visible ? 1 : 0,
+    input.visible ? 1 : 0,
+    input.changedAt,
+    input.postId,
+    expectedStatus,
+  )];
+  if (!input.visible) {
+    statements.push(database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'failed', error_code = 'notification_post_unpublished',
+        last_error = 'notification_post_unpublished', updated_at = ?, completed_at = ?
+      WHERE post_id = ? AND target = 'notification' AND action = 'send'
+        AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+        AND EXISTS (
+          SELECT 1 FROM studio_posts
+          WHERE id = ? AND status = 'unpublished'
+        )
+    `).bind(input.changedAt, input.changedAt, input.postId, input.postId));
+  }
+  const updated = await database.batch(statements);
+  return updated[0]?.meta?.changes === 1;
+}
+
+export async function queueRestore(
+  database: StudioD1,
+  input: RestoreInput,
+): Promise<{ jobId: string } | null> {
+  const jobId = crypto.randomUUID();
+  const payload = JSON.stringify({
+    restore: true,
+    tagIds: input.tagIds,
+    assets: input.assets,
+    previousVersionId: input.currentVersionId,
+    archivedThreadId: input.archivedThreadId,
+    archivedStarterMessageId: input.archivedStarterMessageId,
+  });
+  const results = await database.batch([
+    database.prepare(`
+      UPDATE studio_posts
+      SET status = 'restoring', pinned_at = NULL, hero_rank = NULL,
+        discord_delivery_state = 'queued', updated_at = ?
+      WHERE id = ? AND status = 'archived' AND current_version_id = ?
+        AND discord_thread_id = ? AND discord_starter_message_id = ?
+        AND archived_at = ?
+    `).bind(
+      input.createdAt,
+      input.postId,
+      input.currentVersionId,
+      input.archivedThreadId,
+      input.archivedStarterMessageId,
+      input.archivedAt,
+    ),
+    database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, version_id, target, action, payload_json,
+        status, attempts, expected_hash, created_at, updated_at
+      )
+      SELECT ?, ?, ?, ?, 'discord', 'create', ?, 'queued', 0, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM studio_posts
+        WHERE id = ? AND status = 'restoring' AND current_version_id = ?
+          AND discord_thread_id = ? AND discord_starter_message_id = ?
+          AND archived_at = ? AND updated_at = ?
+      )
+    `).bind(
+      jobId,
+      `restore:${input.postId}:${input.archivedAt}`,
+      input.postId,
+      input.currentVersionId,
+      payload,
+      input.expectedHash,
+      input.createdAt,
+      input.createdAt,
+      input.postId,
+      input.currentVersionId,
+      input.archivedThreadId,
+      input.archivedStarterMessageId,
+      input.archivedAt,
       input.createdAt,
     ),
   ]);
@@ -713,6 +852,71 @@ async function finalizeArchive(
       input.completedAt,
       input.completedAt,
       input.jobId,
+      input.postId,
+      input.currentVersionId,
+      input.remoteThreadId,
+      input.remoteStarterMessageId,
+    ),
+  ]);
+  return results[1]?.meta?.changes === 1;
+}
+
+async function finalizeRestore(
+  database: StudioD1,
+  input: Extract<DeliveryFinalization, { kind: "restore" }>,
+) {
+  const results = await database.batch([
+    database.prepare(`
+      UPDATE studio_posts
+      SET status = 'published', discord_thread_id = ?,
+        discord_starter_message_id = ?, discord_delivery_state = 'delivered',
+        discord_remote_hash = ?, discord_checked_at = ?, archived_at = NULL,
+        updated_at = ?
+      WHERE id = ? AND status = 'restoring' AND current_version_id = ?
+        AND discord_thread_id = ? AND discord_starter_message_id = ?
+        AND EXISTS (
+          SELECT 1 FROM delivery_jobs
+          WHERE id = ? AND post_id = ? AND version_id = ?
+            AND target = 'discord' AND action = 'create' AND status = 'finalizing'
+            AND expected_hash = ? AND delivered_hash = expected_hash
+            AND remote_id = ? AND remote_aux_id = ?
+        )
+    `).bind(
+      input.remoteThreadId,
+      input.remoteStarterMessageId,
+      input.expectedHash,
+      input.completedAt,
+      input.completedAt,
+      input.postId,
+      input.currentVersionId,
+      input.archivedThreadId,
+      input.archivedStarterMessageId,
+      input.jobId,
+      input.postId,
+      input.currentVersionId,
+      input.expectedHash,
+      input.remoteThreadId,
+      input.remoteStarterMessageId,
+    ),
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'succeeded', delivered_hash = expected_hash,
+        error_code = NULL, last_error = NULL, updated_at = ?, completed_at = ?
+      WHERE id = ? AND status = 'finalizing' AND expected_hash = ?
+        AND remote_id = ? AND remote_aux_id = ?
+        AND EXISTS (
+          SELECT 1 FROM studio_posts
+          WHERE id = ? AND status = 'published' AND current_version_id = ?
+            AND discord_thread_id = ? AND discord_starter_message_id = ?
+            AND archived_at IS NULL
+        )
+    `).bind(
+      input.completedAt,
+      input.completedAt,
+      input.jobId,
+      input.expectedHash,
+      input.remoteThreadId,
+      input.remoteStarterMessageId,
       input.postId,
       input.currentVersionId,
       input.remoteThreadId,
@@ -962,9 +1166,9 @@ export function finalizeVerifiedDelivery(
   database: StudioD1,
   input: DeliveryFinalization,
 ) {
-  return input.kind === "archive"
-    ? finalizeArchive(database, input)
-    : finalizePublish(database, input);
+  if (input.kind === "archive") return finalizeArchive(database, input);
+  if (input.kind === "restore") return finalizeRestore(database, input);
+  return finalizePublish(database, input);
 }
 
 export type TaxonomyCatalogItem = {

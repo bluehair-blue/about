@@ -372,6 +372,7 @@ class FakeDiscordForum {
     this.attachmentSequence = 0;
     this.deleteCalls = 0;
     this.createCalls = 0;
+    this.successfulCreates = 0;
     this.updateCalls = 0;
     this.notificationCalls = 0;
     this.notificationPayloads = [];
@@ -408,6 +409,7 @@ class FakeDiscordForum {
       id: this.starterMessageId,
       channel_id: this.threadId,
       content: source.content,
+      flags: source.flags ?? 0,
       attachments,
     };
   }
@@ -490,6 +492,11 @@ class FakeDiscordForum {
         this.failNextCreate = null;
         return Response.json({ retry_after: 2 }, { status: 429 });
       }
+      if (this.successfulCreates > 0) {
+        this.threadId = String(200000000000000011n + BigInt(this.successfulCreates - 1) * 2n);
+        this.starterMessageId = String(200000000000000012n + BigInt(this.successfulCreates - 1) * 2n);
+      }
+      this.successfulCreates += 1;
       const payload = JSON.parse(init.body.get("payload_json"));
       this.deleted = false;
       this.message = await this.messageFromForm(init.body, true);
@@ -2782,9 +2789,44 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
       `https://staging.example/media/${firstAsset.assetId}/portfolio-v1.webp`,
     ]);
 
+    const beforeVisibility = database.database.prepare(`
+      SELECT current_version_id, discord_thread_id, discord_starter_message_id
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    const mutationCountBeforeVisibility = discord.createCalls + discord.updateCalls +
+      discord.deleteCalls;
+    const unpublished = await request(
+      "/studio/api/publish",
+      jsonWrite({ action: "unpublish", postId: draft.postId }),
+    );
+    assert.equal(unpublished.status, 200);
+    assert.equal(
+      database.database.prepare("SELECT status FROM studio_posts WHERE id = ?")
+        .get(draft.postId).status,
+      "unpublished",
+    );
+    const republished = await request(
+      "/studio/api/publish",
+      jsonWrite({ action: "republish", postId: draft.postId }),
+    );
+    assert.equal(republished.status, 200);
+    assert.deepEqual(
+      database.database.prepare(`
+        SELECT current_version_id, discord_thread_id, discord_starter_message_id
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId),
+      beforeVisibility,
+    );
+    assert.equal(
+      discord.createCalls + discord.updateCalls + discord.deleteCalls,
+      mutationCountBeforeVisibility,
+    );
+    database.database.prepare("UPDATE studio_posts SET slug = ? WHERE id = ?")
+      .run("lifecycle-fixture", draft.postId);
+
     const deleteResponse = await request(
       "/studio/api/publish",
-      jsonWrite({ action: "delete", postId: draft.postId }),
+      jsonWrite({ action: "archive", postId: draft.postId }),
     );
     assert.equal(deleteResponse.status, 202);
     const deleteMessage = queueMessage(queue.messages.shift());
@@ -2796,6 +2838,40 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
         .get(draft.postId).status,
       "archived",
     );
+    const archivedMapping = database.database.prepare(`
+      SELECT slug, discord_thread_id, discord_starter_message_id
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    const currentPrivateKey = database.database.prepare(`
+      SELECT private_source_key FROM studio_assets WHERE id = ?
+    `).get(secondAsset.assetId).private_source_key;
+    assert.equal(media.objects.has(currentPrivateKey), true);
+
+    const restoreResponse = await request(
+      "/studio/api/publish",
+      jsonWrite({ action: "restore", postId: draft.postId }),
+    );
+    assert.equal(restoreResponse.status, 202);
+    const restoreMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [restoreMessage] }, env);
+    assert.equal(restoreMessage.acked, true);
+    const restored = database.database.prepare(`
+      SELECT status, slug, discord_thread_id, discord_starter_message_id,
+        archived_at
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    assert.equal(restored.status, "published");
+    assert.equal(restored.slug, archivedMapping.slug);
+    assert.notEqual(restored.discord_thread_id, archivedMapping.discord_thread_id);
+    assert.notEqual(
+      restored.discord_starter_message_id,
+      archivedMapping.discord_starter_message_id,
+    );
+    assert.equal(restored.archived_at, null);
+    assert.equal(discord.message.flags & (1 << 12), 1 << 12);
+    assert.equal(discord.notificationCalls, 1);
+    assert.equal(queue.messages.length, 0);
+    assert.equal(media.objects.has(currentPrivateKey), true);
 
     const retryDeleteJobId = crypto.randomUUID();
     const retryAt = new Date().toISOString();
@@ -2831,6 +2907,94 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
       database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
         .get(retryDeleteJobId).status,
       "succeeded",
+    );
+
+    const wrongTitlePurge = await request(
+      "/studio/api/publish",
+      jsonWrite({
+        action: "purge",
+        postId: draft.postId,
+        title: "다른 제목",
+      }),
+    );
+    assert.equal(wrongTitlePurge.status, 409);
+    assert.equal(
+      database.database.prepare("SELECT status FROM studio_posts WHERE id = ?")
+        .get(draft.postId).status,
+      "archived",
+    );
+    const secondAssetManifest = database.database.prepare(`
+      SELECT private_source_key, discord_r2_key, public_r2_key, created_prefix
+      FROM studio_assets WHERE id = ?
+    `).get(secondAsset.assetId);
+    const purgeResponse = await request(
+      "/studio/api/publish",
+      jsonWrite({
+        action: "purge",
+        postId: draft.postId,
+        title: "수정된 Forum fixture",
+      }),
+    );
+    assert.equal(purgeResponse.status, 202);
+    assert.equal(queue.messages.length, 2);
+    media.failDelete = true;
+    const failedPurgeBody = queue.messages.shift();
+    const failedPurge = queueMessage(failedPurgeBody, 1);
+    await worker.queue({ messages: [failedPurge] }, env);
+    assert.equal(failedPurge.acked, false);
+    assert.deepEqual(failedPurge.retryOptions, { delaySeconds: 5 });
+    media.failDelete = false;
+    const completedPurge = queueMessage(queue.messages.shift(), 1);
+    await worker.queue({ messages: [completedPurge] }, env);
+    assert.equal(completedPurge.acked, true);
+    assert.equal(
+      database.database.prepare("SELECT status FROM studio_posts WHERE id = ?")
+        .get(draft.postId).status,
+      "purging",
+    );
+    const resumedPurge = queueMessage(failedPurgeBody, 2);
+    await worker.queue({ messages: [resumedPurge] }, env);
+    assert.equal(resumedPurge.acked, true);
+
+    const tombstone = database.database.prepare(`
+      SELECT status, slug, draft_version_id, current_version_id,
+        discord_thread_id, discord_starter_message_id, discord_remote_hash,
+        archived_at, purged_at
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    assert.equal(tombstone.status, "purged");
+    assert.equal(tombstone.slug, "lifecycle-fixture");
+    assert.equal(tombstone.draft_version_id, null);
+    assert.equal(tombstone.current_version_id, null);
+    assert.equal(tombstone.discord_thread_id, discord.threadId);
+    assert.equal(tombstone.discord_starter_message_id, discord.starterMessageId);
+    assert.equal(tombstone.discord_remote_hash, null);
+    assert.equal(tombstone.archived_at, null);
+    assert.match(tombstone.purged_at, /^\d{4}-\d{2}-\d{2}T/u);
+    assert.equal(
+      database.database.prepare(`
+        SELECT count(*) AS count FROM studio_post_versions WHERE post_id = ?
+      `).get(draft.postId).count,
+      0,
+    );
+    assert.equal(
+      database.database.prepare(`
+        SELECT count(*) AS count FROM studio_assets WHERE post_id = ?
+      `).get(draft.postId).count,
+      0,
+    );
+    assert.equal(media.objects.has(currentPrivateKey), false);
+    assert.equal(media.objects.has(secondAssetManifest.private_source_key), false);
+    assert.equal(media.objects.has(secondAssetManifest.discord_r2_key), false);
+    assert.equal(media.objects.has(secondAssetManifest.public_r2_key), false);
+    assert.deepEqual(
+      await media.list({ prefix: `${secondAssetManifest.created_prefix}/`, limit: 1 }),
+      { objects: [], truncated: false },
+    );
+    assert.ok(
+      purgeCalls.includes(
+        `https://staging.example/media/${secondAsset.assetId}/portfolio-v1.webp`,
+      ),
     );
   } finally {
     globalThis.fetch = originalFetch;

@@ -20,6 +20,11 @@ type DeliveryStatus = {
   };
   budgetBytes: number;
   canPublish: boolean;
+  canUnpublish: boolean;
+  canRepublish: boolean;
+  canArchive: boolean;
+  canRestore: boolean;
+  canPurge: boolean;
   canDelete: boolean;
   latestJob: null | {
     jobId: string;
@@ -64,6 +69,11 @@ function isDeliveryStatus(value: unknown): value is DeliveryStatus {
     typeof (assets as Record<string, unknown>).discordBytes === "number" &&
     typeof status.budgetBytes === "number" &&
     typeof status.canPublish === "boolean" &&
+    typeof status.canUnpublish === "boolean" &&
+    typeof status.canRepublish === "boolean" &&
+    typeof status.canArchive === "boolean" &&
+    typeof status.canRestore === "boolean" &&
+    typeof status.canPurge === "boolean" &&
     typeof status.canDelete === "boolean" &&
     (status.latestJob === null || (
       typeof status.latestJob === "object" &&
@@ -141,6 +151,7 @@ export function DeliveryControls({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [freshPostId, setFreshPostId] = useState("");
+  const [purgeTitle, setPurgeTitle] = useState("");
   const shownDelivery = delivery?.postId === postId ? delivery : null;
   const currentDelivery = freshPostId === postId ? shownDelivery : null;
 
@@ -194,13 +205,25 @@ export function DeliveryControls({
   }, [load, postId]);
 
   async function submit(
-    action: "publish" | "delete" | "retry" | "reconcile",
+    action:
+      | "publish"
+      | "unpublish"
+      | "republish"
+      | "archive"
+      | "restore"
+      | "purge"
+      | "retry"
+      | "reconcile",
     retryJobId?: string,
   ) {
     if (!postId || busy) return;
     if (
-      action === "delete" &&
-      !window.confirm("BOT TEST Forum thread를 삭제합니다. 계속할까요?")
+      action === "archive" &&
+      !window.confirm("Portfolio를 숨기고 BOT TEST Forum thread를 삭제해 보관합니다. 계속할까요?")
+    ) return;
+    if (
+      action === "purge" &&
+      !window.confirm("private source와 모든 파생본을 영구 삭제하고 tombstone만 남깁니다. 되돌릴 수 없습니다.")
     ) return;
     setBusy(true);
     setMessage("");
@@ -217,6 +240,7 @@ export function DeliveryControls({
           ...((action === "retry" || action === "reconcile") && retryJobId
             ? { jobId: retryJobId }
             : {}),
+          ...(action === "purge" ? { title: purgeTitle } : {}),
         }),
       });
       const result = await response.json() as {
@@ -391,11 +415,57 @@ export function DeliveryControls({
           </button>
           <button
             type="button"
-            className={styles.dangerButton}
-            disabled={disabled || busy || !currentDelivery?.canDelete || Boolean(active(currentDelivery))}
-            onClick={() => void submit("delete")}
+            disabled={disabled || busy || !currentDelivery?.canUnpublish || Boolean(active(currentDelivery))}
+            onClick={() => void submit("unpublish")}
           >
-            Forum thread 삭제
+            Portfolio 공개 중지
+          </button>
+          <button
+            type="button"
+            disabled={disabled || busy || !currentDelivery?.canRepublish || Boolean(active(currentDelivery))}
+            onClick={() => void submit("republish")}
+          >
+            같은 mapping으로 재공개
+          </button>
+          <button
+            type="button"
+            disabled={disabled || busy || !currentDelivery?.canRestore || Boolean(active(currentDelivery))}
+            onClick={() => void submit("restore")}
+          >
+            새 Forum thread로 복원
+          </button>
+          <button
+            type="button"
+            className={styles.dangerButton}
+            disabled={disabled || busy || !currentDelivery?.canArchive || Boolean(active(currentDelivery))}
+            onClick={() => void submit("archive")}
+          >
+            양쪽 공개 보관
+          </button>
+        </div>
+        <div className={styles.purgeConfirmation}>
+          <label>
+            permanent purge 제목 재입력
+            <input
+              value={purgeTitle}
+              maxLength={100}
+              autoComplete="off"
+              onChange={(event) => setPurgeTitle(event.target.value.normalize("NFC"))}
+            />
+          </label>
+          <button
+            type="button"
+            className={styles.dangerButton}
+            disabled={
+              disabled ||
+              busy ||
+              !currentDelivery?.canPurge ||
+              purgeTitle.length === 0 ||
+              Boolean(active(currentDelivery))
+            }
+            onClick={() => void submit("purge")}
+          >
+            원본까지 영구 삭제
           </button>
         </div>
       </details>

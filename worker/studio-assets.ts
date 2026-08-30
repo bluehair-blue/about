@@ -106,6 +106,23 @@ type CleanupJobRow = {
   first_published_at: string | null;
 };
 
+type PostPurgeAssetRow = {
+  id: string;
+  created_prefix: string;
+  private_source_key: string;
+  discord_r2_key: string;
+  public_r2_key: string;
+};
+
+type PostPurgePayload = {
+  mode: "post_purge";
+  confirmedTitle: string;
+  createdPrefix: string;
+  privateSourceKey: string;
+  discordR2Key: string;
+  publicR2Key: string;
+};
+
 type VersionCleanupCandidateRow = {
   id: string;
   post_id: string;
@@ -1514,6 +1531,41 @@ function cleanupConfiguration(env: PhaseAEnv) {
   }
 }
 
+function parsePostPurgePayload(value: string): PostPurgePayload | null {
+  try {
+    const payload = JSON.parse(value) as unknown;
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      Object.keys(payload).length !== 6
+    ) {
+      return null;
+    }
+    const item = payload as Record<string, unknown>;
+    if (
+      item.mode !== "post_purge" ||
+      typeof item.confirmedTitle !== "string" ||
+      typeof item.createdPrefix !== "string" ||
+      typeof item.privateSourceKey !== "string" ||
+      typeof item.discordR2Key !== "string" ||
+      typeof item.publicR2Key !== "string"
+    ) {
+      return null;
+    }
+    return {
+      mode: "post_purge",
+      confirmedTitle: item.confirmedTitle,
+      createdPrefix: item.createdPrefix,
+      privateSourceKey: item.privateSourceKey,
+      discordR2Key: item.discordR2Key,
+      publicR2Key: item.publicR2Key,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function parseVersionCleanupPayload(value: string): VersionCleanupPayload | null {
   try {
     const payload = JSON.parse(value) as Record<string, unknown>;
@@ -1568,6 +1620,218 @@ async function markVersionCleanupQueueFailure(
     WHERE id = ? AND target = 'version' AND action = 'cleanup'
       AND status = 'queued'
   `).bind(new Date().toISOString(), jobId).run();
+}
+
+function purgeTombstoneStatement(
+  database: StudioD1,
+  postId: string,
+  purgedAt: string,
+) {
+  return database.prepare(`
+    UPDATE studio_posts
+    SET status = 'purged', draft_version_id = NULL, current_version_id = NULL,
+      pinned_at = NULL, hero_rank = NULL, discord_delivery_state = NULL,
+      discord_remote_hash = NULL, discord_checked_at = NULL, archived_at = NULL,
+      purged_at = ?, updated_at = ?
+    WHERE id = ? AND status = 'purging'
+      AND NOT EXISTS (SELECT 1 FROM studio_assets WHERE post_id = studio_posts.id)
+      AND NOT EXISTS (
+        SELECT 1 FROM studio_post_versions WHERE post_id = studio_posts.id
+      )
+  `).bind(purgedAt, purgedAt, postId);
+}
+
+export async function queueStudioPostPurge(
+  postId: string,
+  confirmedTitle: string,
+  env: PhaseAEnv,
+  database: StudioD1,
+  queue: StudioQueueProducer,
+) {
+  if (!cleanupConfiguration(env)) {
+    return json({ error: "asset_cleanup_configuration_invalid" }, 503);
+  }
+  const post = await database.prepare(`
+    SELECT post.status, version.title
+    FROM studio_posts AS post
+    LEFT JOIN studio_post_versions AS version ON version.id = post.current_version_id
+    WHERE post.id = ? AND post.status IN ('archived', 'purging')
+  `).bind(postId).first<{ status: "archived" | "purging"; title: string | null }>();
+  if (!post) return json({ error: "purge_not_found" }, 404);
+
+  if (post.status === "purging") {
+    const remaining = await database.prepare(`
+      SELECT job.id AS job_id, job.asset_id, job.status, job.payload_json
+      FROM delivery_jobs AS job
+      JOIN studio_assets AS asset ON asset.id = job.asset_id
+      WHERE job.post_id = ? AND job.target = 'asset' AND job.action = 'delete'
+        AND json_extract(job.payload_json, '$.mode') = 'post_purge'
+      ORDER BY asset.id ASC
+    `).bind(postId).all<{
+      job_id: string;
+      asset_id: string;
+      status: string;
+      payload_json: string;
+    }>();
+    const jobs = remaining.results ?? [];
+    const assetCount = await database.prepare(`
+      SELECT count(*) AS count FROM studio_assets WHERE post_id = ?
+    `).bind(postId).first<{ count: number }>();
+    if (jobs.length !== Number(assetCount?.count ?? 0)) {
+      return json({ error: "purge_conflict" }, 409);
+    }
+    if (
+      jobs.some((job) =>
+        parsePostPurgePayload(job.payload_json)?.confirmedTitle !== confirmedTitle
+      )
+    ) {
+      return json({ error: "purge_title_mismatch" }, 409);
+    }
+    if (jobs.length === 0) {
+      const finalized = await purgeTombstoneStatement(
+        database,
+        postId,
+        new Date().toISOString(),
+      ).run();
+      return finalized.meta?.changes === 1
+        ? json({ postId, status: "purged", queued: 0 })
+        : json({ error: "purge_conflict" }, 409);
+    }
+    let queued = 0;
+    let queueFailed = 0;
+    for (const job of jobs) {
+      if (["queue_failed", "retrying", "failed"].includes(job.status)) {
+        const reset = await database.prepare(`
+          UPDATE delivery_jobs
+          SET status = 'queued', error_code = NULL, last_error = NULL,
+            completed_at = NULL, updated_at = ?
+          WHERE id = ? AND status IN ('queue_failed', 'retrying', 'failed')
+        `).bind(new Date().toISOString(), job.job_id).run();
+        if (reset.meta?.changes !== 1) continue;
+      } else if (job.status !== "queued") {
+        continue;
+      }
+      try {
+        await queue.send({
+          type: "asset_cleanup",
+          jobId: job.job_id,
+          assetId: job.asset_id,
+        });
+        queued += 1;
+      } catch {
+        queueFailed += 1;
+        await markCleanupQueueFailure(database, job.job_id, job.asset_id);
+      }
+    }
+    return json(
+      { postId, status: "purging", queued, queueFailed },
+      queueFailed > 0 ? 503 : 202,
+    );
+  }
+
+  if (post.title !== confirmedTitle) {
+    return json({ error: "purge_title_mismatch" }, 409);
+  }
+  const assets = await database.prepare(`
+    SELECT id, created_prefix, private_source_key, discord_r2_key, public_r2_key
+    FROM studio_assets
+    WHERE post_id = ?
+    ORDER BY id ASC
+  `).bind(postId).all<PostPurgeAssetRow>();
+  const rows = assets.results ?? [];
+  const purgingAt = new Date().toISOString();
+  const jobs = rows.map((asset) => ({
+    id: crypto.randomUUID(),
+    asset,
+    payload: JSON.stringify({
+      mode: "post_purge",
+      confirmedTitle,
+      createdPrefix: asset.created_prefix,
+      privateSourceKey: asset.private_source_key,
+      discordR2Key: asset.discord_r2_key,
+      publicR2Key: asset.public_r2_key,
+    } satisfies PostPurgePayload),
+  }));
+  const statements = [
+    database.prepare(`
+      UPDATE studio_posts
+      SET status = 'purging', draft_version_id = NULL, current_version_id = NULL,
+        pinned_at = NULL, hero_rank = NULL, updated_at = ?
+      WHERE id = ? AND status = 'archived'
+        AND EXISTS (
+          SELECT 1 FROM studio_post_versions
+          WHERE id = studio_posts.current_version_id AND title = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_jobs
+          WHERE post_id = studio_posts.id
+            AND target != 'notification'
+            AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+        )
+    `).bind(purgingAt, postId, confirmedTitle),
+    ...jobs.map(({ id, asset, payload }) => database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, asset_id, target, action, payload_json,
+        status, attempts, created_at, updated_at
+      )
+      SELECT ?, ?, ?, ?, 'asset', 'delete', ?, 'queued', 0, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM studio_posts WHERE id = ? AND status = 'purging'
+      )
+    `).bind(
+      id,
+      `purge:${postId}:${asset.id}`,
+      postId,
+      asset.id,
+      payload,
+      purgingAt,
+      purgingAt,
+      postId,
+    )),
+    database.prepare(`
+      DELETE FROM studio_post_versions
+      WHERE post_id = ?
+        AND EXISTS (
+          SELECT 1 FROM studio_posts WHERE id = ? AND status = 'purging'
+        )
+    `).bind(postId, postId),
+    ...(rows.length === 0
+      ? [purgeTombstoneStatement(database, postId, purgingAt)]
+      : []),
+  ];
+  let transitioned;
+  try {
+    transitioned = await database.batch(statements);
+  } catch {
+    return json({ error: "purge_conflict" }, 409);
+  }
+  if (
+    transitioned[0]?.meta?.changes !== 1 ||
+    jobs.some((_, index) => transitioned[index + 1]?.meta?.changes !== 1)
+  ) {
+    return json({ error: "purge_conflict" }, 409);
+  }
+  if (rows.length === 0) {
+    return transitioned.at(-1)?.meta?.changes === 1
+      ? json({ postId, status: "purged", queued: 0 })
+      : json({ error: "purge_conflict" }, 409);
+  }
+
+  let queued = 0;
+  let queueFailed = 0;
+  for (const job of jobs) {
+    try {
+      await queue.send({ type: "asset_cleanup", jobId: job.id, assetId: job.asset.id });
+      queued += 1;
+    } catch {
+      queueFailed += 1;
+      await markCleanupQueueFailure(database, job.id, job.asset.id);
+    }
+  }
+  return json(
+    { postId, status: "purging", queued, queueFailed },
+    queueFailed > 0 ? 503 : 202,
+  );
 }
 
 async function parseCleanupAssetId(request: Request) {
@@ -1893,6 +2157,8 @@ function cleanupErrorCode(error: unknown) {
     "asset_prefix_not_empty",
     "asset_cache_purge_failed",
     "asset_manifest_unavailable",
+    "post_purge_manifest_invalid",
+    "post_purge_conflict",
   ].includes(code) ? code : "asset_cleanup_failed";
 }
 
@@ -1969,6 +2235,85 @@ async function purgePublicAssetCache(
   }
 }
 
+async function processPostPurgeAsset(
+  database: StudioD1,
+  media: StudioR2,
+  config: NonNullable<ReturnType<typeof cleanupConfiguration>>,
+  jobId: string,
+  assetId: string,
+  payload: PostPurgePayload,
+) {
+  const asset = await database.prepare(`
+    SELECT job.id, job.post_id, job.asset_id, job.status,
+      asset.status AS asset_status, asset.created_prefix,
+      asset.private_source_key, asset.discord_r2_key, asset.public_r2_key,
+      asset.orphaned_at, asset.first_published_at
+    FROM delivery_jobs AS job
+    JOIN studio_assets AS asset ON asset.id = job.asset_id
+    JOIN studio_posts AS post ON post.id = job.post_id
+    WHERE job.id = ? AND job.asset_id = ? AND job.status = 'processing'
+      AND job.target = 'asset' AND job.action = 'delete'
+      AND post.status = 'purging' AND asset.post_id = post.id
+      AND NOT EXISTS (
+        SELECT 1 FROM studio_post_version_assets WHERE asset_id = asset.id
+      )
+  `).bind(jobId, assetId).first<CleanupJobRow>();
+  if (
+    !asset ||
+    payload.createdPrefix !== asset.created_prefix ||
+    payload.privateSourceKey !== asset.private_source_key ||
+    payload.discordR2Key !== asset.discord_r2_key ||
+    payload.publicR2Key !== asset.public_r2_key
+  ) {
+    throw new Error("post_purge_manifest_invalid");
+  }
+
+  try {
+    await media.delete([
+      payload.privateSourceKey,
+      payload.discordR2Key,
+      payload.publicR2Key,
+    ]);
+  } catch {
+    throw new Error("asset_delete_failed");
+  }
+  const remaining = await Promise.all([
+    media.get(payload.privateSourceKey),
+    media.get(payload.discordR2Key),
+    media.get(payload.publicR2Key),
+  ]);
+  if (remaining.some(Boolean)) throw new Error("asset_delete_unverified");
+  await assetPrefixesEmpty(media, asset);
+  await purgePublicAssetCache(config, assetId);
+
+  const purgedAt = new Date().toISOString();
+  const finalized = await database.batch([
+    database.prepare(`
+      DELETE FROM studio_assets
+      WHERE id = ? AND post_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM studio_post_version_assets
+          WHERE asset_id = studio_assets.id
+        )
+        AND EXISTS (
+          SELECT 1 FROM delivery_jobs
+          WHERE id = ? AND asset_id = studio_assets.id
+            AND target = 'asset' AND action = 'delete' AND status = 'processing'
+            AND json_extract(payload_json, '$.mode') = 'post_purge'
+        )
+        AND EXISTS (
+          SELECT 1 FROM studio_posts
+          WHERE id = studio_assets.post_id AND status = 'purging'
+        )
+    `).bind(assetId, asset.post_id, jobId),
+    purgeTombstoneStatement(database, asset.post_id, purgedAt),
+  ]);
+  if (finalized[0]?.meta?.changes !== 1) {
+    throw new Error("post_purge_conflict");
+  }
+  return { action: "ack" as const };
+}
+
 export async function processStudioAssetCleanupJob(
   jobId: string,
   assetId: string,
@@ -2000,6 +2345,26 @@ export async function processStudioAssetCleanupJob(
     new Date(Date.now() - PROCESSING_LEASE_MS).toISOString(),
   ).run();
   if (claimed.meta?.changes !== 1) return { action: "ack" as const };
+
+  const claimedJob = await database.prepare(`
+    SELECT payload_json
+    FROM delivery_jobs
+    WHERE id = ? AND asset_id = ? AND target = 'asset' AND action = 'delete'
+      AND status = 'processing'
+  `).bind(jobId, assetId).first<{ payload_json: string }>();
+  const purgePayload = claimedJob
+    ? parsePostPurgePayload(claimedJob.payload_json)
+    : null;
+  if (purgePayload) {
+    return processPostPurgeAsset(
+      database,
+      media,
+      config,
+      jobId,
+      assetId,
+      purgePayload,
+    );
+  }
 
   const cutoff = new Date(Date.now() - config.orphanDays * DAY_MS).toISOString();
   const asset = await database.prepare(`

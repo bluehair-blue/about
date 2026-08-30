@@ -759,6 +759,30 @@
   margin-top: 1rem;
 }
 
+.purgeConfirmation {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.65rem;
+}
+
+.purgeConfirmation label {
+  display: grid;
+  gap: 0.35rem;
+  color: #c7ccda;
+  font-size: 0.8rem;
+}
+
+.purgeConfirmation input {
+  min-height: 2.5rem;
+  padding: 0 0.7rem;
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 0.65rem;
+  color: #f4f6fb;
+  background: #090b12;
+  font: inherit;
+}
+
 .mediaFilters {
   display: grid;
   grid-template-columns: minmax(12rem, 2fr) repeat(3, minmax(9rem, 1fr)) auto;
