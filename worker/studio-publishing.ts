@@ -14,6 +14,8 @@ import {
   isPublishSnapshotCurrent,
   queueArchive,
   queueRestore,
+  setHeroRank,
+  setPinnedPost,
   setPortfolioVisibility,
   type PublishCandidateAsset,
 } from "./studio-domain";
@@ -30,6 +32,9 @@ type PublishAction =
   | "delete"
   | "restore"
   | "purge"
+  | "pin"
+  | "unpin"
+  | "hero"
   | "retry"
   | "reconcile";
 type DiscordAction = "create" | "update" | "delete";
@@ -40,6 +45,8 @@ type PublishInput = {
   postId: string;
   jobId: string | null;
   title: string | null;
+  updatedAt: string | null;
+  heroRank: number | null | undefined;
 };
 
 type DraftSnapshot = {
@@ -107,6 +114,9 @@ type StatusRow = {
   discord_delivery_state: string | null;
   discord_remote_hash: string | null;
   discord_checked_at: string | null;
+  pinned_at: string | null;
+  hero_rank: number | null;
+  updated_at: string;
 };
 
 type AssetSummary = {
@@ -159,6 +169,9 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
   const postId = value.postId;
   const jobId = value.jobId ?? null;
   const title = value.title ?? null;
+  const updatedAt = value.updatedAt ?? null;
+  const heroRank = Object.hasOwn(value, "heroRank") ? value.heroRank : undefined;
+  const curationAction = action === "pin" || action === "unpin" || action === "hero";
   if (
     ![
       "publish",
@@ -168,6 +181,9 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
       "delete",
       "restore",
       "purge",
+      "pin",
+      "unpin",
+      "hero",
       "retry",
       "reconcile",
     ].includes(String(action)) ||
@@ -183,13 +199,38 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
       title.normalize("NFC") !== title
     )) ||
     (action !== "purge" && title !== null) ||
+    (curationAction && (
+      typeof updatedAt !== "string" ||
+      Number.isNaN(Date.parse(updatedAt)) ||
+      new Date(updatedAt).toISOString() !== updatedAt
+    )) ||
+    (!curationAction && updatedAt !== null) ||
+    (action === "hero" && !(
+      heroRank === null ||
+      (typeof heroRank === "number" && Number.isSafeInteger(heroRank) && heroRank >= 0)
+    )) ||
+    (action !== "hero" && heroRank !== undefined) ||
     Object.keys(value).some((key) =>
-      !["action", "postId", "jobId", "title"].includes(key)
+      ![
+        "action",
+        "postId",
+        "jobId",
+        "title",
+        "updatedAt",
+        "heroRank",
+      ].includes(key)
     )
   ) {
     return "invalid_publish_request";
   }
-  return { action: action as PublishAction, postId, jobId, title };
+  return {
+    action: action as PublishAction,
+    postId,
+    jobId,
+    title,
+    updatedAt,
+    heroRank: heroRank as number | null | undefined,
+  };
 }
 
 async function sha256(value: unknown) {
@@ -515,6 +556,34 @@ async function changePortfolioVisibility(
     postId,
     action: visible ? "republish" : "unpublish",
     status: visible ? "published" : "unpublished",
+  });
+}
+
+async function changeCuration(
+  input: PublishInput,
+  database: StudioD1,
+) {
+  const changedAt = new Date().toISOString();
+  const changed = input.action === "hero"
+    ? await setHeroRank(database, {
+        postId: input.postId,
+        heroRank: input.heroRank as number | null,
+        expectedUpdatedAt: input.updatedAt as string,
+        changedAt,
+      })
+    : await setPinnedPost(database, {
+        postId: input.postId,
+        pinned: input.action === "pin",
+        expectedUpdatedAt: input.updatedAt as string,
+        changedAt,
+      });
+  if (!changed) return json({ error: "curation_conflict" }, 409);
+  return json({
+    postId: input.postId,
+    action: input.action,
+    pinnedAt: input.action === "pin" ? changedAt : undefined,
+    heroRank: input.action === "hero" ? input.heroRank : undefined,
+    updatedAt: changedAt,
   });
 }
 
@@ -878,7 +947,7 @@ async function readStatus(request: Request, database: StudioD1) {
   const post = await database.prepare(`
     SELECT id, status, draft_version_id, current_version_id,
       discord_thread_id, discord_delivery_state, discord_remote_hash,
-      discord_checked_at
+      discord_checked_at, pinned_at, hero_rank, updated_at
     FROM studio_posts
     WHERE id = ?
   `).bind(postId).first<StatusRow>();
@@ -919,6 +988,9 @@ async function readStatus(request: Request, database: StudioD1) {
     discordDeliveryState: post.discord_delivery_state,
     discordCheckedAt: post.discord_checked_at,
     remoteHash: post.discord_remote_hash,
+    pinnedAt: post.pinned_at,
+    heroRank: post.hero_rank,
+    updatedAt: post.updated_at,
     assets: { count: assetCount, notReadyCount, discordBytes },
     budgetBytes: MAX_DISCORD_ATTACHMENT_BYTES,
     canPublish: ["draft", "published"].includes(post.status) &&
@@ -930,6 +1002,7 @@ async function readStatus(request: Request, database: StudioD1) {
       Boolean(post.discord_thread_id),
     canRestore: post.status === "archived" && Boolean(post.current_version_id),
     canPurge: ["archived", "purging"].includes(post.status),
+    canCurate: post.status === "published" && post.current_version_id !== null,
     canDelete: ["published", "unpublished"].includes(post.status) &&
       Boolean(post.discord_thread_id),
     latestJob: latest
@@ -978,6 +1051,9 @@ export async function handleStudioPublishRequest(
     }
     if (input.action === "publish") {
       return await preparePublish(input.postId, env, database, queue);
+    }
+    if (["pin", "unpin", "hero"].includes(input.action)) {
+      return await changeCuration(input, database);
     }
     if (input.action === "unpublish" || input.action === "republish") {
       return await changePortfolioVisibility(

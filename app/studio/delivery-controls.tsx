@@ -13,6 +13,9 @@ type DeliveryStatus = {
   discordDeliveryState: string | null;
   discordCheckedAt: string | null;
   remoteHash: string | null;
+  pinnedAt: string | null;
+  heroRank: number | null;
+  updatedAt: string;
   assets: {
     count: number;
     notReadyCount: number;
@@ -25,6 +28,7 @@ type DeliveryStatus = {
   canArchive: boolean;
   canRestore: boolean;
   canPurge: boolean;
+  canCurate: boolean;
   canDelete: boolean;
   latestJob: null | {
     jobId: string;
@@ -63,6 +67,9 @@ function isDeliveryStatus(value: unknown): value is DeliveryStatus {
     typeof status.hasCurrentVersion === "boolean" &&
     (status.discordDeliveryState === null || typeof status.discordDeliveryState === "string") &&
     (status.discordCheckedAt === null || typeof status.discordCheckedAt === "string") &&
+    (status.pinnedAt === null || typeof status.pinnedAt === "string") &&
+    (status.heroRank === null || typeof status.heroRank === "number") &&
+    typeof status.updatedAt === "string" &&
     typeof assets === "object" && assets !== null &&
     typeof (assets as Record<string, unknown>).count === "number" &&
     typeof (assets as Record<string, unknown>).notReadyCount === "number" &&
@@ -74,6 +81,7 @@ function isDeliveryStatus(value: unknown): value is DeliveryStatus {
     typeof status.canArchive === "boolean" &&
     typeof status.canRestore === "boolean" &&
     typeof status.canPurge === "boolean" &&
+    typeof status.canCurate === "boolean" &&
     typeof status.canDelete === "boolean" &&
     (status.latestJob === null || (
       typeof status.latestJob === "object" &&
@@ -152,6 +160,7 @@ export function DeliveryControls({
   const [message, setMessage] = useState("");
   const [freshPostId, setFreshPostId] = useState("");
   const [purgeTitle, setPurgeTitle] = useState("");
+  const [heroRankInput, setHeroRankInput] = useState("");
   const shownDelivery = delivery?.postId === postId ? delivery : null;
   const currentDelivery = freshPostId === postId ? shownDelivery : null;
 
@@ -212,9 +221,13 @@ export function DeliveryControls({
       | "archive"
       | "restore"
       | "purge"
+      | "pin"
+      | "unpin"
+      | "hero"
       | "retry"
       | "reconcile",
     retryJobId?: string,
+    heroRank?: number | null,
   ) {
     if (!postId || busy) return;
     if (
@@ -241,6 +254,10 @@ export function DeliveryControls({
             ? { jobId: retryJobId }
             : {}),
           ...(action === "purge" ? { title: purgeTitle } : {}),
+          ...(["pin", "unpin", "hero"].includes(action)
+            ? { updatedAt: currentDelivery?.updatedAt }
+            : {}),
+          ...(action === "hero" ? { heroRank: heroRank ?? null } : {}),
         }),
       });
       const result = await response.json() as {
@@ -325,6 +342,15 @@ export function DeliveryControls({
             {shownDelivery?.notificationJob
               ? `${shownDelivery.notificationJob.status} · ${shownDelivery.notificationJob.attempts}회 · ${timeLabel(shownDelivery.notificationJob.updatedAt)}`
               : "대상 아님"}
+          </dd>
+        </div>
+        <div>
+          <dt>pin · Hero</dt>
+          <dd>
+            {shownDelivery?.pinnedAt ? "pin 지정" : "pin 없음"}
+            {shownDelivery?.heroRank === null || shownDelivery?.heroRank === undefined
+              ? " · Hero 없음"
+              : ` · Hero ${shownDelivery.heroRank}`}
           </dd>
         </div>
         <div>
@@ -441,6 +467,54 @@ export function DeliveryControls({
             onClick={() => void submit("archive")}
           >
             양쪽 공개 보관
+          </button>
+        </div>
+        <div className={styles.heroControls}>
+          <button
+            type="button"
+            disabled={disabled || busy || !currentDelivery?.canCurate || Boolean(active(currentDelivery))}
+            onClick={() => void submit(currentDelivery?.pinnedAt ? "unpin" : "pin")}
+          >
+            {currentDelivery?.pinnedAt ? "pin 해제" : "이 post를 pin"}
+          </button>
+          <label>
+            Hero rank
+            <input
+              type="number"
+              min={0}
+              step={1}
+              inputMode="numeric"
+              value={heroRankInput}
+              placeholder={currentDelivery?.heroRank?.toString() ?? "없음"}
+              onChange={(event) => setHeroRankInput(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={
+              disabled ||
+              busy ||
+              !currentDelivery?.canCurate ||
+              !/^\d+$/u.test(heroRankInput) ||
+              !Number.isSafeInteger(Number(heroRankInput)) ||
+              Boolean(active(currentDelivery))
+            }
+            onClick={() => void submit("hero", undefined, Number(heroRankInput))}
+          >
+            Hero 적용
+          </button>
+          <button
+            type="button"
+            disabled={
+              disabled ||
+              busy ||
+              !currentDelivery?.canCurate ||
+              currentDelivery.heroRank === null ||
+              Boolean(active(currentDelivery))
+            }
+            onClick={() => void submit("hero", undefined, null)}
+          >
+            Hero 해제
           </button>
         </div>
         <div className={styles.purgeConfirmation}>

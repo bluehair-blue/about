@@ -742,6 +742,105 @@ export async function setPortfolioVisibility(
   return updated[0]?.meta?.changes === 1;
 }
 
+export async function setPinnedPost(
+  database: StudioD1,
+  input: {
+    postId: string;
+    pinned: boolean;
+    expectedUpdatedAt: string;
+    changedAt: string;
+  },
+) {
+  if (!input.pinned) {
+    const updated = await database.prepare(`
+      UPDATE studio_posts
+      SET pinned_at = NULL, updated_at = ?
+      WHERE id = ? AND status = 'published' AND current_version_id IS NOT NULL
+        AND updated_at = ? AND pinned_at IS NOT NULL
+    `).bind(
+      input.changedAt,
+      input.postId,
+      input.expectedUpdatedAt,
+    ).run();
+    return updated.meta?.changes === 1;
+  }
+  const results = await database.batch([
+    database.prepare(`
+      UPDATE studio_posts
+      SET pinned_at = NULL, updated_at = ?
+      WHERE id != ? AND pinned_at IS NOT NULL AND status != 'purged'
+        AND EXISTS (
+          SELECT 1 FROM studio_posts AS target
+          WHERE target.id = ? AND target.status = 'published'
+            AND target.current_version_id IS NOT NULL AND target.updated_at = ?
+        )
+    `).bind(
+      input.changedAt,
+      input.postId,
+      input.postId,
+      input.expectedUpdatedAt,
+    ),
+    database.prepare(`
+      UPDATE studio_posts
+      SET pinned_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'published' AND current_version_id IS NOT NULL
+        AND updated_at = ?
+    `).bind(
+      input.changedAt,
+      input.changedAt,
+      input.postId,
+      input.expectedUpdatedAt,
+    ),
+  ]);
+  return results[1]?.meta?.changes === 1;
+}
+
+export async function setHeroRank(
+  database: StudioD1,
+  input: {
+    postId: string;
+    heroRank: number | null;
+    expectedUpdatedAt: string;
+    changedAt: string;
+  },
+) {
+  const statements = [];
+  if (input.heroRank !== null) {
+    statements.push(database.prepare(`
+      UPDATE studio_posts
+      SET hero_rank = NULL, updated_at = ?
+      WHERE id != ? AND hero_rank = ? AND status != 'purged'
+        AND EXISTS (
+          SELECT 1 FROM studio_posts AS target
+          WHERE target.id = ? AND target.status = 'published'
+            AND target.current_version_id IS NOT NULL AND target.updated_at = ?
+        )
+    `).bind(
+      input.changedAt,
+      input.postId,
+      input.heroRank,
+      input.postId,
+      input.expectedUpdatedAt,
+    ));
+  }
+  const targetIndex = statements.length;
+  statements.push(database.prepare(`
+    UPDATE studio_posts
+    SET hero_rank = ?, updated_at = ?
+    WHERE id = ? AND status = 'published' AND current_version_id IS NOT NULL
+      AND updated_at = ?
+      AND (? IS NOT NULL OR hero_rank IS NOT NULL)
+  `).bind(
+    input.heroRank,
+    input.changedAt,
+    input.postId,
+    input.expectedUpdatedAt,
+    input.heroRank,
+  ));
+  const results = await database.batch(statements);
+  return results[targetIndex]?.meta?.changes === 1;
+}
+
 export async function queueRestore(
   database: StudioD1,
   input: RestoreInput,

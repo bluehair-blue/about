@@ -2476,6 +2476,185 @@ test("creates both derivatives and records Queue retry exhaustion for the DLQ", 
   }
 });
 
+test("atomically manages one pin and nullable Hero ranks with stale-action CAS", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: new MemoryR2(),
+    IMAGES: new FakeImages(),
+    PUBLISH_QUEUE: new MemoryQueue(),
+  });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [keys.publicJwk] });
+    }
+    assert.fail(`Unexpected request: ${String(input)}`);
+  };
+  const request = async (pathname, init = {}) => worker.fetch(
+    new Request(`https://staging.example${pathname}`, {
+      ...init,
+      headers: {
+        "cf-access-jwt-assertion": token,
+        ...(init.headers ?? {}),
+      },
+    }),
+    env,
+    executionContext(),
+  );
+
+  function seedPublished(index) {
+    const postId = crypto.randomUUID();
+    const versionId = crypto.randomUUID();
+    const createdAt = new Date(Date.now() - index * 1_000).toISOString();
+    database.database.prepare(`
+      INSERT INTO studio_posts (id, status, created_at, updated_at)
+      VALUES (?, 'draft', ?, ?)
+    `).run(postId, createdAt, createdAt);
+    database.database.prepare(`
+      INSERT INTO studio_post_versions (
+        id, post_id, state, revision, source_hash, title, body_markdown,
+        kind, locale, created_at, updated_at, schema_version
+      ) VALUES (?, ?, 'published', 0, ?, ?, '큐레이션 본문',
+        'update', 'ko', ?, ?, 1)
+    `).run(
+      versionId,
+      postId,
+      String(index).repeat(64),
+      `큐레이션 ${index}`,
+      createdAt,
+      createdAt,
+    );
+    database.database.prepare(`
+      UPDATE studio_posts
+      SET status = 'published', current_version_id = ?,
+        discord_thread_id = ?, discord_starter_message_id = ?
+      WHERE id = ?
+    `).run(
+      versionId,
+      `21000000000000000${index}`,
+      `22000000000000000${index}`,
+      postId,
+    );
+    return postId;
+  }
+
+  async function status(postId) {
+    const response = await request(`/studio/api/publish?postId=${postId}`);
+    assert.equal(response.status, 200);
+    return response.json();
+  }
+
+  try {
+    const firstId = seedPublished(1);
+    const secondId = seedPublished(2);
+    const firstInitial = await status(firstId);
+    const secondInitial = await status(secondId);
+    const firstPin = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "pin",
+        postId: firstId,
+        updatedAt: firstInitial.updatedAt,
+      }),
+    );
+    assert.equal(firstPin.status, 200);
+    const firstAfterPin = await status(firstId);
+    const secondPin = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "pin",
+        postId: secondId,
+        updatedAt: secondInitial.updatedAt,
+      }),
+    );
+    assert.equal(secondPin.status, 200);
+    assert.equal(
+      database.database.prepare(`
+        SELECT count(*) AS count FROM studio_posts WHERE pinned_at IS NOT NULL
+      `).get().count,
+      1,
+    );
+    assert.notEqual(
+      database.database.prepare("SELECT pinned_at FROM studio_posts WHERE id = ?")
+        .get(secondId).pinned_at,
+      null,
+    );
+    const stalePin = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "pin",
+        postId: firstId,
+        updatedAt: firstAfterPin.updatedAt,
+      }),
+    );
+    assert.equal(stalePin.status, 409);
+
+    const firstFresh = await status(firstId);
+    const firstHero = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "hero",
+        postId: firstId,
+        updatedAt: firstFresh.updatedAt,
+        heroRank: 0,
+      }),
+    );
+    assert.equal(firstHero.status, 200);
+    const secondFresh = await status(secondId);
+    const secondHero = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "hero",
+        postId: secondId,
+        updatedAt: secondFresh.updatedAt,
+        heroRank: 0,
+      }),
+    );
+    assert.equal(secondHero.status, 200);
+    assert.deepEqual(
+      database.database.prepare(`
+        SELECT id, hero_rank FROM studio_posts WHERE hero_rank IS NOT NULL
+      `).all().map(({ id, hero_rank }) => ({ id, hero_rank })),
+      [{ id: secondId, hero_rank: 0 }],
+    );
+    const secondRanked = await status(secondId);
+    const movedHero = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "hero",
+        postId: secondId,
+        updatedAt: secondRanked.updatedAt,
+        heroRank: 2,
+      }),
+    );
+    assert.equal(movedHero.status, 200);
+    const unpublish = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "unpublish", postId: secondId }),
+    );
+    assert.equal(unpublish.status, 200);
+    const hidden = await status(secondId);
+    assert.equal(hidden.pinnedAt, null);
+    assert.equal(hidden.heroRank, null);
+    const invalidPin = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "pin",
+        postId: secondId,
+        updatedAt: hidden.updatedAt,
+      }),
+    );
+    assert.equal(invalidPin.status, 409);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
 test("creates, updates, replaces tags and attachments, then deletes one Forum mapping", async () => {
   const worker = await loadWorker();
   const database = new SqliteD1();

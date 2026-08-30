@@ -766,6 +766,30 @@
   gap: 0.65rem;
 }
 
+.heroControls {
+  display: grid;
+  grid-template-columns: auto minmax(8rem, 1fr) auto auto;
+  align-items: end;
+  gap: 0.65rem;
+}
+
+.heroControls label {
+  display: grid;
+  gap: 0.35rem;
+  color: #c7ccda;
+  font-size: 0.8rem;
+}
+
+.heroControls input {
+  min-height: 2.5rem;
+  padding: 0 0.7rem;
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 0.65rem;
+  color: #f4f6fb;
+  background: #090b12;
+  font: inherit;
+}
+
 .purgeConfirmation label {
   display: grid;
   gap: 0.35rem;
@@ -995,7 +1019,9 @@
   .previewGrid,
   .taxonomyAdd,
   .mediaFilters,
-  .mediaStates {
+  .mediaStates,
+  .heroControls,
+  .purgeConfirmation {
     grid-template-columns: 1fr;
   }
 
