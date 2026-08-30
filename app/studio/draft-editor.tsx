@@ -371,8 +371,9 @@ export function DraftEditor() {
             제목 <small>{titleLength}/100</small>
           </span>
           <input
+            key={ready ? "ready" : "loading"}
             name="title"
-            value={draft.title}
+            defaultValue={draft.title}
             required
             disabled={!ready}
             aria-invalid={titleLength > 100}
@@ -389,8 +390,9 @@ export function DraftEditor() {
             본문 <small>{bodyLength}/2,000</small>
           </span>
           <textarea
+            key={ready ? "ready" : "loading"}
             name="body"
-            value={draft.body}
+            defaultValue={draft.body}
             rows={12}
             required
             disabled={!ready}

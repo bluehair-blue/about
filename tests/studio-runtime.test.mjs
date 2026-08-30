@@ -18,6 +18,17 @@ const deliveryMigration = readFileSync(
   "utf8",
 );
 
+test("keeps Studio text fields uncontrolled for native undo and redo", () => {
+  const editor = readFileSync(
+    new URL("../app/studio/draft-editor.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(editor, /name="title"[\s\S]*?defaultValue=\{draft\.title\}/);
+  assert.match(editor, /name="body"[\s\S]*?defaultValue=\{draft\.body\}/);
+  assert.doesNotMatch(editor, /value=\{draft\.(?:title|body)\}/);
+});
+
 class SqliteD1Statement {
   constructor(database, query, values = []) {
     this.database = database;
@@ -1301,6 +1312,42 @@ test("creates both derivatives and records Queue retry exhaustion for the DLQ", 
     assert.equal(manifest.assets[0].status, "ready");
     assert.equal(manifest.assets[0].publicBytes, ready.public_bytes);
     assert.equal(manifest.assets[0].discordBytes, ready.discord_bytes);
+
+    const attachmentBudget = 20 * 1024 * 1024;
+    database.database.prepare(`
+      UPDATE studio_assets SET discord_bytes = ? WHERE id = ?
+    `).run(attachmentBudget, uploaded.assetId);
+    const atBudget = await request(
+      `/studio/api/publish?postId=${draft.postId}`,
+    );
+    assert.equal(atBudget.status, 200);
+    const atBudgetBody = await atBudget.json();
+    assert.deepEqual(atBudgetBody.assets, {
+      count: 1,
+      notReadyCount: 0,
+      discordBytes: attachmentBudget,
+    });
+    assert.equal(atBudgetBody.canPublish, true);
+
+    database.database.prepare(`
+      UPDATE studio_assets SET discord_bytes = ? WHERE id = ?
+    `).run(attachmentBudget + 1, uploaded.assetId);
+    const overBudget = await request("/studio/api/publish", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://staging.example",
+        "x-studio-request": "1",
+      },
+      body: JSON.stringify({ action: "publish", postId: draft.postId }),
+    });
+    assert.equal(overBudget.status, 413);
+    assert.deepEqual(await overBudget.json(), {
+      error: "discord_attachment_budget",
+      attachmentBytes: attachmentBudget + 1,
+      budgetBytes: attachmentBudget,
+    });
+    assert.deepEqual(queue.messages, []);
 
     const poisonDraft = await createDraftFixture(request, "DLQ 검증");
     const poisonUpload = await request(
