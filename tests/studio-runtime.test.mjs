@@ -3494,6 +3494,9 @@ test("rejects draft and asset drift before creating a publish candidate", async 
     const delivery = queueMessage(queue.messages.shift());
     await worker.queue({ messages: [delivery] }, env);
     assert.equal(delivery.acked, true);
+    const notification = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [notification] }, env);
+    assert.equal(notification.acked, true);
     drift = { type: "draft", postId: unchangedDraft.postId };
     const staleNoChange = await request(
       "/studio/api/publish",

@@ -1,6 +1,6 @@
 # Phase B — canonical publishing backend
 
-> 상태: 진행 중 — 1–5. schema·D1 domain helper·taxonomy·asset manifest/retention·draft autosave local 완료, staging 적용 대기
+> 상태: local 구현 완료 — 1–11. canonical backend·Studio workflow·게시 lifecycle 자동화 검증 완료, staging migration·browser acceptance 대기
 >
 > 목적: D1/R2를 유일한 기준 원본으로 만들고 Studio Console의 초안·이미지·게시·수정·보관 작업을 완성한다.
 >
@@ -121,19 +121,19 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 7. **Studio UI — local 완료**
    - 목록, 편집기, 두 surface preview, Media 검색, 상태·재시도만 구현한다.
    - 색상 외에 상태 text·원인·마지막 확인 시각을 제공하고 action을 한 화면에 펼치지 않는다.
-8. **새 게시 saga**
+8. **새 게시 saga — local 완료**
    - ready asset → candidate와 create job 기록 → Discord create·fresh verify → current pointer와 `published` finalization 순서를 강제한다.
    - 결과 불명은 `outcome_unknown`으로 멈추고 자동 create를 반복하지 않는다.
    - 최초 게시 finalization 뒤에만 deduped opt-in notification을 enqueue한다.
-9. **수정 saga**
+9. **수정 saga — local 완료**
    - 기존 current를 유지한 채 candidate와 update job을 만들고 Discord hash·attachment·tag가 일치한 뒤 pointer를 교체한다.
    - update 불명은 remote hash를 먼저 대조하며 Discord 성공 뒤 finalization만 실패하면 edit를 반복하지 않는다.
-10. **공개 중지·archive·restore·purge**
+10. **공개 중지·archive·restore·purge — local 완료**
     - 공개 중지는 Portfolio만 숨기고 Discord thread를 유지한다.
     - archive는 Portfolio·media를 먼저 차단한 뒤 Discord thread를 삭제하고 private source를 보존한다.
     - restore는 private source로 새 Discord thread를 만들고 `SUPPRESS_NOTIFICATIONS` 검증 뒤 같은 slug를 공개한다.
     - permanent purge는 제목 재입력 뒤 exact R2 key를 삭제하고 최소 tombstone만 남긴다.
-11. **pin·Hero**
+11. **pin·Hero — local 완료**
     - pin 하나와 nullable `hero_rank`만 관리한다. 별도 큐레이션 table은 만들지 않는다.
 
 ## 7. Studio UX 완료 계약
@@ -153,19 +153,19 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 - [x] local migration 재현과 unique·foreign key·revision 충돌 검사 통과
 - [ ] browser 재시작·재로그인 뒤 draft·asset 상태 복원
 - [ ] 저장 실패·409·PIN 만료에서 작업 이동 차단과 내용 보존
-- [ ] 새 게시·수정 실패 중 이전 정상 current 유지
-- [ ] create/update 결과 불명에서 자동 재전송 없음
-- [ ] archive 뒤 public route·media 차단, private source 보존
-- [ ] restore가 새 Discord mapping과 같은 slug를 사용하고 알림을 보내지 않음
-- [ ] purge가 exact key·prefix empty·cache purge를 검증하고 tombstone을 남김
-- [ ] taxonomy archive가 새 선택지와 Discord available tag에서 제거됨
-- [ ] 비인증 Studio page·API와 잘못된 same-origin write 거부
+- [x] local 통합 검사에서 새 게시·수정 실패 중 이전 정상 current 유지
+- [x] local 통합 검사에서 create/update/notification 결과 불명 자동 재전송 없음
+- [ ] 실제 public route·media에서 archive 차단 확인; local lifecycle과 private source 보존 검사는 통과
+- [x] local 통합 검사에서 restore가 새 Discord mapping과 같은 slug를 사용하고 알림을 보내지 않음
+- [x] local 통합 검사에서 purge가 exact key·prefix empty·cache purge를 검증하고 tombstone을 남김
+- [x] local fake Forum 검사에서 taxonomy archive가 새 선택지와 Discord available tag에서 제거됨
+- [x] 비인증 Studio page·API와 잘못된 same-origin write 거부
 - [x] `npm run lint`와 `npm test` 통과
 - [x] `technical-index.md`와 generated binding·migration 계약 동기화
 
 ## 9. 완료 기록
 
-- commit: schema·D1 domain helper `b5d2a33`; taxonomy `e58dbfa`; asset manifest/retention `e040f31`; draft autosave `c06634e`; 안전한 작업 이동 `b013038`; Studio UI는 현재 local working tree checkpoint
+- commit: schema·D1 domain helper `b5d2a33`; taxonomy `e58dbfa`; asset manifest/retention `e040f31`; draft autosave `c06634e`; 안전한 작업 이동 `b013038`; Studio UI `d46f49a`; 최초 게시 알림 `a4ddae7`; update 결과 불명 복구 `0afd45f`; 공개 lifecycle·permanent purge `4ff82a9`; pin·Hero `a218acc`
 - migration: `0004_phase_b_canonical_schema.sql`. Phase A 7-table row를 보존하는 outbox rebuild와 notification·cache 작업 pair, pointer·outbox post ownership, 승인본과 job-bound candidate snapshot·state·delete 및 outbox identity 불변성, active delivery 중 비검증 current·Discord mapping 이동 차단, topic·asset 상한과 같은-post asset, 단일 pin·Hero rank, lowercase SHA-256, version·asset cleanup·reverse asset·delivery query index를 추가함. fresh `0001`–`0004`와 기존 `0001`–`0003` 정상 row upgrade를 local SQLite에서 재현하고, 기존 비정상 hash·taxonomy·asset/outbox ownership row와 진행 중인 구형 Discord create/update job은 rebuild 전에 fail closed함. `PRAGMA foreign_key_check`와 representative `EXPLAIN QUERY PLAN`을 통과했고 Wrangler local migration ledger에서도 적용 뒤 재실행이 `No migrations to apply`로 끝남. remote staging·production에는 아직 미적용
 - D1 domain helper: `worker/studio-domain.ts`가 draft create·revision CAS, exact draft/topic/asset snapshot 기반 candidate와 outbox 생성, archive 시작, 검증 완료 delivery의 current pointer finalization만 소유함. Discord·R2·Queue I/O는 기존 runtime에 유지함. 게시 준비와 no-change 판정 중 revision/source/topic/asset 또는 mapping이 바뀌면 candidate·job·`publishing` 전이를 모두 거부하고, active delivery 중 검증 job과 일치하지 않는 current/mapping 이동을 DB에서도 막음. job payload의 exact asset manifest를 처리 전에 다시 대조하며, Queue send와 실패 기록이 함께 실패해 `queued` outbox만 남아도 관리자 retry로 다시 enqueue할 수 있음. `finalizing` 재시도는 delivery 상태를 `queued`로 되돌리지 않아 Discord create/update/delete를 반복하지 않고 D1 finalization만 다시 수행함
 - taxonomy: forward migration `0005_phase_b_taxonomy.sql`이 `stable_key`·dimension 불변, kind lifecycle의 명시적 migration 요구, active label·Discord snowflake 제약과 post 없는 전역 taxonomy outbox 한 건의 직렬화를 추가함. `/studio/api/taxonomy`는 기존 Access·same-origin write 경계를 재사용해 list·topic add·label rename·dimension reorder·topic archive·sync retry를 제공하고, 동적 active topic을 draft save에서도 허용함. Queue consumer는 D1 active catalog 전체를 Discord Forum `available_tags` 한 묶음으로 PATCH한 뒤 fresh GET의 ID·label·순서를 검증하고 mapping과 job을 함께 완료함. archive된 topic은 새 draft와 Forum 선택지에서는 제외하되 과거 version link와 마지막 tag ID는 보존함. publish는 label 추측 대신 저장된 tag ID와 fresh remote label이 모두 일치할 때만 진행함. local SQLite와 fake Forum에서 add → rename → reorder → archive, Queue send 실패, 429, processing 중복·stale lease 복구를 검증했으며 remote staging에는 아직 미적용
@@ -173,10 +173,14 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 - draft autosave: Phase A에서 실제 staging browser로 검증한 `DraftEditor` coordinator를 중복 구현 없이 재사용함. 1.5초 debounce와 IME 조합 종료 후 저장, `Ctrl/Cmd+S`, uncontrolled title/body의 native undo/redo, `savingRef` 단일 in-flight와 최신 snapshot 1회 후속 저장을 source 회귀 계약으로 고정함. Worker는 mutable draft의 expected revision에만 `UPDATE`하고 stale revision은 현재 값을 덮지 않은 채 `409 revision_conflict`를 반환하며 local SQLite에서 revision 2 이후 stale revision 1의 title·body·kind·topic 불변성을 재검증함. Access `401/403`에서는 입력과 dirty state를 유지하고 `다시 로그인 필요`, conflict에서는 자동 저장을 멈추고 `다른 창에서 수정됨`을 `aria-live` status로 표시함. client는 backend가 반환한 동적 topic stable key를 네 개 상한 안에서 그대로 복원해 아직 UI에 없는 canonical 선택을 후속 저장에서 유실하지 않으며, 동적 taxonomy의 전체 선택·관리 UI는 7단계가 소유함
 - 안전한 작업 이동: `/studio?filter=all|working|attention` 목록과 `/studio/posts/{post_id}` 안정 URL을 추가하고, 명시한 post ID가 없을 때는 새 초안으로 오인하지 않고 `404`로 닫음. 첫 초안 저장은 승인된 ID로 현재 history entry만 교체하며, 오래된 active draft도 기간 조건 없이 `작업 중`에서 복원함. 내부 목록 이동은 현재 save cycle의 최종 change ID가 D1 revision으로 승인되고 선택한 이미지의 private source 접수가 끝난 뒤에만 `location.assign`을 실행함. 저장 실패·409·Access 만료·미접수 원본에서는 route와 uncontrolled 입력을 유지하고 native dialog에 `다시 저장 / 현재 화면 유지 / 변경 내용 복사`만 제공하며, dirty·saving·미접수 파일의 browser unload는 native 경고로 보호함. private R2 저장 실패 응답의 로컬 `File`은 제거하지 않고 실패 manifest를 정리한 뒤 같은 화면에서 재접수할 수 있게 하며, 응답 자체가 불명확한 source upload는 자동 재전송하지 않음. lifecycle 전이 중 남은 draft는 안정 URL에서 읽기 전용으로 복원하되 기존 publish candidate freeze를 넓히지 않음. local build·SQLite에서 stable ID 404, URL filter/count/attention 우선 정렬, 2001년 active draft 보존, withheld 읽기 전용과 save 거부를 검증했으며 실제 staging browser의 save 실패·409·PIN 만료 이동 차단 증거는 아직 미기록
 - Studio UI: worker와 client가 같은 제한 Markdown validator를 사용하고 native textarea selection을 보존하는 toolbar와 오류 위치 표시를 추가함. React node만으로 Portfolio card/detail과 Discord starter 두 미리보기를 만들고 Access 보호 asset preview가 ready derivative 또는 private source fallback만 반환하게 함. taxonomy는 canonical catalog·동기화 상태·원인·확인 시각과 add·rename·reorder·archive를 접힌 관리 영역에서 제공하며, 보관 topic은 새 선택에서 제외하되 같은 mutable draft의 기존 선택만 저장·해제할 수 있게 D1 helper까지 맞춤. 이미지 manifest는 upload·detach·alt·순서 모두 같은 draft revision CAS를 사용하고, drag와 위·아래 button, 1.5초 autosave, 이동 전 manifest flush를 제공함. `/studio/media`는 post 제목·upload 날짜·asset 상태 검색, source·Portfolio·Discord 상태와 owner editor 이동, retention·참조를 서버에서 다시 확인하는 특정 orphan cleanup만 제공함. 목록과 전달 영역은 Portfolio·Discord 상태·원인·마지막 확인 시각을 text로 표시하고 오래된 응답의 action을 막으며, finalizing retry가 Discord mutation을 반복하지 않는다는 점을 명시함. 새 dependency·Context·table·migration 없이 기존 D1·R2·Queue 계약을 재사용했고 local build·21개 Studio runtime fixture에서 보관 topic 유지·해제·재선택 거부, manifest reorder·alt·stale revision·exact membership, 두 surface preview, Media filter와 특정 orphan cleanup을 검증함. 실제 staging browser 재시작·재로그인 증거는 아직 미기록
+- 최초 게시와 알림: Discord create는 candidate와 outbox를 먼저 기록하고 fresh verify 뒤에만 current pointer를 이동함. 최초 게시 finalization transaction이 dedupe key `notify:{post_id}:{version_id}`의 `notification/send` job을 한 번만 만들며 update·republish·restore는 만들지 않음. 알림은 고정 문구, 지정 role만 포함한 `allowed_mentions`, dedupe key SHA-256 기반 nonce와 `enforce_nonce`를 사용하고 remote message ID를 저장함. Queue 전달 실패는 같은 job을 재개하되 network·5xx·응답 불일치는 `outcome_unknown`에서 멈춰 자동 재전송하지 않으며, local integration fixture로 최초 게시 한 번·update 무알림·Queue 재개·결과 불명 무재생을 검증함
+- update 결과 불명 복구: update candidate를 검증하기 전까지 이전 current와 `published` 상태를 유지하고 새 publish를 막음. 결과 불명 job의 `reconcile` action은 Discord starter를 fresh GET으로 읽기만 하며 remote가 candidate와 일치할 때 D1 finalization만 수행하고 PATCH를 반복하지 않음. Discord PATCH 적용 뒤 응답 손실 fixture에서 mutation 1회, 기존 current 유지, reconcile 뒤 pointer 교체를 검증함
+- 공개 lifecycle과 purge: unpublish는 Portfolio current만 숨기고 Discord mapping을 보존하며 republish는 같은 mapping을 mutation·알림 없이 복구함. archive는 local visibility를 먼저 차단한 뒤 Discord thread를 삭제하고 private source와 archive snapshot을 보존함. restore는 새 thread를 `SUPPRESS_NOTIFICATIONS` flag로 만들고 fresh verify 뒤 같은 slug에 새 mapping을 연결함. permanent purge는 exact NFC 제목 확인 뒤 asset별 기존 `asset/delete` outbox를 fan-out하고 exact private·Discord·public R2 key 삭제, strong absence·prefix empty·cache purge를 모두 확인한 뒤 최소 tombstone만 남김. local lifecycle fixture에서 잘못된 제목 거부, R2 실패·동일 job 재개, 새 mapping·같은 slug·무알림과 tombstone을 검증함
+- pin·Hero: 기존 `pinned_at`과 nullable `hero_rank` partial unique index를 그대로 사용하며 별도 table·migration을 추가하지 않음. action은 Studio status 응답의 `updatedAt`을 CAS token으로 사용하고 기존 owner 해제와 새 owner 지정을 한 transaction에서 처리함. published current만 큐레이션할 수 있고 unpublish에서 pin·Hero를 함께 해제함. 두 post fixture로 stale pin `409`, 단일 pin·rank, rank 이동과 unpublished 거부를 검증함
 - rollback: Wrangler migration ledger로 한 번만 적용한다. 원격 적용 뒤 `0004`–`0006`을 수정·삭제하거나 이전 migration을 재실행하지 않고, 문제가 생기면 영향 trigger·index 또는 outbox CHECK를 되돌리는 새 forward migration을 작성한다
-- staging publish/update fixture: 미기록
-- archive/restore/purge fixture: 미기록
-- Go/No-Go: schema·D1 domain helper·taxonomy·asset manifest/retention·draft autosave·안전한 작업 이동·Studio UI automated contract 단계 local Go. 실제 staging browser의 이동 실패·복원 fixture, Phase B 전체와 staging migration은 미통과
+- staging publish/update fixture: remote 미기록; local create·update·notification·결과 불명 fixture 통과
+- archive/restore/purge fixture: remote 미기록; local lifecycle·R2·cache purge fixture 통과
+- Go/No-Go: Phase B 1–11 구현과 36개 automated contract는 local Go. 실제 staging migration·publish lifecycle·browser 재시작/재로그인·이동 실패 fixture와 public route/media archive 증거는 미통과이며 production 승인은 하지 않음
 
 ## 다음 Phase
 
