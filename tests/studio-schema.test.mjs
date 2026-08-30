@@ -8,6 +8,7 @@ const migrationUrls = [
   "../migrations/0002_phase_a_assets.sql",
   "../migrations/0003_phase_a_delivery.sql",
   "../migrations/0004_phase_b_canonical_schema.sql",
+  "../migrations/0005_phase_b_taxonomy.sql",
 ];
 const migrations = migrationUrls.map((path) =>
   readFileSync(new URL(path, import.meta.url), "utf8")
@@ -328,6 +329,128 @@ test("keeps the seven-table contract and uses the documented query indexes", () 
       ),
       /idx_delivery_jobs_post_target_created_at/,
     );
+  } finally {
+    database.close();
+  }
+});
+
+test("protects taxonomy identity and serializes one global Discord sync", () => {
+  const database = databaseThrough();
+  const topicId = "50000000-0000-4000-8000-000000000001";
+  const unusedTopicId = "50000000-0000-4000-8000-000000000002";
+  const firstJobId = "40000000-0000-4000-8000-000000000021";
+  const secondJobId = "40000000-0000-4000-8000-000000000022";
+  const postId = "10000000-0000-4000-8000-000000000021";
+  const versionId = "20000000-0000-4000-8000-000000000021";
+
+  try {
+    assert.deepEqual(
+      database.prepare(`
+        SELECT dimension, stable_key, label, status, ordinal
+        FROM studio_taxonomy
+        ORDER BY CASE dimension WHEN 'kind' THEN 0 ELSE 1 END, ordinal
+      `).all().map((row) => ({ ...row })),
+      [
+        { dimension: "kind", stable_key: "update", label: "업데이트", status: "active", ordinal: 0 },
+        { dimension: "kind", stable_key: "work", label: "작업", status: "active", ordinal: 1 },
+        { dimension: "topic", stable_key: "character", label: "캐릭터", status: "active", ordinal: 0 },
+        { dimension: "topic", stable_key: "world", label: "세계관", status: "active", ordinal: 1 },
+        { dimension: "topic", stable_key: "illustration", label: "일러스트", status: "active", ordinal: 2 },
+        { dimension: "topic", stable_key: "development", label: "개발", status: "active", ordinal: 3 },
+      ],
+    );
+    assert.throws(
+      () => database.prepare(`
+        UPDATE studio_taxonomy SET stable_key = 'changed' WHERE stable_key = 'character'
+      `).run(),
+      /taxonomy_identity_immutable/,
+    );
+    assert.throws(
+      () => database.prepare(`
+        UPDATE studio_taxonomy SET dimension = 'kind' WHERE stable_key = 'character'
+      `).run(),
+      /taxonomy_identity_immutable/,
+    );
+    assert.throws(
+      () => database.prepare(`
+        UPDATE studio_taxonomy SET status = 'archived' WHERE stable_key = 'update'
+      `).run(),
+      /taxonomy_kind_migration_required/,
+    );
+    assert.throws(
+      () => database.prepare("DELETE FROM studio_taxonomy WHERE stable_key = 'work'").run(),
+      /taxonomy_kind_migration_required/,
+    );
+    assert.throws(
+      () => database.prepare(`
+        UPDATE studio_taxonomy SET label = '캐릭터' WHERE stable_key = 'world'
+      `).run(),
+      /UNIQUE constraint failed/,
+    );
+    assert.throws(
+      () => database.prepare(`
+        UPDATE studio_taxonomy SET discord_tag_id = 'bad' WHERE stable_key = 'world'
+      `).run(),
+      /taxonomy_discord_tag_invalid/,
+    );
+
+    database.prepare(`
+      INSERT INTO studio_taxonomy (
+        id, dimension, stable_key, label, status, ordinal, created_at, updated_at
+      ) VALUES (?, 'topic', 'music', '음악', 'active', 4, ?, ?)
+    `).run(topicId, now, now);
+    database.prepare(`
+      INSERT INTO studio_taxonomy (
+        id, dimension, stable_key, label, status, ordinal, created_at, updated_at
+      ) VALUES (?, 'topic', 'unused', '미사용', 'active', 5, ?, ?)
+    `).run(unusedTopicId, now, now);
+    database.prepare("DELETE FROM studio_taxonomy WHERE id = ?").run(unusedTopicId);
+
+    insertPost(database, postId, "taxonomy-fixture");
+    insertVersion(database, { id: versionId, postId });
+    database.prepare("UPDATE studio_posts SET draft_version_id = ? WHERE id = ?")
+      .run(versionId, postId);
+    database.prepare(`
+      INSERT INTO studio_post_version_topics (version_id, taxonomy_id)
+      VALUES (?, ?)
+    `).run(versionId, topicId);
+    assert.throws(
+      () => database.prepare("DELETE FROM studio_taxonomy WHERE id = ?").run(topicId),
+      /FOREIGN KEY constraint failed/,
+    );
+
+    database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, target, action, payload_json, status,
+        created_at, updated_at
+      ) VALUES (?, 'taxonomy-one', 'discord', 'taxonomy', '{}', 'queued', ?, ?)
+    `).run(firstJobId, now, now);
+    assert.throws(
+      () => database.prepare(`
+        INSERT INTO delivery_jobs (
+          id, dedupe_key, target, action, payload_json, status,
+          created_at, updated_at
+        ) VALUES (?, 'taxonomy-two', 'discord', 'taxonomy', '{}', 'queued', ?, ?)
+      `).run(secondJobId, now, now),
+      /UNIQUE constraint failed/,
+    );
+    database.prepare("UPDATE delivery_jobs SET status = 'succeeded' WHERE id = ?")
+      .run(firstJobId);
+    database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, target, action, payload_json, status,
+        created_at, updated_at
+      ) VALUES (?, 'taxonomy-two', 'discord', 'taxonomy', '{}', 'queued', ?, ?)
+    `).run(secondJobId, now, now);
+    assert.throws(
+      () => database.prepare(`
+        INSERT INTO delivery_jobs (
+          id, dedupe_key, target, action, status, created_at, updated_at
+        ) VALUES (?, 'owner-required', 'discord', 'create', 'queued', ?, ?)
+      `).run("40000000-0000-4000-8000-000000000023", now, now),
+      /CHECK constraint failed/,
+    );
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   } finally {
     database.close();
   }

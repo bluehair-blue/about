@@ -32,7 +32,7 @@
 - 브라우저 상태: locale만 `localStorage`의 `hanparan-locale` 키에 저장
 - 공개 route 인증: 없음
 - Studio 인증: `worker/index.ts`가 `/studio*`의 Cloudflare Access JWT와 `/api/discord/interactions`의 Discord Ed25519 signature를 server에서 검증
-- 서버 저장소: direct Cloudflare의 production·staging D1·R2·Queue physical resource는 `wrangler.jsonc`에 분리 연결됨. staging D1에는 Phase A draft·asset·delivery migration, Worker에는 Images info/transform, private source·두 파생본 R2 저장, Queue consumer·DLQ routing과 Discord Forum delivery가 연결됨. Phase B canonical schema migration `0004`와 `worker/studio-domain.ts`의 draft CAS·exact candidate/outbox·archive·verified current pointer transaction 경계는 local 검증을 마쳤다. job-bound candidate snapshot·state·delete와 outbox identity는 불변이고 active delivery 중 비검증 current·Discord mapping 이동을 거부하며, `queued`·`finalizing` outbox는 remote mutation 단계에 맞춰 구분해 재시도한다. staging·production에는 아직 적용하지 않았고 production Queue에는 배포된 producer·consumer가 없음
+- 서버 저장소: direct Cloudflare의 production·staging D1·R2·Queue physical resource는 `wrangler.jsonc`에 분리 연결됨. staging D1에는 Phase A draft·asset·delivery migration, Worker에는 Images info/transform, private source·두 파생본 R2 저장, Queue consumer·DLQ routing과 Discord Forum delivery가 연결됨. Phase B canonical schema migration `0004`, taxonomy migration `0005`와 `worker/studio-domain.ts`의 draft CAS·exact candidate/outbox·archive·verified current pointer·taxonomy mutation 경계는 local 검증을 마쳤다. job-bound candidate snapshot·state·delete와 outbox identity는 불변이고 active delivery 중 비검증 current·Discord mapping 이동을 거부한다. `/studio/api/taxonomy`의 topic add·rename·reorder·archive는 post 없는 전역 outbox 한 건으로 직렬화되고, Queue consumer가 Discord Forum의 전체 `available_tags`를 fresh verify한 뒤 D1 tag ID mapping을 완료한다. `queued`·`finalizing`·taxonomy processing lease는 remote mutation 단계에 맞춰 구분해 재시도한다. staging·production에는 `0004`·`0005`를 아직 적용하지 않았고 production Queue에는 배포된 producer·consumer가 없음
 
 ## 직접 의존성
 
@@ -169,7 +169,7 @@ vinext()
 
 ## 테스트·완료 계약
 
-`tests/rendered-html.test.mjs`와 `tests/studio-runtime.test.mjs`는 빌드된 Worker를 직접 import한다. 전자는 `/` HTML을 렌더하고 후자는 mock binding·서명 key와 실제 SQLite migration adapter로 Studio 보안·draft revision CAS·exact publish snapshot·current pointer·image pipeline·Queue/Discord delivery 경계를 검증한다. `tests/studio-schema.test.mjs`는 Phase A row를 보존한 `0004` upgrade, 일곱 table·foreign key·unique/check/trigger invariant와 representative query plan을 전담한다.
+`tests/rendered-html.test.mjs`와 `tests/studio-runtime.test.mjs`는 빌드된 Worker를 직접 import한다. 전자는 `/` HTML을 렌더하고 후자는 mock binding·서명 key와 실제 SQLite migration adapter로 Studio 보안·draft revision CAS·taxonomy outbox·exact publish snapshot·current pointer·image pipeline·Queue/Discord delivery 경계를 검증한다. `tests/studio-schema.test.mjs`는 Phase A row를 보존한 `0004`·`0005` upgrade, 일곱 table·foreign key·unique/check/trigger invariant와 representative query plan을 전담한다.
 
 - HTTP 200과 HTML content type
 - 기본 `<html lang="ko">`와 ko/ja/en copy
@@ -183,6 +183,7 @@ vinext()
 - Discord Ed25519 signature·5분 timestamp·PING·role add/remove·guild/channel/message/component allowlist
 - Phase A migration SQL, draft create·restore·update, stale revision 409 후 불변성, active draft 고유 제약
 - Phase B `0004` 정상 row 보존과 legacy invariant fail-closed preflight, canonical pointer/outbox ownership·승인본 state/snapshot·topic/asset 상한·single pin/Hero·SHA 제약과 query index plan
+- Phase B `0005` stable taxonomy identity·kind lifecycle·active label·Discord ID 제약, post 없는 global outbox 직렬화, 동적 topic draft, add·rename·reorder·archive의 Forum full-tag fresh verification과 Queue/429/processing lease 복구
 - 게시 준비와 no-change 판정 중 draft·topic·asset drift의 candidate/outbox 원자적 거부, candidate/outbox·asset manifest 불변성, active delivery 중 competing current 차단, update 준비 중 이전 current 유지, `queued` outbox 복구, finalization-only retry의 Discord 무재전송
 - source MIME·dimension·animation·alt·order·request size, private R2 exact key·SHA·metadata, D1 asset manifest, 삭제 재정렬·멱등 재시도와 R2 put 실패 복구 상태
 - Portfolio·Discord WebP 파생본 byte/hash, attachment budget과 publish-ready gate

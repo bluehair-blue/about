@@ -66,7 +66,8 @@ export interface StudioImages {
 
 export type StudioQueueBody =
   | { type: "asset_process"; jobId: string; assetId: string }
-  | { type: "discord_delivery"; jobId: string };
+  | { type: "discord_delivery"; jobId: string }
+  | { type: "taxonomy_sync"; jobId: string };
 
 export interface StudioQueueProducer {
   send(

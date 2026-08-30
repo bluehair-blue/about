@@ -1,7 +1,7 @@
 import {
   draftSchemaVersion,
   type DraftKind,
-  type DraftTopic,
+  type TaxonomyDimension,
 } from "../db/schema";
 import type { StudioD1, StudioD1Statement } from "./phase-a-env";
 
@@ -9,7 +9,7 @@ export type StudioDraftContent = {
   title: string;
   body: string;
   kind: DraftKind;
-  topics: DraftTopic[];
+  topics: string[];
 };
 
 type DraftWriteResult = {
@@ -105,7 +105,7 @@ async function draftHash(content: StudioDraftContent) {
 function activeTopicInsert(
   database: StudioD1,
   versionId: string,
-  topic: DraftTopic,
+  topic: string,
   condition?: { postId: string; revision: number; sourceHash: string },
 ) {
   if (!condition) {
@@ -872,4 +872,483 @@ export function finalizeVerifiedDelivery(
   return input.kind === "archive"
     ? finalizeArchive(database, input)
     : finalizePublish(database, input);
+}
+
+export type TaxonomyCatalogItem = {
+  id: string;
+  dimension: TaxonomyDimension;
+  stableKey: string;
+  label: string;
+  status: "active" | "archived";
+  ordinal: number;
+  discordTagId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type TaxonomyRow = {
+  id: string;
+  dimension: TaxonomyDimension;
+  stable_key: string;
+  label: string;
+  status: "active" | "archived";
+  ordinal: number;
+  discord_tag_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TaxonomyMutation =
+  | { action: "sync" }
+  | {
+      action: "add";
+      dimension: "topic";
+      stableKey: string;
+      label: string;
+    }
+  | { action: "rename"; taxonomyId: string; label: string }
+  | {
+      action: "reorder";
+      dimension: TaxonomyDimension;
+      taxonomyIds: string[];
+    }
+  | { action: "archive"; taxonomyId: string };
+
+export type TaxonomyMutationResult =
+  | { outcome: "queued"; jobId: string }
+  | { outcome: "active_job"; jobId: string; status: string }
+  | {
+      outcome:
+        | "not_found"
+        | "stable_key_exists"
+        | "label_exists"
+        | "invalid_order"
+        | "kind_migration_required"
+        | "taxonomy_limit";
+    };
+
+export type TaxonomySyncJob = {
+  id: string;
+  status: string;
+  attempts: number;
+  errorCode: string | null;
+  updatedAt: string;
+};
+
+type TaxonomyJobRow = {
+  id: string;
+  status: string;
+  attempts: number;
+  error_code: string | null;
+  updated_at: string;
+};
+
+function taxonomyItem(row: TaxonomyRow): TaxonomyCatalogItem {
+  return {
+    id: row.id,
+    dimension: row.dimension,
+    stableKey: row.stable_key,
+    label: row.label,
+    status: row.status,
+    ordinal: row.ordinal,
+    discordTagId: row.discord_tag_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function listTaxonomyCatalog(database: StudioD1) {
+  const rows = await database.prepare(`
+    SELECT id, dimension, stable_key, label, status, ordinal,
+      discord_tag_id, created_at, updated_at
+    FROM studio_taxonomy
+    ORDER BY CASE dimension WHEN 'kind' THEN 0 ELSE 1 END,
+      CASE status WHEN 'active' THEN 0 ELSE 1 END,
+      ordinal ASC, id ASC
+  `).all<TaxonomyRow>();
+  return (rows.results ?? []).map(taxonomyItem);
+}
+
+export async function latestTaxonomySyncJob(
+  database: StudioD1,
+): Promise<TaxonomySyncJob | null> {
+  const row = await database.prepare(`
+    SELECT id, status, attempts, error_code, updated_at
+    FROM delivery_jobs
+    WHERE target = 'discord' AND action = 'taxonomy'
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `).first<TaxonomyJobRow>();
+  return row
+    ? {
+        id: row.id,
+        status: row.status,
+        attempts: row.attempts,
+        errorCode: row.error_code,
+        updatedAt: row.updated_at,
+      }
+    : null;
+}
+
+export async function taxonomySyncJobState(
+  database: StudioD1,
+  jobId: string,
+): Promise<TaxonomySyncJob | null> {
+  const row = await database.prepare(`
+    SELECT id, status, attempts, error_code, updated_at
+    FROM delivery_jobs
+    WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+  `).bind(jobId).first<TaxonomyJobRow>();
+  return row
+    ? {
+        id: row.id,
+        status: row.status,
+        attempts: row.attempts,
+        errorCode: row.error_code,
+        updatedAt: row.updated_at,
+      }
+    : null;
+}
+
+function reorderTaxonomyStatements(
+  database: StudioD1,
+  rows: TaxonomyCatalogItem[],
+  dimension: TaxonomyDimension,
+  updatedAt: string,
+) {
+  const ordered = rows.filter((row) => row.dimension === dimension);
+  if (ordered.length === 0) return [];
+  const temporaryOffset = Math.max(...ordered.map(({ ordinal }) => ordinal), 0) +
+    ordered.length + 1;
+  const cases = ordered.map(() => "WHEN ? THEN ?").join(" ");
+  return [
+    database.prepare(`
+      UPDATE studio_taxonomy
+      SET ordinal = ordinal + ?, updated_at = ?
+      WHERE dimension = ?
+    `).bind(temporaryOffset, updatedAt, dimension),
+    database.prepare(`
+      UPDATE studio_taxonomy
+      SET ordinal = CASE id ${cases} ELSE ordinal END, updated_at = ?
+      WHERE dimension = ?
+    `).bind(
+      ...ordered.flatMap((row, ordinal) => [row.id, ordinal]),
+      updatedAt,
+      dimension,
+    ),
+  ];
+}
+
+function activeTaxonomyJob(database: StudioD1) {
+  return database.prepare(`
+    SELECT id, status, attempts, error_code, updated_at
+    FROM delivery_jobs
+    WHERE target = 'discord' AND action = 'taxonomy'
+      AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+    LIMIT 1
+  `).first<TaxonomyJobRow>();
+}
+
+export async function queueTaxonomyMutation(
+  database: StudioD1,
+  mutation: TaxonomyMutation,
+  createdAt: string,
+): Promise<TaxonomyMutationResult> {
+  const activeJob = await activeTaxonomyJob(database);
+  if (activeJob) {
+    return {
+      outcome: "active_job",
+      jobId: activeJob.id,
+      status: activeJob.status,
+    };
+  }
+
+  const catalog = await listTaxonomyCatalog(database);
+  const activeRows = catalog.filter(({ status }) => status === "active");
+  const statements: StudioD1Statement[] = [];
+  let changedId: string | null = null;
+
+  if (mutation.action === "add") {
+    if (activeRows.length >= 20) return { outcome: "taxonomy_limit" };
+    if (catalog.some(({ stableKey }) => stableKey === mutation.stableKey)) {
+      return { outcome: "stable_key_exists" };
+    }
+    if (activeRows.some(({ label }) => label === mutation.label)) {
+      return { outcome: "label_exists" };
+    }
+    changedId = crypto.randomUUID();
+    const dimensionRows = catalog.filter(({ dimension }) =>
+      dimension === mutation.dimension
+    );
+    const added: TaxonomyCatalogItem = {
+      id: changedId,
+      dimension: mutation.dimension,
+      stableKey: mutation.stableKey,
+      label: mutation.label,
+      status: "active",
+      ordinal: Math.max(...dimensionRows.map(({ ordinal }) => ordinal), -1) + 1,
+      discordTagId: null,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    statements.push(database.prepare(`
+      INSERT INTO studio_taxonomy (
+        id, dimension, stable_key, label, status, ordinal,
+        discord_tag_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'active', ?, NULL, ?, ?)
+    `).bind(
+      added.id,
+      added.dimension,
+      added.stableKey,
+      added.label,
+      added.ordinal,
+      createdAt,
+      createdAt,
+    ));
+    const nextCatalog = [
+      ...catalog.filter(({ dimension }) => dimension !== mutation.dimension),
+      ...dimensionRows.filter(({ status }) => status === "active"),
+      added,
+      ...dimensionRows.filter(({ status }) => status === "archived"),
+    ];
+    statements.push(
+      ...reorderTaxonomyStatements(
+        database,
+        nextCatalog,
+        mutation.dimension,
+        createdAt,
+      ),
+    );
+  }
+
+  if (mutation.action === "rename") {
+    const row = catalog.find(({ id }) => id === mutation.taxonomyId);
+    if (!row || row.status !== "active") return { outcome: "not_found" };
+    if (activeRows.some(({ id, label }) =>
+      id !== row.id && label === mutation.label
+    )) {
+      return { outcome: "label_exists" };
+    }
+    changedId = row.id;
+    statements.push(database.prepare(`
+      UPDATE studio_taxonomy
+      SET label = ?, updated_at = ?
+      WHERE id = ? AND status = 'active'
+    `).bind(mutation.label, createdAt, row.id));
+  }
+
+  if (mutation.action === "reorder") {
+    const active = catalog.filter(({ dimension, status }) =>
+      dimension === mutation.dimension && status === "active"
+    );
+    if (
+      mutation.taxonomyIds.length !== active.length ||
+      new Set(mutation.taxonomyIds).size !== active.length ||
+      mutation.taxonomyIds.some((id) => !active.some((row) => row.id === id))
+    ) {
+      return { outcome: "invalid_order" };
+    }
+    const ordered = [
+      ...mutation.taxonomyIds.map((id) =>
+        active.find((row) => row.id === id) as TaxonomyCatalogItem
+      ),
+      ...catalog.filter(({ dimension, status }) =>
+        dimension === mutation.dimension && status === "archived"
+      ),
+      ...catalog.filter(({ dimension }) => dimension !== mutation.dimension),
+    ];
+    statements.push(
+      ...reorderTaxonomyStatements(
+        database,
+        ordered,
+        mutation.dimension,
+        createdAt,
+      ),
+    );
+  }
+
+  if (mutation.action === "archive") {
+    const row = catalog.find(({ id }) => id === mutation.taxonomyId);
+    if (!row || row.status !== "active") return { outcome: "not_found" };
+    if (row.dimension === "kind") {
+      return { outcome: "kind_migration_required" };
+    }
+    changedId = row.id;
+    statements.push(database.prepare(`
+      UPDATE studio_taxonomy
+      SET status = 'archived', updated_at = ?
+      WHERE id = ? AND dimension = 'topic' AND status = 'active'
+    `).bind(createdAt, row.id));
+    const ordered = [
+      ...catalog.filter(({ dimension, status, id }) =>
+        dimension === row.dimension && status === "active" && id !== row.id
+      ),
+      ...catalog.filter(({ dimension, status }) =>
+        dimension === row.dimension && status === "archived"
+      ),
+      { ...row, status: "archived" as const },
+      ...catalog.filter(({ dimension }) => dimension !== row.dimension),
+    ];
+    statements.push(
+      ...reorderTaxonomyStatements(database, ordered, row.dimension, createdAt),
+    );
+  }
+
+  const jobId = crypto.randomUUID();
+  statements.push(database.prepare(`
+    INSERT INTO delivery_jobs (
+      id, dedupe_key, post_id, version_id, asset_id, target, action,
+      payload_json, status, attempts, created_at, updated_at
+    ) VALUES (?, ?, NULL, NULL, NULL, 'discord', 'taxonomy', ?,
+      'queued', 0, ?, ?)
+  `).bind(
+    jobId,
+    `taxonomy:${jobId}`,
+    JSON.stringify({ requestedAction: mutation.action, taxonomyId: changedId }),
+    createdAt,
+    createdAt,
+  ));
+  await database.batch(statements);
+  return { outcome: "queued", jobId };
+}
+
+export async function markTaxonomyQueueFailed(
+  database: StudioD1,
+  jobId: string,
+  updatedAt: string,
+) {
+  await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'queue_failed', error_code = 'queue_send_failed',
+      last_error = 'queue_send_failed', updated_at = ?
+    WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+      AND status = 'queued'
+  `).bind(updatedAt, jobId).run();
+}
+
+export async function retryTaxonomySyncJob(
+  database: StudioD1,
+  jobId: string,
+  updatedAt: string,
+) {
+  const result = await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'queued', error_code = NULL, last_error = NULL,
+      completed_at = NULL, updated_at = ?
+    WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+      AND status IN ('queue_failed', 'failed', 'outcome_unknown')
+  `).bind(updatedAt, jobId).run();
+  if (result.meta?.changes === 1) return "queued" as const;
+  const job = await database.prepare(`
+    SELECT status FROM delivery_jobs
+    WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+  `).bind(jobId).first<{ status: string }>();
+  if (!job) return "not_found" as const;
+  return job.status === "succeeded" ? "succeeded" as const : "active" as const;
+}
+
+export async function claimTaxonomySyncJob(
+  database: StudioD1,
+  jobId: string,
+  updatedAt: string,
+) {
+  const job = await database.prepare(`
+    SELECT id, status, attempts, error_code, updated_at
+    FROM delivery_jobs
+    WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+  `).bind(jobId).first<TaxonomyJobRow>();
+  if (!job) return { outcome: "missing" as const };
+  if (["succeeded", "failed", "outcome_unknown"].includes(job.status)) {
+    return { outcome: "terminal" as const, status: job.status };
+  }
+  if (job.status === "processing") return { outcome: "processing" as const };
+  const claimed = await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'processing', attempts = attempts + 1,
+      error_code = NULL, last_error = NULL, updated_at = ?
+    WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+      AND status IN ('queued', 'retrying', 'queue_failed')
+  `).bind(updatedAt, jobId).run();
+  return claimed.meta?.changes === 1
+    ? { outcome: "claimed" as const }
+    : { outcome: "missing" as const };
+}
+
+export async function finalizeTaxonomySync(
+  database: StudioD1,
+  jobId: string,
+  mappings: { taxonomyId: string; discordTagId: string }[],
+  completedAt: string,
+) {
+  const statements = mappings.map(({ taxonomyId, discordTagId }) =>
+    database.prepare(`
+      UPDATE studio_taxonomy
+      SET discord_tag_id = ?, updated_at = ?
+      WHERE id = ? AND status = 'active'
+    `).bind(discordTagId, completedAt, taxonomyId)
+  );
+  statements.push(database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'succeeded', error_code = NULL, last_error = NULL,
+      completed_at = ?, updated_at = ?
+    WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+      AND status = 'processing'
+  `).bind(completedAt, completedAt, jobId));
+  const results = await database.batch(statements);
+  const complete = results.length === mappings.length + 1 &&
+    results.every((result) => result.meta?.changes === 1);
+  if (!complete) {
+    await database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'retrying', error_code = 'taxonomy_finalization_failed',
+        last_error = 'taxonomy_finalization_failed', completed_at = NULL,
+        updated_at = ?
+      WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+        AND status = 'succeeded'
+    `).bind(completedAt, jobId).run();
+  }
+  return complete;
+}
+
+export async function recordTaxonomySyncFailure(
+  database: StudioD1,
+  jobId: string,
+  errorCode: string,
+  terminal: boolean,
+  updatedAt: string,
+) {
+  await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = ?, error_code = ?, last_error = ?,
+      completed_at = CASE WHEN ? THEN ? ELSE NULL END,
+      updated_at = ?
+    WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+      AND status IN ('queued', 'processing', 'retrying', 'queue_failed')
+  `).bind(
+    terminal ? "failed" : "retrying",
+    errorCode,
+    errorCode,
+    terminal ? 1 : 0,
+    updatedAt,
+    updatedAt,
+    jobId,
+  ).run();
+}
+
+export async function expireTaxonomyProcessingLease(
+  database: StudioD1,
+  jobId: string,
+  expectedUpdatedAt: string,
+  updatedAt: string,
+) {
+  const result = await database.prepare(`
+    -- taxonomy_processing_lease_cas
+    UPDATE delivery_jobs
+    SET status = 'failed', error_code = 'taxonomy_retry_exhausted',
+      last_error = 'taxonomy_retry_exhausted', completed_at = ?,
+      updated_at = ?
+    WHERE id = ? AND target = 'discord' AND action = 'taxonomy'
+      AND status = 'processing' AND updated_at = ?
+  `).bind(updatedAt, updatedAt, jobId, expectedUpdatedAt).run();
+  return result.meta?.changes === 1;
 }

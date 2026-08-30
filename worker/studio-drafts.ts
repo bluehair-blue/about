@@ -1,8 +1,6 @@
 import {
   draftKinds,
-  draftTopics,
   type DraftKind,
-  type DraftTopic,
 } from "../db/schema";
 import type { PhaseAEnv, StudioD1 } from "./phase-a-env";
 import {
@@ -19,7 +17,7 @@ type Draft = {
   title: string;
   body: string;
   kind: DraftKind;
-  topics: DraftTopic[];
+  topics: string[];
 };
 
 type DraftRow = {
@@ -127,7 +125,7 @@ function parseDraft(value: unknown): Draft | string {
   const suppliedTopics = input.topics;
   if (
     suppliedTopics.some(
-      (topic) => typeof topic !== "string" || !draftTopics.includes(topic as DraftTopic),
+      (topic) => typeof topic !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(topic),
     ) ||
     new Set(suppliedTopics).size !== suppliedTopics.length
   ) {
@@ -140,8 +138,21 @@ function parseDraft(value: unknown): Draft | string {
     title,
     body,
     kind: input.kind as DraftKind,
-    topics: draftTopics.filter((topic) => suppliedTopics.includes(topic)),
+    topics: suppliedTopics as string[],
   };
+}
+
+async function activeTopics(database: StudioD1, topics: string[]) {
+  if (topics.length === 0) return [];
+  const placeholders = topics.map(() => "?").join(", ");
+  const rows = await database.prepare(`
+    SELECT stable_key
+    FROM studio_taxonomy
+    WHERE dimension = 'topic' AND status = 'active'
+      AND stable_key IN (${placeholders})
+    ORDER BY ordinal ASC, id ASC
+  `).bind(...topics).all<{ stable_key: string }>();
+  return (rows.results ?? []).map(({ stable_key }) => stable_key);
 }
 
 async function readDraft(request: Request, database: StudioD1) {
@@ -176,7 +187,7 @@ async function readDraft(request: Request, database: StudioD1) {
     JOIN studio_taxonomy AS taxonomy ON taxonomy.id = selected.taxonomy_id
     WHERE selected.version_id = ? AND taxonomy.dimension = 'topic'
     ORDER BY taxonomy.ordinal ASC
-  `).bind(row.version_id).all<{ stable_key: DraftTopic }>();
+  `).bind(row.version_id).all<{ stable_key: string }>();
 
   return json({
     postId: row.post_id,
@@ -208,6 +219,11 @@ async function saveDraft(request: Request, database: StudioD1) {
   }
   const draft = parseDraft(decoded);
   if (typeof draft === "string") return json({ error: draft }, 400);
+  const topics = await activeTopics(database, draft.topics);
+  if (topics.length !== draft.topics.length) {
+    return json({ error: "invalid_topics" }, 409);
+  }
+  draft.topics = topics;
 
   const savedAt = new Date().toISOString();
   if (!draft.postId) {

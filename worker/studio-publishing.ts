@@ -193,7 +193,6 @@ async function loadDraftSnapshot(database: StudioD1, postId: string) {
 
 async function forumTagIds(
   env: PhaseAEnv,
-  database: StudioD1,
   taxonomy: TaxonomyRow[],
   kind: string,
   topics: string[],
@@ -229,32 +228,23 @@ async function forumTagIds(
       /^\d{17,20}$/.test(value.id) &&
       typeof value.name === "string"
     ) {
-      available.set(value.name.normalize("NFC"), value.id);
+      available.set(value.id, value.name.normalize("NFC"));
     }
   }
-
-  const updates = taxonomy.flatMap((item) => {
-    const tagId = available.get(item.label.normalize("NFC"));
-    return tagId && tagId !== item.discord_tag_id
-      ? [database.prepare(`
-          UPDATE studio_taxonomy
-          SET discord_tag_id = ?, updated_at = ?
-          WHERE id = ? AND status = 'active'
-        `).bind(tagId, new Date().toISOString(), item.id)]
-      : [];
-  });
-  if (updates.length > 0) await database.batch(updates);
 
   const selectedKeys = new Set([kind, ...topics]);
   const selected = taxonomy.filter((item) => selectedKeys.has(item.stable_key));
   const missing = selected
-    .filter((item) => !available.has(item.label.normalize("NFC")))
+    .filter((item) =>
+      !item.discord_tag_id ||
+      available.get(item.discord_tag_id) !== item.label.normalize("NFC")
+    )
     .map((item) => item.label);
   if (missing.length > 0) {
     return { error: "discord_tags_missing", missing } as const;
   }
   return {
-    tagIds: selected.map((item) => available.get(item.label.normalize("NFC")) as string),
+    tagIds: selected.map((item) => item.discord_tag_id as string),
   } as const;
 }
 
@@ -316,7 +306,6 @@ async function preparePublish(
 
   const tags = await forumTagIds(
     env,
-    database,
     snapshot.taxonomy,
     snapshot.draft.kind,
     snapshot.topics.map(({ stable_key }) => stable_key),

@@ -21,6 +21,10 @@ const canonicalSchemaMigration = readFileSync(
   new URL("../migrations/0004_phase_b_canonical_schema.sql", import.meta.url),
   "utf8",
 );
+const taxonomyMigration = readFileSync(
+  new URL("../migrations/0005_phase_b_taxonomy.sql", import.meta.url),
+  "utf8",
+);
 
 test("keeps Studio text fields uncontrolled for native undo and redo", () => {
   const editor = readFileSync(
@@ -77,12 +81,32 @@ class SqliteD1 {
     this.database.exec(assetMigration);
     this.database.exec(deliveryMigration);
     this.database.exec(canonicalSchemaMigration);
+    this.database.exec(taxonomyMigration);
+    const tagIds = {
+      update: "300000000000000001",
+      work: "300000000000000002",
+      character: "300000000000000003",
+      world: "300000000000000004",
+      illustration: "300000000000000005",
+      development: "300000000000000006",
+    };
+    for (const [stableKey, tagId] of Object.entries(tagIds)) {
+      this.database.prepare(`
+        UPDATE studio_taxonomy SET discord_tag_id = ? WHERE stable_key = ?
+      `).run(tagId, stableKey);
+    }
     this.failQueueFailureWrite = false;
+    this.beforeTaxonomyLeaseExpire = null;
   }
 
   prepare(query) {
     if (this.failQueueFailureWrite && query.includes("queue_send_failed")) {
       return new FailingD1Statement();
+    }
+    if (this.beforeTaxonomyLeaseExpire && query.includes("taxonomy_processing_lease_cas")) {
+      const hook = this.beforeTaxonomyLeaseExpire;
+      this.beforeTaxonomyLeaseExpire = null;
+      hook();
     }
     return new SqliteD1Statement(this.database, query);
   }
@@ -230,6 +254,9 @@ class FakeDiscordForum {
     this.deleteCalls = 0;
     this.createCalls = 0;
     this.updateCalls = 0;
+    this.taxonomyPatchCalls = 0;
+    this.nextTagId = 300000000000000100n;
+    this.failNextTaxonomy = null;
     this.failNextCreate = null;
     this.tags = [
       ["업데이트", "300000000000000001"],
@@ -270,6 +297,29 @@ class FakeDiscordForum {
     const messagePath = `${threadPath}/messages/${this.starterMessageId}`;
 
     if (url.pathname === forumPath && (!init.method || init.method === "GET")) {
+      return Response.json({
+        id: this.env.DISCORD_FORUM_CHANNEL_ID,
+        guild_id: this.env.DISCORD_GUILD_ID,
+        type: 15,
+        available_tags: this.tags,
+      });
+    }
+    if (url.pathname === forumPath && init.method === "PATCH") {
+      this.taxonomyPatchCalls += 1;
+      if (this.failNextTaxonomy === "network") {
+        this.failNextTaxonomy = null;
+        throw new Error("unknown taxonomy result");
+      }
+      if (this.failNextTaxonomy === "rate_limit") {
+        this.failNextTaxonomy = null;
+        return Response.json({ retry_after: 2 }, { status: 429 });
+      }
+      const payload = JSON.parse(init.body);
+      assert.ok(Array.isArray(payload.available_tags));
+      this.tags = payload.available_tags.map((tag) => ({
+        ...tag,
+        id: tag.id ?? String(this.nextTagId++),
+      }));
       return Response.json({
         id: this.env.DISCORD_FORUM_CHANNEL_ID,
         guild_id: this.env.DISCORD_GUILD_ID,
@@ -983,6 +1033,352 @@ test("persists one D1 draft and rejects stale revisions without mutation", async
         new Date().toISOString(),
       );
     }, /UNIQUE constraint failed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("adds, renames, reorders, and archives one canonical Forum taxonomy", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({ STUDIO_DB: database, PUBLISH_QUEUE: queue });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const discord = new FakeDiscordForum(env);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [keys.publicJwk] });
+    }
+    return discord.fetch(input, init);
+  };
+  const request = async (pathname, init = {}) => worker.fetch(
+    new Request(`https://staging.example${pathname}`, {
+      ...init,
+      headers: {
+        "cf-access-jwt-assertion": token,
+        ...(init.headers ?? {}),
+      },
+    }),
+    env,
+    executionContext(),
+  );
+
+  try {
+    const initialResponse = await request("/studio/api/taxonomy");
+    assert.equal(initialResponse.status, 200);
+    const initial = await initialResponse.json();
+    assert.equal(initial.taxonomy.length, 6);
+    assert.equal(initial.latestJob, null);
+
+    const addResponse = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({
+        action: "add",
+        dimension: "topic",
+        stableKey: "music",
+        label: "음악",
+      }),
+    );
+    assert.equal(addResponse.status, 202);
+    const add = await addResponse.json();
+    assert.equal(add.status, "queued");
+
+    const blocked = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({ action: "sync" }),
+    );
+    assert.equal(blocked.status, 409);
+    assert.equal((await blocked.json()).jobId, add.jobId);
+
+    const addMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [addMessage] }, env);
+    assert.equal(addMessage.acked, true);
+    assert.equal(discord.taxonomyPatchCalls, 1);
+    const added = database.database.prepare(`
+      SELECT id, stable_key, label, status, ordinal, discord_tag_id
+      FROM studio_taxonomy WHERE stable_key = 'music'
+    `).get();
+    assert.equal(added.label, "음악");
+    assert.equal(added.status, "active");
+    assert.equal(added.ordinal, 4);
+    assert.match(added.discord_tag_id, /^\d{17,20}$/);
+
+    const dynamicDraft = await request(
+      "/studio/api/drafts",
+      studioJsonWrite({
+        postId: null,
+        revision: 0,
+        title: "동적 taxonomy 초안",
+        body: "새 topic을 draft snapshot에 저장합니다.",
+        kind: "work",
+        topics: ["music"],
+      }),
+    );
+    assert.equal(dynamicDraft.status, 201);
+    const draft = await dynamicDraft.json();
+
+    const renameResponse = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({
+        action: "rename",
+        taxonomyId: added.id,
+        label: "음악 작업",
+      }),
+    );
+    assert.equal(renameResponse.status, 202);
+    const renameMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [renameMessage] }, env);
+    assert.equal(renameMessage.acked, true);
+    const renamed = database.database.prepare(`
+      SELECT stable_key, label, discord_tag_id
+      FROM studio_taxonomy WHERE id = ?
+    `).get(added.id);
+    assert.deepEqual(
+      { ...renamed },
+      {
+        stable_key: "music",
+        label: "음악 작업",
+        discord_tag_id: added.discord_tag_id,
+      },
+    );
+
+    const topics = database.database.prepare(`
+      SELECT id, stable_key FROM studio_taxonomy
+      WHERE dimension = 'topic' AND status = 'active'
+      ORDER BY ordinal
+    `).all();
+    const reorderedIds = [
+      added.id,
+      ...topics.filter(({ id }) => id !== added.id).map(({ id }) => id),
+    ];
+    const reorderResponse = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({
+        action: "reorder",
+        dimension: "topic",
+        taxonomyIds: reorderedIds,
+      }),
+    );
+    assert.equal(reorderResponse.status, 202);
+    const reorderMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [reorderMessage] }, env);
+    assert.equal(reorderMessage.acked, true);
+    assert.deepEqual(
+      database.database.prepare(`
+        SELECT stable_key FROM studio_taxonomy
+        WHERE dimension = 'topic' AND status = 'active'
+        ORDER BY ordinal
+      `).all().map(({ stable_key }) => stable_key),
+      ["music", "character", "world", "illustration", "development"],
+    );
+    assert.deepEqual(
+      discord.tags.map(({ name }) => name),
+      ["업데이트", "작업", "음악 작업", "캐릭터", "세계관", "일러스트", "개발"],
+    );
+
+    const archiveResponse = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({ action: "archive", taxonomyId: added.id }),
+    );
+    assert.equal(archiveResponse.status, 202);
+    const archiveMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [archiveMessage] }, env);
+    assert.equal(archiveMessage.acked, true);
+    assert.equal(
+      database.database.prepare("SELECT status FROM studio_taxonomy WHERE id = ?")
+        .get(added.id).status,
+      "archived",
+    );
+    assert.equal(discord.tags.some(({ name }) => name === "음악 작업"), false);
+    assert.equal(
+      database.database.prepare(`
+        SELECT count(*) AS count
+        FROM studio_post_version_topics AS selected
+        JOIN studio_post_versions AS version ON version.id = selected.version_id
+        WHERE version.post_id = ? AND selected.taxonomy_id = ?
+      `).get(draft.postId, added.id).count,
+      1,
+    );
+
+    const archivedDraft = await request(
+      "/studio/api/drafts",
+      studioJsonWrite({
+        postId: null,
+        revision: 0,
+        title: "보관 taxonomy 거부",
+        body: "보관된 topic은 새 draft에서 선택할 수 없습니다.",
+        kind: "work",
+        topics: ["music"],
+      }),
+    );
+    assert.equal(archivedDraft.status, 409);
+    assert.deepEqual(await archivedDraft.json(), { error: "invalid_topics" });
+
+    const kindId = initial.taxonomy.find(({ stableKey }) => stableKey === "work").id;
+    const kindArchive = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({ action: "archive", taxonomyId: kindId }),
+    );
+    assert.equal(kindArchive.status, 409);
+    assert.deepEqual(await kindArchive.json(), {
+      error: "kind_migration_required",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("recovers a taxonomy outbox after Queue failure and Discord rate limiting", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({ STUDIO_DB: database, PUBLISH_QUEUE: queue });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const discord = new FakeDiscordForum(env);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [keys.publicJwk] });
+    }
+    return discord.fetch(input, init);
+  };
+  const request = async (pathname, init = {}) => worker.fetch(
+    new Request(`https://staging.example${pathname}`, {
+      ...init,
+      headers: {
+        "cf-access-jwt-assertion": token,
+        ...(init.headers ?? {}),
+      },
+    }),
+    env,
+    executionContext(),
+  );
+
+  try {
+    database.database.prepare("UPDATE studio_taxonomy SET discord_tag_id = NULL").run();
+    queue.failSend = true;
+    const failedResponse = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({ action: "sync" }),
+    );
+    assert.equal(failedResponse.status, 503);
+    const failed = await failedResponse.json();
+    assert.equal(failed.error, "queue_send_failed");
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(failed.jobId).status,
+      "queue_failed",
+    );
+
+    queue.failSend = false;
+    const retryResponse = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({ action: "retry", jobId: failed.jobId }),
+    );
+    assert.equal(retryResponse.status, 202);
+    const retryMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [retryMessage] }, env);
+    assert.equal(retryMessage.acked, true);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(failed.jobId).status,
+      "succeeded",
+    );
+    assert.equal(
+      database.database.prepare(`
+        SELECT count(*) AS count FROM studio_taxonomy
+        WHERE status = 'active' AND discord_tag_id IS NULL
+      `).get().count,
+      0,
+    );
+    assert.equal(discord.taxonomyPatchCalls, 0);
+
+    const character = database.database.prepare(`
+      SELECT id FROM studio_taxonomy WHERE stable_key = 'character'
+    `).get();
+    const renameResponse = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({
+        action: "rename",
+        taxonomyId: character.id,
+        label: "인물",
+      }),
+    );
+    assert.equal(renameResponse.status, 202);
+    const body = queue.messages.shift();
+    discord.failNextTaxonomy = "rate_limit";
+    const limitedMessage = queueMessage(body);
+    await worker.queue({ messages: [limitedMessage] }, env);
+    assert.equal(limitedMessage.acked, false);
+    assert.deepEqual(limitedMessage.retryOptions, { delaySeconds: 2 });
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get((await renameResponse.json()).jobId).status,
+      "retrying",
+    );
+
+    const recoveredMessage = queueMessage(body, 2);
+    await worker.queue({ messages: [recoveredMessage] }, env);
+    assert.equal(recoveredMessage.acked, true);
+    assert.equal(discord.tags.some(({ name }) => name === "인물"), true);
+
+    const overlapResponse = await request(
+      "/studio/api/taxonomy",
+      studioJsonWrite({ action: "sync" }),
+    );
+    assert.equal(overlapResponse.status, 202);
+    const overlapJob = await overlapResponse.json();
+    const overlapBody = queue.messages.shift();
+    database.database.prepare(`
+      UPDATE delivery_jobs SET status = 'processing', updated_at = ? WHERE id = ?
+    `).run(new Date().toISOString(), overlapJob.jobId);
+    const terminalDuplicate = queueMessage(overlapBody, 4);
+    await worker.queue({ messages: [terminalDuplicate] }, env);
+    assert.equal(terminalDuplicate.acked, false);
+    assert.deepEqual(terminalDuplicate.retryOptions, { delaySeconds: 5 });
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(overlapJob.jobId).status,
+      "processing",
+    );
+
+    database.database.prepare(`
+      UPDATE delivery_jobs SET updated_at = ? WHERE id = ?
+    `).run(new Date(Date.now() - 120_000).toISOString(), overlapJob.jobId);
+    database.beforeTaxonomyLeaseExpire = () => {
+      const reclaimedAt = new Date().toISOString();
+      database.database.prepare(`
+        UPDATE delivery_jobs SET status = 'retrying', updated_at = ? WHERE id = ?
+      `).run(reclaimedAt, overlapJob.jobId);
+      database.database.prepare(`
+        UPDATE delivery_jobs SET status = 'processing', updated_at = ? WHERE id = ?
+      `).run(reclaimedAt, overlapJob.jobId);
+    };
+    const reclaimedTerminal = queueMessage(overlapBody, 4);
+    await worker.queue({ messages: [reclaimedTerminal] }, env);
+    assert.equal(reclaimedTerminal.acked, false);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(overlapJob.jobId).status,
+      "processing",
+    );
+
+    database.database.prepare(`
+      UPDATE delivery_jobs SET updated_at = ? WHERE id = ?
+    `).run(new Date(Date.now() - 120_000).toISOString(), overlapJob.jobId);
+    const staleTerminal = queueMessage(overlapBody, 4);
+    await worker.queue({ messages: [staleTerminal] }, env);
+    assert.equal(staleTerminal.acked, false);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(overlapJob.jobId).status,
+      "failed",
+    );
   } finally {
     globalThis.fetch = originalFetch;
     database.close();

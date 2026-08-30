@@ -8,6 +8,10 @@ import {
   recoverStudioDiscordQueueFailure,
   type StudioQueueOutcome,
 } from "./studio-publishing";
+import {
+  processStudioTaxonomyJob,
+  recoverStudioTaxonomyQueueFailure,
+} from "./studio-taxonomy";
 
 export const PHASE_A_QUEUE_MAX_RETRIES = 3;
 
@@ -35,6 +39,13 @@ function parseMessage(value: unknown) {
     Object.keys(value).every((key) => ["type", "jobId"].includes(key))
   ) {
     return { type: "discord_delivery" as const, jobId: value.jobId };
+  }
+  if (
+    value.type === "taxonomy_sync" &&
+    typeof value.jobId === "string" &&
+    Object.keys(value).every((key) => ["type", "jobId"].includes(key))
+  ) {
+    return { type: "taxonomy_sync" as const, jobId: value.jobId };
   }
   return null;
 }
@@ -77,6 +88,25 @@ export async function handleStudioQueue(
         );
         retry(message);
       }
+      continue;
+    }
+
+    if (body.type === "taxonomy_sync") {
+      let outcome: StudioQueueOutcome;
+      try {
+        outcome = await processStudioTaxonomyJob(body.jobId, env);
+        if (outcome.action === "retry" && terminal) {
+          outcome = await recoverStudioTaxonomyQueueFailure(body.jobId, env, true);
+        }
+      } catch {
+        outcome = await recoverStudioTaxonomyQueueFailure(
+          body.jobId,
+          env,
+          terminal,
+        );
+      }
+      if (outcome.action === "ack") message.ack();
+      else retry(message, outcome);
       continue;
     }
 

@@ -10,11 +10,13 @@ import { handleStudioAssetRequest } from "./studio-assets";
 import { handleStudioDraftRequest } from "./studio-drafts";
 import { handleStudioPublishRequest } from "./studio-publishing";
 import { handleStudioQueue } from "./studio-queue";
+import { handleStudioTaxonomyRequest } from "./studio-taxonomy";
 
 const INTERACTIONS_PATH = "/api/discord/interactions";
 const DRAFTS_PATH = "/studio/api/drafts";
 const ASSETS_PATH = "/studio/api/assets";
 const PUBLISH_PATH = "/studio/api/publish";
+const TAXONOMY_PATH = "/studio/api/taxonomy";
 const STUDIO_WRITE_HEADER = "x-studio-request";
 type VinextContext = Parameters<typeof handler.fetch>[2];
 
@@ -124,6 +126,10 @@ const worker = {
 
       if (url.pathname === PUBLISH_PATH) {
         return privateResponse(await handleStudioPublishRequest(request, env));
+      }
+
+      if (url.pathname === TAXONOMY_PATH) {
+        return privateResponse(await handleStudioTaxonomyRequest(request, env));
       }
 
       return privateResponse(
