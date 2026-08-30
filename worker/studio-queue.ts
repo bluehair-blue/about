@@ -9,7 +9,9 @@ import {
 } from "./studio-assets";
 import {
   processStudioDiscordJob,
+  processStudioNotificationJob,
   recoverStudioDiscordQueueFailure,
+  recoverStudioNotificationQueueFailure,
   type StudioQueueOutcome,
 } from "./studio-publishing";
 import {
@@ -67,6 +69,13 @@ function parseMessage(value: unknown) {
     Object.keys(value).every((key) => ["type", "jobId"].includes(key))
   ) {
     return { type: "discord_delivery" as const, jobId: value.jobId };
+  }
+  if (
+    value.type === "notification_send" &&
+    typeof value.jobId === "string" &&
+    Object.keys(value).every((key) => ["type", "jobId"].includes(key))
+  ) {
+    return { type: "notification_send" as const, jobId: value.jobId };
   }
   if (
     value.type === "taxonomy_sync" &&
@@ -171,6 +180,29 @@ export async function handleStudioQueue(
         }
       } catch {
         outcome = await recoverStudioTaxonomyQueueFailure(
+          body.jobId,
+          env,
+          terminal,
+        );
+      }
+      if (outcome.action === "ack") message.ack();
+      else retry(message, outcome);
+      continue;
+    }
+
+    if (body.type === "notification_send") {
+      let outcome: StudioQueueOutcome;
+      try {
+        outcome = await processStudioNotificationJob(body.jobId, env);
+        if (outcome.action === "retry" && terminal) {
+          outcome = await recoverStudioNotificationQueueFailure(
+            body.jobId,
+            env,
+            true,
+          );
+        }
+      } catch {
+        outcome = await recoverStudioNotificationQueueFailure(
           body.jobId,
           env,
           terminal,

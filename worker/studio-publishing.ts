@@ -19,6 +19,7 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}
 
 type PublishAction = "publish" | "delete" | "retry";
 type DiscordAction = "create" | "update" | "delete";
+type RetriableTarget = "discord" | "notification";
 
 type PublishInput = {
   action: PublishAction;
@@ -89,7 +90,8 @@ type AssetSummary = {
 
 type JobStatusRow = {
   id: string;
-  action: DiscordAction;
+  target: RetriableTarget;
+  action: DiscordAction | "send";
   status: string;
   attempts: number;
   error_code: string | null;
@@ -269,9 +271,10 @@ async function enqueue(
   database: StudioD1,
   queue: StudioQueueProducer,
   jobId: string,
+  type: "discord_delivery" | "notification_send" = "discord_delivery",
 ) {
   try {
-    await queue.send({ type: "discord_delivery", jobId });
+    await queue.send({ type, jobId });
     return true;
   } catch {
     await markQueueFailed(database, jobId);
@@ -460,10 +463,15 @@ async function retryDelivery(
   queue: StudioQueueProducer,
 ) {
   const job = await database.prepare(`
-    SELECT id, action, status
+    SELECT id, target, action, status
     FROM delivery_jobs
-    WHERE id = ? AND post_id = ? AND target = 'discord'
-  `).bind(jobId, postId).first<{ id: string; action: DiscordAction; status: string }>();
+    WHERE id = ? AND post_id = ? AND target IN ('discord', 'notification')
+  `).bind(jobId, postId).first<{
+    id: string;
+    target: RetriableTarget;
+    action: DiscordAction | "send";
+    status: string;
+  }>();
   if (!job) return json({ error: "delivery_job_not_found" }, 404);
   if (!["queued", "queue_failed", "retrying", "failed", "finalizing"].includes(job.status)) {
     return json(
@@ -483,14 +491,19 @@ async function retryDelivery(
       return json({ error: "delivery_retry_conflict" }, 409);
     }
   }
-  const queued = await enqueue(database, queue, jobId);
+  const queued = await enqueue(
+    database,
+    queue,
+    jobId,
+    job.target === "notification" ? "notification_send" : "discord_delivery",
+  );
   const status = job.status === "finalizing"
     ? "finalizing"
     : queued
     ? "queued"
     : "queue_failed";
   return json(
-    { postId, jobId, action: job.action, status },
+    { postId, jobId, target: job.target, action: job.action, status },
     queued ? 202 : 503,
   );
 }
@@ -519,9 +532,16 @@ async function readStatus(request: Request, database: StudioD1) {
       `).bind(post.draft_version_id).first<AssetSummary>()
     : null;
   const latest = await database.prepare(`
-    SELECT id, action, status, attempts, error_code, updated_at
+    SELECT id, target, action, status, attempts, error_code, updated_at
     FROM delivery_jobs
     WHERE post_id = ? AND target = 'discord'
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `).bind(postId).first<JobStatusRow>();
+  const notification = await database.prepare(`
+    SELECT id, target, action, status, attempts, error_code, updated_at
+    FROM delivery_jobs
+    WHERE post_id = ? AND target = 'notification'
     ORDER BY created_at DESC, id DESC
     LIMIT 1
   `).bind(postId).first<JobStatusRow>();
@@ -545,11 +565,23 @@ async function readStatus(request: Request, database: StudioD1) {
     latestJob: latest
       ? {
           jobId: latest.id,
+          target: latest.target,
           action: latest.action,
           status: latest.status,
           attempts: latest.attempts,
           error: latest.error_code,
           updatedAt: latest.updated_at,
+        }
+      : null,
+    notificationJob: notification
+      ? {
+          jobId: notification.id,
+          target: notification.target,
+          action: notification.action,
+          status: notification.status,
+          attempts: notification.attempts,
+          error: notification.error_code,
+          updatedAt: notification.updated_at,
         }
       : null,
   });
@@ -1209,7 +1241,7 @@ async function verifyDiscordDelivery(
         updated_at = ?
       WHERE id = ? AND status = 'verifying'
     `).bind(finalizedAt, job.id).run();
-    return finalizeDiscordDelivery(job.id, database, env.STUDIO_MEDIA);
+    return finalizeDiscordDelivery(job.id, database, env);
   }
 
   const checkedThread = await verificationResponse(
@@ -1275,13 +1307,13 @@ async function verifyDiscordDelivery(
     job.id,
   ).run();
   if (verified.meta?.changes !== 1) throw new Error("delivery_manifest_unavailable");
-  return finalizeDiscordDelivery(job.id, database, env.STUDIO_MEDIA);
+  return finalizeDiscordDelivery(job.id, database, env);
 }
 
 async function finalizeDiscordDelivery(
   jobId: string,
   database: StudioD1,
-  media?: StudioR2,
+  env: PhaseAEnv,
 ): Promise<StudioQueueOutcome> {
   const job = await loadDeliveryJob(database, jobId);
   if (!job || job.status !== "finalizing") return { action: "ack" };
@@ -1331,8 +1363,8 @@ async function finalizeDiscordDelivery(
     await setJobState(database, job.id, "outcome_unknown", "discord_mapping_missing");
     return { action: "ack" };
   }
-  if (!media) throw new Error("asset_storage_unavailable");
-  await loadDeliveryAssets(database, media, job, payload.assets);
+  if (!env.STUDIO_MEDIA) throw new Error("asset_storage_unavailable");
+  await loadDeliveryAssets(database, env.STUDIO_MEDIA, job, payload.assets);
   const finalized = await finalizeVerifiedDelivery(database, {
     kind: "publish",
     jobId: job.id,
@@ -1347,6 +1379,28 @@ async function finalizeDiscordDelivery(
   });
   if (!finalized) {
     throw new Error("delivery_finalization_failed");
+  }
+  if (job.action === "create") {
+    const notification = await database.prepare(`
+      SELECT id
+      FROM delivery_jobs
+      WHERE post_id = ? AND version_id = ?
+        AND target = 'notification' AND action = 'send'
+        AND dedupe_key = ? AND status = 'queued'
+    `).bind(
+      job.post_id,
+      job.version_id,
+      `notify:${job.post_id}:${job.version_id}`,
+    ).first<{ id: string }>();
+    if (!notification || !env.PUBLISH_QUEUE) {
+      throw new Error("notification_outbox_unavailable");
+    }
+    await enqueue(
+      database,
+      env.PUBLISH_QUEUE,
+      notification.id,
+      "notification_send",
+    );
   }
   return { action: "ack" };
 }
@@ -1368,7 +1422,7 @@ export async function processStudioDiscordJob(
       UPDATE delivery_jobs SET attempts = attempts + 1, updated_at = ?
       WHERE id = ? AND status = 'finalizing'
     `).bind(new Date().toISOString(), job.id).run();
-    return finalizeDiscordDelivery(job.id, database, env.STUDIO_MEDIA);
+    return finalizeDiscordDelivery(job.id, database, env);
   }
   if (job.status === "verifying") {
     await database.prepare(`
@@ -1432,6 +1486,212 @@ export async function processStudioDiscordJob(
     payload.threadId as string,
     payload.starterMessageId as string,
   );
+}
+
+type NotificationJob = {
+  id: string;
+  dedupe_key: string;
+  post_id: string;
+  version_id: string;
+  payload_json: string;
+  status: string;
+  attempts: number;
+};
+
+async function loadNotificationJob(database: StudioD1, jobId: string) {
+  return database.prepare(`
+    SELECT id, dedupe_key, post_id, version_id, payload_json, status, attempts
+    FROM delivery_jobs
+    WHERE id = ? AND target = 'notification' AND action = 'send'
+  `).bind(jobId).first<NotificationJob>();
+}
+
+function notificationThreadId(job: NotificationJob) {
+  try {
+    const payload = JSON.parse(job.payload_json) as unknown;
+    if (
+      !isRecord(payload) ||
+      Object.keys(payload).some((key) => key !== "threadId") ||
+      !validDiscordId(payload.threadId)
+    ) {
+      return null;
+    }
+    return payload.threadId;
+  } catch {
+    return null;
+  }
+}
+
+async function notificationNonce(dedupeKey: string) {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(dedupeKey),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("").slice(0, 25);
+}
+
+async function setNotificationState(
+  database: StudioD1,
+  jobId: string,
+  status: string,
+  errorCode: string | null,
+  remoteId: string | null = null,
+) {
+  const completedAt = ["succeeded", "failed", "outcome_unknown"].includes(status)
+    ? new Date().toISOString()
+    : null;
+  await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = ?, error_code = ?, last_error = ?, remote_id = coalesce(?, remote_id),
+      updated_at = ?, completed_at = ?
+    WHERE id = ? AND target = 'notification' AND action = 'send'
+      AND status != 'succeeded'
+  `).bind(
+    status,
+    errorCode,
+    errorCode,
+    remoteId,
+    new Date().toISOString(),
+    completedAt,
+    jobId,
+  ).run();
+}
+
+export async function processStudioNotificationJob(
+  jobId: string,
+  env: PhaseAEnv,
+): Promise<StudioQueueOutcome> {
+  if (!uuidPattern.test(jobId)) return { action: "ack" };
+  const database = env.STUDIO_DB;
+  if (!database) throw new Error("notification_unavailable");
+  const job = await loadNotificationJob(database, jobId);
+  if (!job || ["succeeded", "failed", "outcome_unknown"].includes(job.status)) {
+    return { action: "ack" };
+  }
+  const threadId = notificationThreadId(job);
+  if (!threadId) {
+    await setNotificationState(
+      database,
+      job.id,
+      "failed",
+      "notification_payload_invalid",
+    );
+    return { action: "ack" };
+  }
+  const claimed = await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'processing', attempts = attempts + 1,
+      error_code = NULL, last_error = NULL, updated_at = ?
+    WHERE id = ? AND target = 'notification' AND action = 'send'
+      AND status IN ('queued', 'retrying')
+  `).bind(new Date().toISOString(), job.id).run();
+  if (claimed.meta?.changes !== 1) return { action: "ack" };
+
+  const content = `<@&${env.DISCORD_NOTIFY_ROLE_ID}> 새 글이 올라왔어요.\n` +
+    `https://discord.com/channels/${env.DISCORD_GUILD_ID}/${threadId}`;
+  let response: Response;
+  try {
+    response = await fetch(
+      `${DISCORD_API}/channels/${env.DISCORD_ANNOUNCEMENTS_CHANNEL_ID}/messages`,
+      {
+        method: "POST",
+        headers: discordHeaders(env, true),
+        body: JSON.stringify({
+          content,
+          allowed_mentions: { roles: [env.DISCORD_NOTIFY_ROLE_ID] },
+          nonce: await notificationNonce(job.dedupe_key),
+          enforce_nonce: true,
+        }),
+        signal: AbortSignal.timeout(5_000),
+      },
+    );
+  } catch {
+    await setNotificationState(
+      database,
+      job.id,
+      "outcome_unknown",
+      "notification_network_unknown",
+    );
+    return { action: "ack" };
+  }
+  if (response.status === 429) {
+    await setNotificationState(
+      database,
+      job.id,
+      "retrying",
+      "notification_rate_limited",
+    );
+    return { action: "retry", delaySeconds: await rateLimitDelay(response) };
+  }
+  if (response.status >= 500) {
+    await setNotificationState(
+      database,
+      job.id,
+      "outcome_unknown",
+      "notification_server_unknown",
+    );
+    return { action: "ack" };
+  }
+  if (!response.ok) {
+    await setNotificationState(
+      database,
+      job.id,
+      "failed",
+      `notification_http_${response.status}`,
+    );
+    return { action: "ack" };
+  }
+  const message = await response.json() as unknown;
+  if (
+    !isRecord(message) ||
+    !validDiscordId(message.id) ||
+    message.channel_id !== env.DISCORD_ANNOUNCEMENTS_CHANNEL_ID ||
+    message.content !== content
+  ) {
+    await setNotificationState(
+      database,
+      job.id,
+      "outcome_unknown",
+      "notification_response_mismatch",
+    );
+    return { action: "ack" };
+  }
+  await setNotificationState(database, job.id, "succeeded", null, message.id);
+  return { action: "ack" };
+}
+
+export async function recoverStudioNotificationQueueFailure(
+  jobId: string,
+  env: PhaseAEnv,
+  terminal: boolean,
+): Promise<StudioQueueOutcome> {
+  const database = env.STUDIO_DB;
+  if (!database) return { action: "retry", delaySeconds: 5 };
+  const job = await loadNotificationJob(database, jobId);
+  if (!job || ["succeeded", "failed", "outcome_unknown"].includes(job.status)) {
+    return { action: "ack" };
+  }
+  if (job.status === "processing") {
+    await setNotificationState(
+      database,
+      job.id,
+      "outcome_unknown",
+      "notification_outcome_unknown",
+    );
+    return { action: "ack" };
+  }
+  if (terminal) {
+    await setNotificationState(
+      database,
+      job.id,
+      "failed",
+      "notification_retry_exhausted",
+    );
+    return { action: "ack" };
+  }
+  return { action: "retry", delaySeconds: 5 };
 }
 
 export async function recoverStudioDiscordQueueFailure(

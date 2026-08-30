@@ -23,7 +23,17 @@ type DeliveryStatus = {
   canDelete: boolean;
   latestJob: null | {
     jobId: string;
+    target: "discord";
     action: "create" | "update" | "delete";
+    status: string;
+    attempts: number;
+    error: string | null;
+    updatedAt: string;
+  };
+  notificationJob: null | {
+    jobId: string;
+    target: "notification";
+    action: "send";
     status: string;
     attempts: number;
     error: string | null;
@@ -65,6 +75,18 @@ function isDeliveryStatus(value: unknown): value is DeliveryStatus {
       ((status.latestJob as Record<string, unknown>).error === null ||
         typeof (status.latestJob as Record<string, unknown>).error === "string") &&
       typeof (status.latestJob as Record<string, unknown>).updatedAt === "string"
+    )) &&
+    (status.notificationJob === null || (
+      typeof status.notificationJob === "object" &&
+      status.notificationJob !== null &&
+      typeof (status.notificationJob as Record<string, unknown>).jobId === "string" &&
+      (status.notificationJob as Record<string, unknown>).target === "notification" &&
+      (status.notificationJob as Record<string, unknown>).action === "send" &&
+      typeof (status.notificationJob as Record<string, unknown>).status === "string" &&
+      typeof (status.notificationJob as Record<string, unknown>).attempts === "number" &&
+      ((status.notificationJob as Record<string, unknown>).error === null ||
+        typeof (status.notificationJob as Record<string, unknown>).error === "string") &&
+      typeof (status.notificationJob as Record<string, unknown>).updatedAt === "string"
     ));
 }
 
@@ -73,6 +95,13 @@ function active(status: DeliveryStatus | null) {
     ["queued", "processing", "retrying", "verifying", "finalizing"].includes(
       status.latestJob.status,
     );
+}
+
+function pollingActive(status: DeliveryStatus | null) {
+  return Boolean(active(status)) || Boolean(
+    status?.notificationJob &&
+      ["queued", "processing", "retrying"].includes(status.notificationJob.status),
+  );
 }
 
 function timeLabel(value: string | null | undefined) {
@@ -91,6 +120,10 @@ function errorLabel(value: string | null | undefined) {
     discord_create_failed: "Discord 생성 실패",
     discord_update_failed: "Discord 수정 실패",
     discord_delete_failed: "Discord 삭제 실패",
+    notification_network_unknown: "알림 전송 결과 불명",
+    notification_server_unknown: "알림 서버 결과 불명",
+    notification_rate_limited: "알림 요청 제한",
+    notification_outcome_unknown: "알림 처리 결과 불명",
     remote_verification_failed: "fresh remote 재확인 실패",
     finalization_failed: "D1 finalization 실패",
   };
@@ -137,7 +170,7 @@ export function DeliveryControls({
         setMessage((current) =>
           current === "전달 상태를 불러오지 못했습니다." ? "" : current
         );
-        if (!stopped && (active(next) || next.assets.notReadyCount > 0)) {
+        if (!stopped && (pollingActive(next) || next.assets.notReadyCount > 0)) {
           timer = window.setTimeout(refresh, 2_000);
         }
       } catch {
@@ -160,7 +193,10 @@ export function DeliveryControls({
     };
   }, [load, postId]);
 
-  async function submit(action: "publish" | "delete" | "retry") {
+  async function submit(
+    action: "publish" | "delete" | "retry",
+    retryJobId?: string,
+  ) {
     if (!postId || busy) return;
     if (
       action === "delete" &&
@@ -178,8 +214,8 @@ export function DeliveryControls({
         body: JSON.stringify({
           action,
           postId,
-          ...(action === "retry" && currentDelivery?.latestJob
-            ? { jobId: currentDelivery.latestJob.jobId }
+          ...(action === "retry" && retryJobId
+            ? { jobId: retryJobId }
             : {}),
         }),
       });
@@ -205,7 +241,7 @@ export function DeliveryControls({
         );
       }
       const next = await load(postId);
-      if (active(next)) window.dispatchEvent(new Event("studio-state-changed"));
+      if (pollingActive(next)) window.dispatchEvent(new Event("studio-state-changed"));
     } catch {
       setMessage("전달 요청 상태를 확인하지 못했습니다.");
     } finally {
@@ -215,7 +251,12 @@ export function DeliveryControls({
 
   const retryable = currentDelivery?.latestJob &&
     ["queue_failed", "retrying", "failed", "finalizing"].includes(currentDelivery.latestJob.status);
+  const notificationRetryable = currentDelivery?.notificationJob &&
+    ["queue_failed", "retrying", "failed"].includes(
+      currentDelivery.notificationJob.status,
+    );
   const outcomeUnknown = shownDelivery?.latestJob?.status === "outcome_unknown";
+  const notificationUnknown = shownDelivery?.notificationJob?.status === "outcome_unknown";
 
   return (
     <section className={styles.card} aria-labelledby="delivery-heading">
@@ -253,6 +294,14 @@ export function DeliveryControls({
           </dd>
         </div>
         <div>
+          <dt>최초 게시 알림</dt>
+          <dd>
+            {shownDelivery?.notificationJob
+              ? `${shownDelivery.notificationJob.status} · ${shownDelivery.notificationJob.attempts}회 · ${timeLabel(shownDelivery.notificationJob.updatedAt)}`
+              : "대상 아님"}
+          </dd>
+        </div>
+        <div>
           <dt>Portfolio</dt>
           <dd>
             {shownDelivery?.postStatus === "published" && shownDelivery.hasCurrentVersion
@@ -286,14 +335,32 @@ export function DeliveryControls({
           Discord 결과가 불명확해 자동 재전송을 멈췄습니다. remote mapping을 먼저 대조해야 합니다.
         </p>
       ) : null}
+      {notificationUnknown ? (
+        <p className={styles.deliveryWarning} role="alert">
+          알림 전송 결과가 불명확해 자동 재전송을 멈췄습니다. announcements channel을 먼저 대조해야 합니다.
+        </p>
+      ) : null}
       {message ? <p className={styles.assetMessage} role="status">{message}</p> : null}
 
       <div className={styles.deliveryButtons}>
         {retryable ? (
-          <button type="button" disabled={busy} onClick={() => void submit("retry")}>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void submit("retry", currentDelivery.latestJob?.jobId)}
+          >
             {currentDelivery.latestJob?.status === "finalizing"
               ? "Discord 재전송 없이 D1 반영 재시도"
               : "같은 job 재시도"}
+          </button>
+        ) : null}
+        {notificationRetryable ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void submit("retry", currentDelivery.notificationJob?.jobId)}
+          >
+            최초 게시 알림 재시도
           </button>
         ) : null}
       </div>

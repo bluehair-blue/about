@@ -373,10 +373,13 @@ class FakeDiscordForum {
     this.deleteCalls = 0;
     this.createCalls = 0;
     this.updateCalls = 0;
+    this.notificationCalls = 0;
+    this.notificationPayloads = [];
     this.taxonomyPatchCalls = 0;
     this.nextTagId = 300000000000000100n;
     this.failNextTaxonomy = null;
     this.failNextCreate = null;
+    this.failNextNotification = null;
     this.tags = [
       ["업데이트", "300000000000000001"],
       ["작업", "300000000000000002"],
@@ -414,6 +417,36 @@ class FakeDiscordForum {
     const forumPath = `/api/v10/channels/${this.env.DISCORD_FORUM_CHANNEL_ID}`;
     const threadPath = `/api/v10/channels/${this.threadId}`;
     const messagePath = `${threadPath}/messages/${this.starterMessageId}`;
+    const announcementPath =
+      `/api/v10/channels/${this.env.DISCORD_ANNOUNCEMENTS_CHANNEL_ID}/messages`;
+
+    if (url.pathname === announcementPath && init.method === "POST") {
+      this.notificationCalls += 1;
+      if (this.failNextNotification === "network") {
+        this.failNextNotification = null;
+        throw new Error("unknown notification result");
+      }
+      if (this.failNextNotification === "rate_limit") {
+        this.failNextNotification = null;
+        return Response.json({ retry_after: 2 }, { status: 429 });
+      }
+      if (this.failNextNotification === "server") {
+        this.failNextNotification = null;
+        return Response.json({ message: "server error" }, { status: 500 });
+      }
+      const payload = JSON.parse(init.body);
+      assert.deepEqual(payload.allowed_mentions, {
+        roles: [this.env.DISCORD_NOTIFY_ROLE_ID],
+      });
+      assert.match(payload.nonce, /^[0-9a-f]{25}$/u);
+      assert.equal(payload.enforce_nonce, true);
+      this.notificationPayloads.push(payload);
+      return Response.json({
+        id: "200000000000000003",
+        channel_id: this.env.DISCORD_ANNOUNCEMENTS_CHANNEL_ID,
+        content: payload.content,
+      });
+    }
 
     if (url.pathname === forumPath && (!init.method || init.method === "GET")) {
       return Response.json({
@@ -2502,9 +2535,40 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
     const create = await createResponse.json();
     assert.equal(create.action, "create");
     const createMessage = queueMessage(queue.messages.shift());
+    queue.failSend = true;
     await worker.queue({ messages: [createMessage] }, env);
+    queue.failSend = false;
     assert.equal(createMessage.acked, true);
     assert.equal(discord.createCalls, 1);
+    assert.equal(queue.messages.length, 0);
+    const deliveryStatus = await request(
+      `/studio/api/publish?postId=${draft.postId}`,
+    );
+    assert.equal(deliveryStatus.status, 200);
+    const failedNotification = (await deliveryStatus.json()).notificationJob;
+    assert.equal(failedNotification.status, "queue_failed");
+    const retryNotification = await request(
+      "/studio/api/publish",
+      jsonWrite({
+        action: "retry",
+        postId: draft.postId,
+        jobId: failedNotification.jobId,
+      }),
+    );
+    assert.equal(retryNotification.status, 202);
+    const notificationBody = queue.messages.shift();
+    assert.deepEqual(notificationBody, {
+      type: "notification_send",
+      jobId: notificationBody.jobId,
+    });
+    const notificationMessage = queueMessage(notificationBody);
+    await worker.queue({ messages: [notificationMessage] }, env);
+    assert.equal(notificationMessage.acked, true);
+    assert.equal(discord.notificationCalls, 1);
+    assert.deepEqual(discord.notificationPayloads.map(({ content }) => content), [
+      `<@&${env.DISCORD_NOTIFY_ROLE_ID}> 새 글이 올라왔어요.\n` +
+        `https://discord.com/channels/${env.DISCORD_GUILD_ID}/${discord.threadId}`,
+    ]);
     assert.equal(discord.thread.name, "첫 Forum fixture");
     assert.equal(discord.message.attachments[0].description, "첫 attachment");
     assert.deepEqual(
@@ -2599,6 +2663,8 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
     assert.equal(updateMessage.acked, true);
     assert.equal(discord.createCalls, 1);
     assert.equal(discord.updateCalls, 1);
+    assert.equal(discord.notificationCalls, 1);
+    assert.equal(queue.messages.length, 0);
     assert.equal(discord.thread.name, "수정된 Forum fixture");
     assert.equal(discord.message.content, "attachment와 tag를 모두 교체했습니다.");
     assert.equal(discord.message.attachments.length, 1);
@@ -2761,6 +2827,77 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
         .get(retryDeleteJobId).status,
       "succeeded",
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("does not replay an outcome-unknown first-publish notification", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: new MemoryR2(),
+    IMAGES: new FakeImages(),
+    PUBLISH_QUEUE: new MemoryQueue(),
+  });
+  const discord = new FakeDiscordForum(env);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (input, init = {}) => discord.fetch(input, init);
+  const postId = crypto.randomUUID();
+  const versionId = crypto.randomUUID();
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  try {
+    database.database.prepare(`
+      INSERT INTO studio_posts (id, status, created_at, updated_at)
+      VALUES (?, 'draft', ?, ?)
+    `).run(postId, now, now);
+    database.database.prepare(`
+      INSERT INTO studio_post_versions (
+        id, post_id, state, revision, source_hash, title, body_markdown,
+        kind, locale, created_at, updated_at, schema_version
+      ) VALUES (?, ?, 'published', 0, ?, '알림 fixture', '고정 본문',
+        'update', 'ko', ?, ?, 1)
+    `).run(versionId, postId, "a".repeat(64), now, now);
+    database.database.prepare(`
+      UPDATE studio_posts
+      SET status = 'published', current_version_id = ?,
+        discord_thread_id = ?, discord_starter_message_id = ?
+      WHERE id = ?
+    `).run(versionId, discord.threadId, discord.starterMessageId, postId);
+    database.database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, version_id, target, action, payload_json,
+        status, attempts, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'notification', 'send', ?, 'queued', 0, ?, ?)
+    `).run(
+      jobId,
+      `notify:${postId}:${versionId}`,
+      postId,
+      versionId,
+      JSON.stringify({ threadId: discord.threadId }),
+      now,
+      now,
+    );
+
+    discord.failNextNotification = "network";
+    const first = queueMessage({ type: "notification_send", jobId });
+    await worker.queue({ messages: [first] }, env);
+    assert.equal(first.acked, true);
+    assert.equal(discord.notificationCalls, 1);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(jobId).status,
+      "outcome_unknown",
+    );
+
+    const replay = queueMessage({ type: "notification_send", jobId }, 2);
+    await worker.queue({ messages: [replay] }, env);
+    assert.equal(replay.acked, true);
+    assert.equal(discord.notificationCalls, 1);
   } finally {
     globalThis.fetch = originalFetch;
     database.close();

@@ -726,6 +726,7 @@ async function finalizePublish(
   database: StudioD1,
   input: Extract<DeliveryFinalization, { kind: "publish" }>,
 ) {
+  const notificationJobId = input.action === "create" ? crypto.randomUUID() : null;
   const previousCheck = input.previousVersionId === null
     ? "AND post.current_version_id IS NULL"
     : `AND post.current_version_id = ?
@@ -913,6 +914,45 @@ async function finalizePublish(
       input.expectedHash,
     ),
   );
+
+  if (notificationJobId) {
+    statements.push(
+      database.prepare(`
+        INSERT INTO delivery_jobs (
+          id, dedupe_key, post_id, version_id, target, action, payload_json,
+          status, attempts, created_at, updated_at
+        )
+        SELECT ?, ?, ?, ?, 'notification', 'send', ?, 'queued', 0, ?, ?
+        WHERE EXISTS (
+          SELECT 1
+          FROM studio_posts
+          WHERE id = ? AND status = 'published' AND current_version_id = ?
+            AND discord_thread_id = ? AND discord_starter_message_id = ?
+        )
+          AND EXISTS (
+            SELECT 1
+            FROM delivery_jobs
+            WHERE id = ? AND post_id = ? AND version_id = ?
+              AND target = 'discord' AND action = 'create' AND status = 'succeeded'
+          )
+      `).bind(
+        notificationJobId,
+        `notify:${input.postId}:${input.candidateVersionId}`,
+        input.postId,
+        input.candidateVersionId,
+        JSON.stringify({ threadId: input.remoteThreadId }),
+        input.completedAt,
+        input.completedAt,
+        input.postId,
+        input.candidateVersionId,
+        input.remoteThreadId,
+        input.remoteStarterMessageId,
+        input.jobId,
+        input.postId,
+        input.candidateVersionId,
+      ),
+    );
+  }
 
   const results = await database.batch(statements);
   return results.at(-1)?.meta?.changes === 1;

@@ -79,6 +79,7 @@ export type StudioQueueBody =
   | { type: "asset_cleanup"; jobId: string; assetId: string }
   | { type: "version_cleanup"; jobId: string; versionId: string }
   | { type: "discord_delivery"; jobId: string }
+  | { type: "notification_send"; jobId: string }
   | { type: "taxonomy_sync"; jobId: string };
 
 export interface StudioQueueProducer {
