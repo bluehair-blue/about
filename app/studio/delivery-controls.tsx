@@ -194,7 +194,7 @@ export function DeliveryControls({
   }, [load, postId]);
 
   async function submit(
-    action: "publish" | "delete" | "retry",
+    action: "publish" | "delete" | "retry" | "reconcile",
     retryJobId?: string,
   ) {
     if (!postId || busy) return;
@@ -214,7 +214,7 @@ export function DeliveryControls({
         body: JSON.stringify({
           action,
           postId,
-          ...(action === "retry" && retryJobId
+          ...((action === "retry" || action === "reconcile") && retryJobId
             ? { jobId: retryJobId }
             : {}),
         }),
@@ -256,6 +256,8 @@ export function DeliveryControls({
       currentDelivery.notificationJob.status,
     );
   const outcomeUnknown = shownDelivery?.latestJob?.status === "outcome_unknown";
+  const canReconcile = currentDelivery?.latestJob?.status === "outcome_unknown" &&
+    currentDelivery.latestJob.action === "update";
   const notificationUnknown = shownDelivery?.notificationJob?.status === "outcome_unknown";
 
   return (
@@ -343,6 +345,15 @@ export function DeliveryControls({
       {message ? <p className={styles.assetMessage} role="status">{message}</p> : null}
 
       <div className={styles.deliveryButtons}>
+        {canReconcile ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void submit("reconcile", currentDelivery.latestJob?.jobId)}
+          >
+            Discord mutation 없이 원격 대조
+          </button>
+        ) : null}
         {retryable ? (
           <button
             type="button"

@@ -379,6 +379,7 @@ class FakeDiscordForum {
     this.nextTagId = 300000000000000100n;
     this.failNextTaxonomy = null;
     this.failNextCreate = null;
+    this.failNextUpdate = null;
     this.failNextNotification = null;
     this.tags = [
       ["업데이트", "300000000000000001"],
@@ -509,6 +510,10 @@ class FakeDiscordForum {
     }
     if (url.pathname === messagePath && init.method === "PATCH") {
       this.message = await this.messageFromForm(init.body);
+      if (this.failNextUpdate === "message_after_apply") {
+        this.failNextUpdate = null;
+        throw new Error("unknown update result after remote apply");
+      }
       return Response.json(this.message);
     }
     if (url.pathname === threadPath && init.method === "DELETE") {
@@ -2827,6 +2832,121 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
         .get(retryDeleteJobId).status,
       "succeeded",
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("reconciles an outcome-unknown update without repeating Discord mutations", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: new MemoryR2(),
+    IMAGES: new FakeImages(),
+    PUBLISH_QUEUE: queue,
+  });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const discord = new FakeDiscordForum(env);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [keys.publicJwk] });
+    }
+    return discord.fetch(input, init);
+  };
+  const request = async (pathname, init = {}) => worker.fetch(
+    new Request(`https://staging.example${pathname}`, {
+      ...init,
+      headers: {
+        "cf-access-jwt-assertion": token,
+        ...(init.headers ?? {}),
+      },
+    }),
+    env,
+    executionContext(),
+  );
+
+  try {
+    const draft = await createDraftFixture(request, "update reconcile fixture");
+    const firstPrepared = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "publish", postId: draft.postId }),
+    );
+    const first = await firstPrepared.json();
+    const firstMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [firstMessage] }, env);
+    const notificationMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [notificationMessage] }, env);
+    const previousCurrent = database.database.prepare(`
+      SELECT current_version_id FROM studio_posts WHERE id = ?
+    `).get(draft.postId).current_version_id;
+    assert.equal(previousCurrent, first.candidateId);
+
+    const saved = await request(
+      "/studio/api/drafts",
+      studioJsonWrite({
+        postId: draft.postId,
+        revision: draft.revision,
+        title: "원격에는 반영된 수정",
+        body: "응답만 끊긴 update 본문입니다.",
+        kind: "update",
+        topics: ["character"],
+      }),
+    );
+    assert.equal(saved.status, 200);
+    const updatePrepared = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "publish", postId: draft.postId }),
+    );
+    assert.equal(updatePrepared.status, 202);
+    const update = await updatePrepared.json();
+    discord.failNextUpdate = "message_after_apply";
+    const updateMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [updateMessage] }, env);
+    assert.equal(updateMessage.acked, true);
+    assert.equal(discord.updateCalls, 1);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(update.jobId).status,
+      "outcome_unknown",
+    );
+    const held = database.database.prepare(`
+      SELECT status, current_version_id FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    assert.equal(held.status, "published");
+    assert.equal(held.current_version_id, previousCurrent);
+    const heldStatus = await request(`/studio/api/publish?postId=${draft.postId}`);
+    assert.equal((await heldStatus.json()).canPublish, false);
+
+    const reconcile = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "reconcile",
+        postId: draft.postId,
+        jobId: update.jobId,
+      }),
+    );
+    assert.equal(reconcile.status, 202);
+    const reconcileMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [reconcileMessage] }, env);
+    assert.equal(reconcileMessage.acked, true);
+    assert.equal(discord.updateCalls, 1);
+    assert.equal(discord.notificationCalls, 1);
+    assert.equal(queue.messages.length, 0);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(update.jobId).status,
+      "succeeded",
+    );
+    const finalized = database.database.prepare(`
+      SELECT status, current_version_id FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    assert.equal(finalized.status, "published");
+    assert.equal(finalized.current_version_id, update.candidateId);
   } finally {
     globalThis.fetch = originalFetch;
     database.close();

@@ -17,7 +17,7 @@ const DISCORD_API = "https://discord.com/api/v10";
 const MAX_REQUEST_BYTES = 4_096;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-type PublishAction = "publish" | "delete" | "retry";
+type PublishAction = "publish" | "delete" | "retry" | "reconcile";
 type DiscordAction = "create" | "update" | "delete";
 type RetriableTarget = "discord" | "notification";
 
@@ -132,17 +132,17 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
   const postId = value.postId;
   const jobId = value.jobId ?? null;
   if (
-    (action !== "publish" && action !== "delete" && action !== "retry") ||
+    !["publish", "delete", "retry", "reconcile"].includes(String(action)) ||
     typeof postId !== "string" ||
     !uuidPattern.test(postId) ||
     (jobId !== null && (typeof jobId !== "string" || !uuidPattern.test(jobId))) ||
-    (action === "retry" && jobId === null) ||
-    (action !== "retry" && jobId !== null) ||
+    ((action === "retry" || action === "reconcile") && jobId === null) ||
+    ((action !== "retry" && action !== "reconcile") && jobId !== null) ||
     Object.keys(value).some((key) => !["action", "postId", "jobId"].includes(key))
   ) {
     return "invalid_publish_request";
   }
-  return { action, postId, jobId };
+  return { action: action as PublishAction, postId, jobId };
 }
 
 async function sha256(value: unknown) {
@@ -480,14 +480,42 @@ async function retryDelivery(
     );
   }
   if (job.status !== "queued" && job.status !== "finalizing") {
-    const updated = await database.prepare(`
+    const changedAt = new Date().toISOString();
+    const statements = [];
+    if (
+      job.target === "discord" &&
+      (job.action === "create" || job.action === "update")
+    ) {
+      statements.push(database.prepare(`
+        UPDATE studio_posts
+        SET status = 'publishing', discord_delivery_state = 'queued', updated_at = ?
+        WHERE id = ? AND status IN ('draft', 'published', 'publishing')
+          AND EXISTS (
+            SELECT 1 FROM delivery_jobs
+            WHERE id = ? AND post_id = studio_posts.id
+              AND target = 'discord' AND action = ?
+              AND status IN ('queue_failed', 'retrying', 'failed')
+          )
+      `).bind(changedAt, postId, jobId, job.action));
+    }
+    const jobIndex = statements.length;
+    statements.push(database.prepare(`
       UPDATE delivery_jobs
       SET status = 'queued', error_code = NULL, last_error = NULL,
         completed_at = NULL, updated_at = ?
       WHERE id = ? AND post_id = ?
         AND status IN ('queue_failed', 'retrying', 'failed')
-    `).bind(new Date().toISOString(), jobId, postId).run();
-    if (updated.meta?.changes !== 1) {
+        AND (? = 'notification' OR EXISTS (
+          SELECT 1 FROM studio_posts
+          WHERE studio_posts.id = delivery_jobs.post_id
+            AND studio_posts.status = 'publishing'
+        ))
+    `).bind(changedAt, jobId, postId, job.target));
+    const updated = await database.batch(statements);
+    if (
+      updated[jobIndex]?.meta?.changes !== 1 ||
+      (jobIndex === 1 && updated[0]?.meta?.changes !== 1)
+    ) {
       return json({ error: "delivery_retry_conflict" }, 409);
     }
   }
@@ -506,6 +534,110 @@ async function retryDelivery(
     { postId, jobId, target: job.target, action: job.action, status },
     queued ? 202 : 503,
   );
+}
+
+async function reconcileDelivery(
+  postId: string,
+  jobId: string,
+  database: StudioD1,
+  queue: StudioQueueProducer,
+) {
+  const job = await loadDeliveryJob(database, jobId);
+  if (!job || job.post_id !== postId) {
+    return json({ error: "delivery_job_not_found" }, 404);
+  }
+  if (job.status !== "outcome_unknown") {
+    return json({ error: "delivery_reconcile_conflict" }, 409);
+  }
+  if (job.action !== "update") {
+    return json({ error: "create_mapping_requires_manual_review" }, 409);
+  }
+  const payload = parseDeliveryPayload(job);
+  if (
+    !payload ||
+    !payload.previousVersionId ||
+    !payload.threadId ||
+    !payload.starterMessageId
+  ) {
+    return json({ error: "delivery_payload_invalid" }, 409);
+  }
+
+  const changedAt = new Date().toISOString();
+  const transitioned = await database.batch([
+    database.prepare(`
+      UPDATE studio_posts
+      SET status = 'publishing', discord_delivery_state = 'verifying', updated_at = ?
+      WHERE id = ? AND status = 'published' AND current_version_id = ?
+        AND discord_thread_id = ? AND discord_starter_message_id = ?
+        AND EXISTS (
+          SELECT 1 FROM delivery_jobs
+          WHERE id = ? AND post_id = studio_posts.id
+            AND target = 'discord' AND action = 'update'
+            AND status = 'outcome_unknown'
+        )
+    `).bind(
+      changedAt,
+      postId,
+      payload.previousVersionId,
+      payload.threadId,
+      payload.starterMessageId,
+      jobId,
+    ),
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'verifying', remote_id = ?, remote_aux_id = ?,
+        error_code = NULL, last_error = NULL, completed_at = NULL, updated_at = ?
+      WHERE id = ? AND post_id = ? AND target = 'discord' AND action = 'update'
+        AND status = 'outcome_unknown'
+        AND EXISTS (
+          SELECT 1 FROM studio_posts
+          WHERE id = ? AND status = 'publishing' AND current_version_id = ?
+            AND discord_thread_id = ? AND discord_starter_message_id = ?
+        )
+    `).bind(
+      payload.threadId,
+      payload.starterMessageId,
+      changedAt,
+      jobId,
+      postId,
+      postId,
+      payload.previousVersionId,
+      payload.threadId,
+      payload.starterMessageId,
+    ),
+  ]);
+  if (
+    transitioned[0]?.meta?.changes !== 1 ||
+    transitioned[1]?.meta?.changes !== 1
+  ) {
+    return json({ error: "delivery_reconcile_conflict" }, 409);
+  }
+
+  try {
+    await queue.send({ type: "discord_delivery", jobId });
+  } catch {
+    const failedAt = new Date().toISOString();
+    await database.batch([
+      database.prepare(`
+        UPDATE delivery_jobs
+        SET status = 'outcome_unknown', error_code = 'reconcile_queue_failed',
+          last_error = 'reconcile_queue_failed', completed_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'verifying'
+      `).bind(failedAt, failedAt, jobId),
+      database.prepare(`
+        UPDATE studio_posts
+        SET status = 'published', discord_delivery_state = 'outcome_unknown',
+          updated_at = ?
+        WHERE id = ? AND status = 'publishing' AND current_version_id = ?
+          AND EXISTS (
+            SELECT 1 FROM delivery_jobs
+            WHERE id = ? AND status = 'outcome_unknown'
+          )
+      `).bind(failedAt, postId, payload.previousVersionId, jobId),
+    ]);
+    return json({ error: "reconcile_queue_failed" }, 503);
+  }
+  return json({ postId, jobId, action: "reconcile", status: "verifying" }, 202);
 }
 
 async function readStatus(request: Request, database: StudioD1) {
@@ -560,6 +692,7 @@ async function readStatus(request: Request, database: StudioD1) {
     assets: { count: assetCount, notReadyCount, discordBytes },
     budgetBytes: MAX_DISCORD_ATTACHMENT_BYTES,
     canPublish: ["draft", "published"].includes(post.status) &&
+      latest?.status !== "outcome_unknown" &&
       notReadyCount === 0 && discordBytes <= MAX_DISCORD_ATTACHMENT_BYTES,
     canDelete: post.status === "published" && Boolean(post.discord_thread_id),
     latestJob: latest
@@ -611,6 +744,14 @@ export async function handleStudioPublishRequest(
     }
     if (input.action === "delete") {
       return await prepareDelete(input.postId, database, queue);
+    }
+    if (input.action === "reconcile") {
+      return await reconcileDelivery(
+        input.postId,
+        input.jobId as string,
+        database,
+        queue,
+      );
     }
     return await retryDelivery(
       input.postId,
@@ -932,7 +1073,8 @@ async function setJobState(
   status: string,
   errorCode: string | null,
 ) {
-  await database.prepare(`
+  const changedAt = new Date().toISOString();
+  const statements = [database.prepare(`
     UPDATE delivery_jobs
     SET status = ?, error_code = ?, last_error = ?, updated_at = ?,
       completed_at = CASE WHEN ? IN ('failed', 'outcome_unknown') THEN ? ELSE NULL END
@@ -941,11 +1083,38 @@ async function setJobState(
     status,
     errorCode,
     errorCode,
-    new Date().toISOString(),
+    changedAt,
     status,
-    new Date().toISOString(),
+    changedAt,
     jobId,
-  ).run();
+  )];
+  if (["failed", "outcome_unknown"].includes(status)) {
+    statements.push(database.prepare(`
+      UPDATE studio_posts
+      SET status = CASE
+          WHEN current_version_id IS NOT NULL THEN 'published'
+          WHEN ? = 'failed' THEN 'draft'
+          ELSE status
+        END,
+        discord_delivery_state = ?, discord_checked_at = ?, updated_at = ?
+      WHERE status = 'publishing'
+        AND EXISTS (
+          SELECT 1
+          FROM delivery_jobs
+          WHERE id = ? AND post_id = studio_posts.id
+            AND target = 'discord' AND action IN ('create', 'update')
+            AND status = ?
+        )
+    `).bind(
+      status,
+      status,
+      changedAt,
+      changedAt,
+      jobId,
+      status,
+    ));
+  }
+  await database.batch(statements);
 }
 
 async function classifyDiscordFailure(
