@@ -18,6 +18,7 @@ type Asset = {
   discordBytes: number | null;
   ordinal: number;
   alt: string;
+  processingError: string | null;
   createdAt: string;
 };
 
@@ -26,6 +27,8 @@ type PendingFile = {
   file: File;
   alt: string;
   error: string;
+  failedAssetId?: string;
+  receiptUnknown?: boolean;
 };
 
 function isAsset(value: unknown): value is Asset {
@@ -47,6 +50,7 @@ function isAsset(value: unknown): value is Asset {
     (asset.discordBytes === null || typeof asset.discordBytes === "number") &&
     typeof asset.ordinal === "number" &&
     typeof asset.alt === "string" &&
+    (asset.processingError === null || typeof asset.processingError === "string") &&
     typeof asset.createdAt === "string"
   );
 }
@@ -83,10 +87,13 @@ function byteLabel(value: number) {
     : `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function statusLabel(status: AssetStatus) {
-  switch (status) {
+function statusLabel(asset: Asset) {
+  if (asset.processingError === "asset_storage_failed") {
+    return "private 원본 저장 실패";
+  }
+  switch (asset.status) {
     case "uploading":
-      return "업로드 접수됨";
+      return "private 원본 확인 중";
     case "processing":
       return "원본 저장됨 · 파생본 대기";
     case "ready":
@@ -103,9 +110,11 @@ function statusLabel(status: AssetStatus) {
 export function ImageUploader({
   postId,
   disabled,
+  onPendingChange,
 }: {
   postId: string | null;
   disabled: boolean;
+  onPendingChange: (count: number, checked: boolean) => void;
 }) {
   const [loaded, setLoaded] = useState<{ postId: string; assets: Asset[] } | null>(
     null,
@@ -114,6 +123,15 @@ export function ImageUploader({
   const [busyId, setBusyId] = useState("");
   const [status, setStatus] = useState("");
   const assets = loaded?.postId === postId ? loaded.assets : [];
+  const unacceptedCount = pendingFiles.length + assets.filter((asset) =>
+    asset.status === "uploading" ||
+    asset.processingError === "asset_storage_failed"
+  ).length;
+  const receiptChecked = postId === null || loaded?.postId === postId;
+
+  useEffect(() => {
+    onPendingChange(unacceptedCount, receiptChecked);
+  }, [onPendingChange, receiptChecked, unacceptedCount]);
 
   const loadAssets = useCallback(async (targetPostId: string) => {
     const next = await requestAssets(targetPostId);
@@ -188,13 +206,31 @@ export function ImageUploader({
 
     setBusyId(item.id);
     updatePending(item.id, { error: "" });
-    const form = new FormData();
-    form.set("postId", postId);
-    form.set("ordinal", String(assets.length));
-    form.set("alt", item.alt);
-    form.set("file", item.file);
+    let submitted = false;
 
     try {
+      if (item.failedAssetId) {
+        const removed = await fetch(
+          `/studio/api/assets/${encodeURIComponent(item.failedAssetId)}`,
+          {
+            method: "DELETE",
+            headers: {
+              "content-type": "application/json",
+              "x-studio-request": "1",
+            },
+            body: "{}",
+          },
+        );
+        if (!removed.ok) throw new Error("Failed receipt cleanup failed");
+        updatePending(item.id, { failedAssetId: undefined });
+      }
+      const currentAssets = await loadAssets(postId);
+      const form = new FormData();
+      form.set("postId", postId);
+      form.set("ordinal", String(currentAssets.length));
+      form.set("alt", item.alt);
+      form.set("file", item.file);
+      submitted = true;
       const response = await fetch("/studio/api/assets", {
         method: "POST",
         headers: { "x-studio-request": "1" },
@@ -205,7 +241,16 @@ export function ImageUploader({
         error?: unknown;
       };
       if (!response.ok) {
-        if (typeof result.assetId === "string") {
+        if (
+          result.error === "asset_storage_failed" &&
+          typeof result.assetId === "string"
+        ) {
+          updatePending(item.id, {
+            error: "private 원본 저장에 실패했습니다. 파일을 유지했으니 다시 시도해 주세요.",
+            failedAssetId: result.assetId,
+          });
+          setStatus("private upload 접수가 끝나지 않아 작업 이동을 막습니다.");
+        } else if (typeof result.assetId === "string") {
           setPendingFiles((current) =>
             current.filter((candidate) => candidate.id !== item.id),
           );
@@ -227,7 +272,47 @@ export function ImageUploader({
       setStatus("원본을 저장하고 파생본 작업을 Queue에 등록했습니다.");
       window.dispatchEvent(new Event("studio-state-changed"));
     } catch {
-      updatePending(item.id, { error: "원본 업로드에 실패했습니다." });
+      updatePending(item.id, {
+        error: submitted
+          ? "원본 접수 결과가 불명확합니다. 자동 재시도하지 않고 파일을 유지합니다."
+          : "원본 업로드를 시작하지 못했습니다.",
+        receiptUnknown: submitted || undefined,
+      });
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function cancelPending(item: PendingFile) {
+    if (!item.failedAssetId || !postId) {
+      setPendingFiles((current) =>
+        current.filter((candidate) => candidate.id !== item.id),
+      );
+      return;
+    }
+    if (busyId) return;
+    setBusyId(item.id);
+    try {
+      const response = await fetch(
+        `/studio/api/assets/${encodeURIComponent(item.failedAssetId)}`,
+        {
+          method: "DELETE",
+          headers: {
+            "content-type": "application/json",
+            "x-studio-request": "1",
+          },
+          body: "{}",
+        },
+      );
+      if (!response.ok) throw new Error("Failed receipt cleanup failed");
+      setPendingFiles((current) =>
+        current.filter((candidate) => candidate.id !== item.id),
+      );
+      await loadAssets(postId);
+    } catch {
+      updatePending(item.id, {
+        error: "실패 manifest를 정리하지 못해 파일 선택을 유지합니다.",
+      });
     } finally {
       setBusyId("");
     }
@@ -335,19 +420,19 @@ export function ImageUploader({
               <div className={styles.assetButtons}>
                 <button
                   type="button"
-                  disabled={disabled || busyId !== ""}
+                  disabled={disabled || busyId !== "" || item.receiptUnknown}
                   onClick={() => void upload(item)}
                 >
-                  {busyId === item.id ? "업로드 중…" : "원본 업로드"}
+                  {busyId === item.id
+                    ? "업로드 중…"
+                    : item.receiptUnknown
+                    ? "접수 확인 필요"
+                    : "원본 업로드"}
                 </button>
                 <button
                   type="button"
                   disabled={busyId !== ""}
-                  onClick={() =>
-                    setPendingFiles((current) =>
-                      current.filter((candidate) => candidate.id !== item.id),
-                    )
-                  }
+                  onClick={() => void cancelPending(item)}
                 >
                   취소
                 </button>
@@ -368,14 +453,16 @@ export function ImageUploader({
                   {asset.width}×{asset.height} · {byteLabel(asset.sourceBytes)}
                 </small>
               </div>
-              <p className={styles.assetState}>{statusLabel(asset.status)}</p>
+              <p className={styles.assetState}>{statusLabel(asset)}</p>
               {asset.status === "ready" && asset.discordBytes && asset.publicBytes ? (
                 <small>
                   Portfolio {byteLabel(asset.publicBytes)} · Discord {byteLabel(asset.discordBytes)}
                 </small>
               ) : null}
               <div className={styles.assetButtons}>
-                {asset.status === "failed" ? (
+                {asset.status === "failed" &&
+                asset.processingError !== "asset_storage_failed" &&
+                asset.processingError !== "asset_manifest_unavailable" ? (
                   <button
                     type="button"
                     disabled={disabled || busyId !== ""}

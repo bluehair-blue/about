@@ -39,8 +39,10 @@ test("keeps Studio autosave single-flight, IME-aware, and native", () => {
     "utf8",
   );
 
-  assert.match(editor, /if \(savingRef\.current\) \{[\s\S]*?queuedSaveRef\.current = true;/);
-  assert.match(editor, /queuedSaveRef\.current = false;[\s\S]*?saveCurrentDraft\(\);/);
+  assert.match(editor, /if \(savingRef\.current\) queuedSaveRef\.current = true;/);
+  assert.match(editor, /savePromiseRef\.current[\s\S]*?return savePromiseRef\.current/);
+  assert.match(editor, /while \(queuedSaveRef\.current && dirtyRef\.current\)/);
+  assert.match(editor, /queuedSaveRef\.current = false/);
   assert.match(editor, /window\.setTimeout\([\s\S]*?1_500\)/);
   assert.match(editor, /event\.ctrlKey \|\| event\.metaKey/);
   assert.match(editor, /onCompositionStart=\{handleCompositionStart\}/);
@@ -52,6 +54,41 @@ test("keeps Studio autosave single-flight, IME-aware, and native", () => {
   assert.match(editor, /name="title"[\s\S]*?defaultValue=\{draft\.title\}/);
   assert.match(editor, /name="body"[\s\S]*?defaultValue=\{draft\.body\}/);
   assert.doesNotMatch(editor, /value=\{draft\.(?:title|body)\}/);
+});
+
+test("keeps Studio task switches on stable URLs until draft and source receipts are safe", () => {
+  const editor = readFileSync(
+    new URL("../app/studio/draft-editor.tsx", import.meta.url),
+    "utf8",
+  );
+  const uploader = readFileSync(
+    new URL("../app/studio/image-uploader.tsx", import.meta.url),
+    "utf8",
+  );
+  const list = readFileSync(
+    new URL("../app/studio/draft-list.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(editor, /window\.history\.replaceState\([\s\S]*?\/studio\/posts\//);
+  assert.match(editor, /window\.addEventListener\("beforeunload"/);
+  assert.match(editor, /const saved = await saveCurrent\(\)/);
+  assert.match(editor, /pendingUploadCountRef\.current/);
+  assert.match(editor, /window\.location\.assign\(target\)/);
+  assert.match(editor, /<dialog/);
+  assert.match(editor, />\s*다시 저장\s*</);
+  assert.match(editor, />\s*현재 화면 유지\s*</);
+  assert.match(editor, />\s*변경 내용 복사\s*</);
+  assert.doesNotMatch(editor, /저장하지 않고 이동|변경 내용 버리기/);
+  assert.match(uploader, /result\.error === "asset_storage_failed"/);
+  assert.match(uploader, /failedAssetId: result\.assetId/);
+  assert.match(uploader, /receiptUnknown: submitted \|\| undefined/);
+  assert.match(uploader, /asset\.status === "uploading"/);
+  assert.match(uploader, /asset\.processingError === "asset_storage_failed"/);
+  assert.match(uploader, /onPendingChange\(unacceptedCount, receiptChecked\)/);
+  assert.match(list, /"all" \| "working" \| "attention"/);
+  assert.match(list, /\/studio\/posts\/new/);
+  assert.match(list, /작업 재개/);
 });
 
 class SqliteD1Statement {
@@ -711,7 +748,7 @@ test("protects every Studio route with a verified Access JWT", async () => {
 
     const token = await keys.token({ email: "Studio-Admin@Example.Com" });
     const allowed = await worker.fetch(
-      new Request("https://staging.example/studio", {
+      new Request("https://staging.example/studio?filter=all", {
         headers: { "cf-access-jwt-assertion": token },
       }),
       env,
@@ -725,8 +762,9 @@ test("protects every Studio route with a verified Access JWT", async () => {
     const allowedHtml = await allowed.text();
     assert.match(allowedHtml, /Studio Console/);
     assert.match(allowedHtml, /Discord 역할 패널 연결/);
-    assert.match(allowedHtml, /초안 불러오는 중/);
-    assert.match(allowedHtml, /지금 저장/);
+    assert.match(allowedHtml, /작업 목록/);
+    assert.match(allowedHtml, /새 초안/);
+    assert.match(allowedHtml, /작업 목록 불러오는 중/);
     // Vinext restores the fetch implementation it captured when the built
     // worker loaded, so each black-box request reinstalls the test JWKS stub.
     globalThis.fetch = certFetcher;
@@ -1069,6 +1107,112 @@ test("persists one D1 draft and rejects stale revisions without mutation", async
         new Date().toISOString(),
       );
     }, /UNIQUE constraint failed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("lists active drafts by stable Studio URL without expiring old work", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const env = phaseAEnv({ STUDIO_DB: database });
+  const keys = await accessKeys();
+  const originalFetch = globalThis.fetch;
+  const request = studioRequester(worker, env, keys, await keys.token());
+
+  try {
+    const oldDraft = await createDraftFixture(request, "오래된 active draft");
+    const attentionDraft = await createDraftFixture(request, "확인이 필요한 draft");
+    database.database.prepare(`
+      UPDATE studio_post_versions SET updated_at = '2001-01-01T00:00:00.000Z'
+      WHERE post_id = ? AND state = 'draft'
+    `).run(oldDraft.postId);
+    database.database.prepare(`
+      UPDATE studio_posts
+      SET updated_at = '2001-01-01T00:00:00.000Z'
+      WHERE id = ?
+    `).run(oldDraft.postId);
+    database.database.prepare(`
+      UPDATE studio_posts SET status = 'withheld' WHERE id = ?
+    `).run(attentionDraft.postId);
+
+    const stable = await request(
+      `/studio/api/drafts?postId=${oldDraft.postId}`,
+    );
+    assert.equal(stable.status, 200);
+    const stableDraft = await stable.json();
+    assert.equal(stableDraft.postId, oldDraft.postId);
+    assert.equal(stableDraft.title, "오래된 active draft");
+    assert.equal(stableDraft.editable, true);
+
+    const missing = await request(
+      `/studio/api/drafts?postId=${crypto.randomUUID()}`,
+    );
+    assert.equal(missing.status, 404);
+    assert.deepEqual(await missing.json(), { error: "draft_not_found" });
+
+    const allResponse = await request("/studio/api/drafts?filter=all");
+    assert.equal(allResponse.status, 200);
+    const all = await allResponse.json();
+    assert.deepEqual(all.counts, { all: 2, working: 2, attention: 1 });
+    assert.equal(all.items.length, 2);
+    assert.equal(all.items[0].postId, attentionDraft.postId);
+    assert.equal(all.items[0].attentionReason, "post_withheld");
+    assert.equal(all.items[0].needsAttention, true);
+
+    const workingResponse = await request(
+      "/studio/api/drafts?filter=working",
+    );
+    assert.equal(workingResponse.status, 200);
+    const working = await workingResponse.json();
+    assert.equal(working.items.length, 2);
+    assert.equal(
+      working.items.some((item) => item.postId === oldDraft.postId),
+      true,
+    );
+
+    const attentionResponse = await request(
+      "/studio/api/drafts?filter=attention",
+    );
+    assert.equal(attentionResponse.status, 200);
+    const attention = await attentionResponse.json();
+    assert.equal(attention.items.length, 1);
+    assert.equal(attention.items[0].postId, attentionDraft.postId);
+
+    const frozenResponse = await request(
+      `/studio/api/drafts?postId=${attentionDraft.postId}`,
+    );
+    assert.equal(frozenResponse.status, 200);
+    const frozen = await frozenResponse.json();
+    assert.equal(frozen.postStatus, "withheld");
+    assert.equal(frozen.editable, false);
+    const frozenAssets = await request(
+      `/studio/api/assets?postId=${attentionDraft.postId}`,
+    );
+    assert.equal(frozenAssets.status, 200);
+    assert.deepEqual((await frozenAssets.json()).assets, []);
+    const rejectedSave = await request(
+      "/studio/api/drafts",
+      studioJsonWrite({
+        postId: frozen.postId,
+        revision: frozen.revision,
+        title: frozen.title,
+        body: frozen.body,
+        kind: frozen.kind,
+        topics: frozen.topics,
+      }),
+    );
+    assert.equal(rejectedSave.status, 404);
+
+    const invalidFilter = await request(
+      "/studio/api/drafts?filter=unknown",
+    );
+    assert.equal(invalidFilter.status, 400);
+    const mixedQuery = await request(
+      `/studio/api/drafts?filter=all&postId=${oldDraft.postId}`,
+    );
+    assert.equal(mixedQuery.status, 400);
   } finally {
     globalThis.fetch = originalFetch;
     database.close();
@@ -1811,8 +1955,16 @@ test("rejects unsafe image inputs and records recoverable R2 failures", async ()
     assert.equal(manifest.assets.length, 1);
     assert.equal(manifest.assets[0].assetId, failedBody.assetId);
     assert.equal(manifest.assets[0].status, "failed");
+    assert.equal(manifest.assets[0].processingError, "asset_storage_failed");
     assert.equal("privateSourceKey" in manifest.assets[0], false);
     assert.equal("sourceSha256" in manifest.assets[0], false);
+
+    const attention = await request("/studio/api/drafts?filter=attention");
+    assert.equal(attention.status, 200);
+    const attentionList = await attention.json();
+    assert.equal(attentionList.items.length, 1);
+    assert.equal(attentionList.items[0].postId, draft.postId);
+    assert.equal(attentionList.items[0].attentionReason, "asset_failed");
   } finally {
     globalThis.fetch = originalFetch;
     database.close();

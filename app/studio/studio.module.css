@@ -62,6 +62,21 @@
   gap: 1rem;
 }
 
+.editorNavigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.editorNavigation span,
+.listStatus,
+.postItem p,
+.unavailable {
+  color: #a8adbd;
+  font-size: 0.85rem;
+}
+
 .card {
   padding: clamp(1.25rem, 3vw, 2.25rem);
   border: 1px solid rgb(255 255 255 / 12%);
@@ -84,6 +99,157 @@
 .actions p {
   color: #a8adbd;
   font-size: 0.9rem;
+}
+
+.primaryLink,
+.editorNavigation a,
+.postItem > a {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0 1rem;
+  border-radius: 999px;
+  color: #090b12;
+  background: #8baaff;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-bottom: 1rem;
+}
+
+.filters a {
+  padding: 0.6rem 0.85rem;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 999px;
+  color: #c7ccda;
+  text-decoration: none;
+}
+
+.filters a[aria-current="page"] {
+  border-color: #8baaff;
+  color: #f4f6fb;
+  background: rgb(139 170 255 / 18%);
+}
+
+.listStatus {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1rem 0 0;
+}
+
+.listStatus button {
+  border: 0;
+  color: #cdd8ff;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.postList {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.postItem {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 0.8rem;
+  background: rgb(5 7 13 / 48%);
+}
+
+.postItem h3,
+.postItem p {
+  margin: 0;
+}
+
+.postItem h3 {
+  color: #f4f6fb;
+  font-size: 1rem;
+}
+
+.postItem > div:nth-child(2) {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.postBadges {
+  display: grid;
+  justify-items: start;
+  gap: 0.35rem;
+}
+
+.postBadges span,
+.postBadges strong {
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  color: #cdd8ff;
+  background: rgb(139 170 255 / 16%);
+  font-size: 0.72rem;
+}
+
+.postBadges strong,
+.attentionReason {
+  color: #ffbd8b;
+}
+
+.navigationDialog {
+  width: min(calc(100% - 2rem), 34rem);
+  padding: 1.5rem;
+  border: 1px solid rgb(139 170 255 / 45%);
+  border-radius: 1rem;
+  color: #f4f6fb;
+  background: #121622;
+  box-shadow: 0 2rem 6rem rgb(0 0 0 / 55%);
+}
+
+.navigationDialog::backdrop {
+  background: rgb(0 0 0 / 68%);
+}
+
+.navigationDialog h2,
+.navigationDialog p {
+  margin: 0;
+}
+
+.navigationDialog p {
+  margin-top: 0.75rem;
+  color: #c7ccda;
+  line-height: 1.6;
+}
+
+.navigationDialog > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 1.25rem;
+}
+
+.navigationDialog button {
+  min-height: 2.75rem;
+  padding: 0 1rem;
+  border: 0;
+  border-radius: 999px;
+  color: #090b12;
+  background: #8baaff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 750;
 }
 
 .field {
@@ -372,7 +538,12 @@
 .actions button:focus-visible,
 .saveBar button:focus-visible,
 .retryButton:focus-visible,
-.assetItem button:focus-visible {
+.assetItem button:focus-visible,
+.primaryLink:focus-visible,
+.editorNavigation a:focus-visible,
+.filters a:focus-visible,
+.postItem > a:focus-visible,
+.navigationDialog button:focus-visible {
   outline: 2px solid #dfe4f4;
   outline-offset: 3px;
 }
@@ -398,7 +569,8 @@
 @media (max-width: 46rem) {
   .header,
   .sectionHeading,
-  .actions {
+  .actions,
+  .editorNavigation {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -413,6 +585,10 @@
   }
 
   .assetItem {
+    grid-template-columns: 1fr;
+  }
+
+  .postItem {
     grid-template-columns: 1fr;
   }
 

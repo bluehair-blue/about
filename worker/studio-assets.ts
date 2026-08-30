@@ -276,7 +276,11 @@ async function hashBytes(bytes: ArrayBuffer) {
   return { digest, hex };
 }
 
-async function draftContext(database: StudioD1, postId: string) {
+async function draftContext(
+  database: StudioD1,
+  postId: string,
+  editableOnly = true,
+) {
   return database.prepare(`
     SELECT post.id AS post_id, version.id AS version_id, version.title,
       (
@@ -286,7 +290,8 @@ async function draftContext(database: StudioD1, postId: string) {
       ) AS asset_count
     FROM studio_posts AS post
     JOIN studio_post_versions AS version ON version.id = post.draft_version_id
-    WHERE post.id = ? AND post.status IN ('draft', 'published')
+    WHERE post.id = ?
+      AND (${editableOnly ? "post.status IN ('draft', 'published')" : "post.status != 'purged'"})
       AND version.state = 'draft'
   `).bind(postId).first<DraftContext>();
 }
@@ -296,7 +301,7 @@ async function listAssets(request: Request, database: StudioD1) {
   if (!postId || !uuidPattern.test(postId)) {
     return json({ error: "invalid_post_id" }, 400);
   }
-  const context = await draftContext(database, postId);
+  const context = await draftContext(database, postId, false);
   if (!context) return json({ error: "draft_not_found" }, 404);
 
   const rows = await database.prepare(`

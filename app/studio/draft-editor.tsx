@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   useCallback,
   useEffect,
@@ -7,13 +8,16 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent,
+  type MouseEvent,
 } from "react";
 
 import {
   draftKinds,
   draftTopics,
+  postStatuses,
   type DraftKind,
   type DraftTopic,
+  type PostStatus,
 } from "../../db/schema";
 import { ImageUploader } from "./image-uploader";
 import { DeliveryControls } from "./delivery-controls";
@@ -37,6 +41,8 @@ type Draft = {
 
 type SavedDraft = Draft & {
   savedAt: string;
+  postStatus: PostStatus;
+  editable: boolean;
 };
 
 type SaveResult = {
@@ -91,7 +97,10 @@ function isSavedDraft(value: unknown): value is SavedDraft {
         typeof topic === "string" && /^[a-z][a-z0-9-]{0,31}$/u.test(topic),
     ) &&
     new Set(draft.topics).size === draft.topics.length &&
-    typeof draft.savedAt === "string"
+    typeof draft.savedAt === "string" &&
+    typeof draft.postStatus === "string" &&
+    postStatuses.includes(draft.postStatus as PostStatus) &&
+    typeof draft.editable === "boolean"
   );
 }
 
@@ -131,11 +140,15 @@ function draftLoadFailure(error: unknown) {
     : "초안을 불러오지 못했습니다 · 다시 시도해 주세요";
 }
 
-async function requestDraft() {
-  const response = await fetch("/studio/api/drafts", {
-    headers: { accept: "application/json" },
-    cache: "no-store",
-  });
+async function requestDraft(postId: string | null) {
+  if (postId === null) return null;
+  const response = await fetch(
+    `/studio/api/drafts?postId=${encodeURIComponent(postId)}`,
+    {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    },
+  );
   if (response.status === 204) return null;
   if (needsStudioLogin(response.status)) {
     throw new Error("studio_access_required");
@@ -148,22 +161,32 @@ async function requestDraft() {
   return result;
 }
 
-export function DraftEditor() {
+export function DraftEditor({ postId }: { postId: string | null }) {
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [ready, setReady] = useState(false);
+  const [editable, setEditable] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [pending, setPending] = useState(false);
   const [composing, setComposing] = useState(false);
   const [conflict, setConflict] = useState(false);
+  const [moving, setMoving] = useState(false);
+  const [navigationReason, setNavigationReason] = useState("");
+  const [pendingUploadCount, setPendingUploadCount] = useState(0);
   const [status, setStatus] = useState("초안 불러오는 중…");
   const draftRef = useRef(draft);
   const dirtyRef = useRef(false);
   const composingRef = useRef(false);
   const savingRef = useRef(false);
   const queuedSaveRef = useRef(false);
+  const savePromiseRef = useRef<Promise<boolean> | null>(null);
   const conflictRef = useRef(false);
   const changeIdRef = useRef(0);
+  const movingRef = useRef(false);
+  const pendingUploadCountRef = useRef(0);
+  const uploadReceiptCheckedRef = useRef(postId === null);
+  const navigationTargetRef = useRef("/studio?filter=working");
+  const navigationDialogRef = useRef<HTMLDialogElement>(null);
 
   const restoreDraft = useCallback((result: SavedDraft | null) => {
     if (result === null) {
@@ -173,6 +196,7 @@ export function DraftEditor() {
       setDraft(emptyDraft);
       setDirty(false);
       setConflict(false);
+      setEditable(true);
       setReady(true);
       setLoadFailed(false);
       setStatus("새 초안 · 저장 전");
@@ -191,24 +215,29 @@ export function DraftEditor() {
       setDraft(restored);
       setDirty(false);
       setConflict(false);
+      setEditable(result.editable);
       setReady(true);
       setLoadFailed(false);
-      setStatus(savedTime(result.savedAt));
+      setStatus(
+        result.editable
+          ? savedTime(result.savedAt)
+          : `${savedTime(result.savedAt)} · ${result.postStatus} 상태에서는 읽기 전용`,
+      );
     }
   }, []);
 
   const loadDraft = useCallback(async () => {
     try {
-      restoreDraft(await requestDraft());
+      restoreDraft(await requestDraft(postId));
     } catch (error) {
       setLoadFailed(true);
       setStatus(draftLoadFailure(error));
     }
-  }, [restoreDraft]);
+  }, [postId, restoreDraft]);
 
   useEffect(() => {
     let active = true;
-    void requestDraft()
+    void requestDraft(postId)
       .then((result) => {
         if (active) restoreDraft(result);
       })
@@ -221,13 +250,14 @@ export function DraftEditor() {
     return () => {
       active = false;
     };
-  }, [restoreDraft]);
+  }, [postId, restoreDraft]);
 
   function editDraft(change: (current: Draft) => Draft) {
     const next = change(draftRef.current);
     draftRef.current = next;
     dirtyRef.current = true;
     changeIdRef.current += 1;
+    if (savingRef.current) queuedSaveRef.current = true;
     setDraft(next);
     setDirty(true);
     if (!conflictRef.current) {
@@ -239,85 +269,110 @@ export function DraftEditor() {
     }
   }
 
-  const saveCurrent = useCallback(async function saveCurrentDraft() {
+  const saveCurrent = useCallback(function saveCurrentDraft(): Promise<boolean> {
+    if (savePromiseRef.current) {
+      queuedSaveRef.current = true;
+      return savePromiseRef.current;
+    }
+    if (!dirtyRef.current) return Promise.resolve(true);
     if (
       !ready ||
-      !dirtyRef.current ||
+      !editable ||
       composingRef.current ||
       conflictRef.current ||
       !isSaveable(draftRef.current)
     ) {
-      return;
-    }
-    if (savingRef.current) {
-      queuedSaveRef.current = true;
-      return;
+      return Promise.resolve(false);
     }
 
-    savingRef.current = true;
-    setPending(true);
-    setStatus("저장 중…");
-    const snapshot = draftRef.current;
-    const savedChangeId = changeIdRef.current;
+    const cycle = (async () => {
+      savingRef.current = true;
+      setPending(true);
 
-    try {
-      const response = await fetch("/studio/api/drafts", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-studio-request": "1",
-        },
-        body: JSON.stringify(snapshot),
-      });
-      if (needsStudioLogin(response.status)) {
-        setStatus("다시 로그인 필요 · 로그인 후 지금 저장을 눌러 주세요");
-        return;
-      }
-      const result: unknown = await response.json();
+      try {
+        do {
+          if (
+            composingRef.current ||
+            conflictRef.current ||
+            !isSaveable(draftRef.current)
+          ) {
+            return false;
+          }
+          queuedSaveRef.current = false;
+          setStatus(movingRef.current ? "저장 후 이동 중…" : "저장 중…");
+          const snapshot = draftRef.current;
+          const savedChangeId = changeIdRef.current;
+          const response = await fetch("/studio/api/drafts", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-studio-request": "1",
+            },
+            body: JSON.stringify(snapshot),
+          });
+          if (needsStudioLogin(response.status)) {
+            setStatus("다시 로그인 필요 · 로그인 후 지금 저장을 눌러 주세요");
+            return false;
+          }
+          const result: unknown = await response.json();
 
-      if (
-        response.status === 409 &&
-        typeof result === "object" &&
-        result !== null &&
-        (result as { error?: unknown }).error === "revision_conflict"
-      ) {
-        conflictRef.current = true;
-        setConflict(true);
-        setStatus("다른 창에서 수정됨 · 로컬 내용을 복사한 뒤 새로고침해 주세요");
-        return;
-      }
-      if (!response.ok || !isSaveResult(result)) {
-        throw new Error("Draft save failed");
-      }
+          if (
+            response.status === 409 &&
+            typeof result === "object" &&
+            result !== null &&
+            (result as { error?: unknown }).error === "revision_conflict"
+          ) {
+            conflictRef.current = true;
+            setConflict(true);
+            setStatus("다른 창에서 수정됨 · 로컬 내용을 복사한 뒤 새로고침해 주세요");
+            return false;
+          }
+          if (!response.ok || !isSaveResult(result)) {
+            throw new Error("Draft save failed");
+          }
 
-      const saved = result;
-      const current = draftRef.current;
-      const withServerVersion = {
-        ...current,
-        postId: saved.postId,
-        revision: saved.revision,
-      };
-      draftRef.current = withServerVersion;
-      setDraft(withServerVersion);
+          const saved = result;
+          const current = draftRef.current;
+          const withServerVersion = {
+            ...current,
+            postId: saved.postId,
+            revision: saved.revision,
+          };
+          draftRef.current = withServerVersion;
+          setDraft(withServerVersion);
+          if (snapshot.postId === null) {
+            uploadReceiptCheckedRef.current = false;
+            window.history.replaceState(
+              window.history.state,
+              "",
+              `/studio/posts/${encodeURIComponent(saved.postId)}`,
+            );
+          }
 
-      if (changeIdRef.current === savedChangeId) {
-        dirtyRef.current = false;
-        setDirty(false);
-        setStatus(savedTime(saved.savedAt));
-      } else {
-        setStatus("변경됨 · 1.5초 후 자동 저장");
+          if (changeIdRef.current === savedChangeId) {
+            dirtyRef.current = false;
+            setDirty(false);
+            setStatus(savedTime(saved.savedAt));
+          } else {
+            queuedSaveRef.current = true;
+            setStatus("변경됨 · 최신 내용을 이어서 저장합니다");
+          }
+        } while (queuedSaveRef.current && dirtyRef.current);
+        return !dirtyRef.current;
+      } catch {
+        setStatus("저장 실패 · 다시 시도해 주세요");
+        return false;
+      } finally {
+        savingRef.current = false;
+        setPending(false);
       }
-    } catch {
-      setStatus("저장 실패 · 다시 시도해 주세요");
-    } finally {
-      savingRef.current = false;
-      setPending(false);
-      if (queuedSaveRef.current && !conflictRef.current) {
-        queuedSaveRef.current = false;
-        void saveCurrentDraft();
-      }
-    }
-  }, [ready]);
+    })();
+    savePromiseRef.current = cycle;
+    void cycle.finally(() => {
+      if (savePromiseRef.current === cycle) savePromiseRef.current = null;
+    });
+    return cycle;
+  }, [editable, ready]);
 
   useEffect(() => {
     if (!dirty || composing || conflict || !isSaveable(draft)) return;
@@ -359,151 +414,298 @@ export function DraftEditor() {
     void loadDraft();
   }
 
+  const updatePendingUploadCount = useCallback(
+    (count: number, checked: boolean) => {
+      pendingUploadCountRef.current = count;
+      uploadReceiptCheckedRef.current = checked;
+      setPendingUploadCount(count);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (
+        dirtyRef.current ||
+        savingRef.current ||
+        pendingUploadCountRef.current > 0
+      ) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, []);
+
+  function showNavigationFailure(reason: string) {
+    setNavigationReason(reason);
+    const dialog = navigationDialogRef.current;
+    if (dialog && !dialog.open) dialog.showModal();
+  }
+
+  async function requestNavigation(target: string) {
+    if (movingRef.current) return;
+    movingRef.current = true;
+    setMoving(true);
+    navigationTargetRef.current = target;
+
+    const saved = await saveCurrent();
+    const remainingUploads = pendingUploadCountRef.current;
+    const receiptChecked = uploadReceiptCheckedRef.current;
+    if (!saved || !receiptChecked || remainingUploads > 0) {
+      showNavigationFailure(
+        remainingUploads > 0
+          ? `private 원본 접수가 끝나지 않은 이미지 ${remainingUploads}장이 남았습니다.`
+          : !receiptChecked
+          ? "private 원본 접수 상태를 아직 확인하지 못했습니다."
+          : "최신 초안 revision을 저장하지 못했습니다.",
+      );
+      movingRef.current = false;
+      setMoving(false);
+      return;
+    }
+
+    window.location.assign(target);
+  }
+
+  function handleNavigation(event: MouseEvent<HTMLAnchorElement>) {
+    if (
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    event.preventDefault();
+    void requestNavigation(event.currentTarget.href);
+  }
+
+  async function copyCurrentChanges() {
+    const current = draftRef.current;
+    const copy = [
+      `제목: ${current.title}`,
+      `종류: ${current.kind}`,
+      `주제: ${current.topics.join(", ")}`,
+      "",
+      current.body,
+      pendingUploadCountRef.current > 0
+        ? `\nprivate 접수 전 이미지: ${pendingUploadCountRef.current}장`
+        : "",
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(copy);
+      setNavigationReason("변경 내용을 클립보드에 복사했습니다. 현재 화면은 유지됩니다.");
+    } catch {
+      setNavigationReason("변경 내용을 복사하지 못했습니다. 현재 화면의 입력은 유지됩니다.");
+    }
+  }
+
   const titleLength = characterCount(draft.title.trim());
   const bodyLength = characterCount(draft.body);
   const valid = isSaveable(draft);
 
   return (
-    <form
-      className={styles.draftForm}
-      onKeyDown={handleShortcut}
-      onSubmit={handleSubmit}
-      aria-busy={pending}
-    >
-      <section className={styles.card} aria-labelledby="content-heading">
-        <div className={styles.sectionHeading}>
-          <div>
-            <p className={styles.step}>01</p>
-            <h2 id="content-heading">Discord test fixture</h2>
+    <>
+      <nav className={styles.editorNavigation} aria-label="Studio 작업 이동">
+        <Link href="/studio?filter=working" onClick={handleNavigation}>
+          작업 목록
+        </Link>
+        <span>{moving ? "저장 후 이동 중…" : "이동 전 최신 revision 확인"}</span>
+      </nav>
+
+      <form
+        className={styles.draftForm}
+        onKeyDown={handleShortcut}
+        onSubmit={handleSubmit}
+        aria-busy={pending}
+      >
+        <section className={styles.card} aria-labelledby="content-heading">
+          <div className={styles.sectionHeading}>
+            <div>
+              <p className={styles.step}>01</p>
+              <h2 id="content-heading">Discord test fixture</h2>
+            </div>
+            <p>한국어 Markdown · 최대 2,000자</p>
           </div>
-          <p>한국어 Markdown · 최대 2,000자</p>
-        </div>
 
-        {loadFailed ? (
-          <button className={styles.retryButton} type="button" onClick={retryLoad}>
-            초안 다시 불러오기
-          </button>
-        ) : null}
+          {loadFailed ? (
+            <button
+              className={styles.retryButton}
+              type="button"
+              onClick={retryLoad}
+            >
+              초안 다시 불러오기
+            </button>
+          ) : null}
 
-        <label className={styles.field}>
-          <span>
-            제목 <small>{titleLength}/100</small>
-          </span>
-          <input
-            key={ready ? "ready" : "loading"}
-            name="title"
-            defaultValue={draft.title}
-            required
-            disabled={!ready}
-            aria-invalid={titleLength > 100}
-            onChange={(event) =>
-              editDraft((current) => ({ ...current, title: event.target.value }))
-            }
-            onCompositionStart={handleCompositionStart}
-            onCompositionEnd={handleCompositionEnd}
-          />
-        </label>
+          <label className={styles.field}>
+            <span>
+              제목 <small>{titleLength}/100</small>
+            </span>
+            <input
+              key={ready ? "ready" : "loading"}
+              name="title"
+              defaultValue={draft.title}
+              required
+              disabled={!ready || !editable}
+              aria-invalid={titleLength > 100}
+              onChange={(event) =>
+                editDraft((current) => ({
+                  ...current,
+                  title: event.target.value,
+                }))
+              }
+              onCompositionStart={handleCompositionStart}
+              onCompositionEnd={handleCompositionEnd}
+            />
+          </label>
 
-        <label className={styles.field}>
-          <span>
-            본문 <small>{bodyLength}/2,000</small>
-          </span>
-          <textarea
-            key={ready ? "ready" : "loading"}
-            name="body"
-            defaultValue={draft.body}
-            rows={12}
-            required
-            disabled={!ready}
-            aria-invalid={bodyLength > 2_000}
-            onChange={(event) =>
-              editDraft((current) => ({ ...current, body: event.target.value }))
-            }
-            onCompositionStart={handleCompositionStart}
-            onCompositionEnd={handleCompositionEnd}
-          />
-        </label>
+          <label className={styles.field}>
+            <span>
+              본문 <small>{bodyLength}/2,000</small>
+            </span>
+            <textarea
+              key={ready ? "ready" : "loading"}
+              name="body"
+              defaultValue={draft.body}
+              rows={12}
+              required
+              disabled={!ready || !editable}
+              aria-invalid={bodyLength > 2_000}
+              onChange={(event) =>
+                editDraft((current) => ({
+                  ...current,
+                  body: event.target.value,
+                }))
+              }
+              onCompositionStart={handleCompositionStart}
+              onCompositionEnd={handleCompositionEnd}
+            />
+          </label>
 
-        <div className={styles.split}>
-          <fieldset disabled={!ready}>
-            <legend>종류</legend>
-            <label>
-              <input
-                type="radio"
-                name="kind"
-                value="update"
-                checked={draft.kind === "update"}
-                onChange={() =>
-                  editDraft((current) => ({ ...current, kind: "update" }))
-                }
-              />
-              업데이트
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="kind"
-                value="work"
-                checked={draft.kind === "work"}
-                onChange={() =>
-                  editDraft((current) => ({ ...current, kind: "work" }))
-                }
-              />
-              작업
-            </label>
-          </fieldset>
-
-          <fieldset disabled={!ready}>
-            <legend>주제 · 최대 4개</legend>
-            {draftTopics.map((topic) => (
-              <label key={topic}>
+          <div className={styles.split}>
+            <fieldset disabled={!ready || !editable}>
+              <legend>종류</legend>
+              <label>
                 <input
-                  type="checkbox"
-                  name="topic"
-                  value={topic}
-                  checked={draft.topics.includes(topic)}
-                  disabled={
-                    !draft.topics.includes(topic) && draft.topics.length >= 4
-                  }
-                  onChange={(event) =>
-                    editDraft((current) => ({
-                      ...current,
-                      topics: event.target.checked
-                        ? [...current.topics, topic]
-                        : current.topics.filter((value) => value !== topic),
-                    }))
+                  type="radio"
+                  name="kind"
+                  value="update"
+                  checked={draft.kind === "update"}
+                  onChange={() =>
+                    editDraft((current) => ({ ...current, kind: "update" }))
                   }
                 />
-                {topicLabels[topic]}
+                업데이트
               </label>
-            ))}
-          </fieldset>
-        </div>
+              <label>
+                <input
+                  type="radio"
+                  name="kind"
+                  value="work"
+                  checked={draft.kind === "work"}
+                  onChange={() =>
+                    editDraft((current) => ({ ...current, kind: "work" }))
+                  }
+                />
+                작업
+              </label>
+            </fieldset>
 
-        <div className={styles.saveBar}>
-          <p
-            className={conflict ? styles.conflictStatus : styles.saveStatus}
-            role="status"
-            aria-live="polite"
-          >
-            {status}
-          </p>
+            <fieldset disabled={!ready || !editable}>
+              <legend>주제 · 최대 4개</legend>
+              {draftTopics.map((topic) => (
+                <label key={topic}>
+                  <input
+                    type="checkbox"
+                    name="topic"
+                    value={topic}
+                    checked={draft.topics.includes(topic)}
+                    disabled={
+                      !draft.topics.includes(topic) && draft.topics.length >= 4
+                    }
+                    onChange={(event) =>
+                      editDraft((current) => ({
+                        ...current,
+                        topics: event.target.checked
+                          ? [...current.topics, topic]
+                          : current.topics.filter((value) => value !== topic),
+                      }))
+                    }
+                  />
+                  {topicLabels[topic]}
+                </label>
+              ))}
+            </fieldset>
+          </div>
+
+          <div className={styles.saveBar}>
+            <p
+              className={conflict ? styles.conflictStatus : styles.saveStatus}
+              role="status"
+              aria-live="polite"
+            >
+              {status}
+            </p>
+            <button
+              type="submit"
+              disabled={
+                !ready || !editable || !dirty || !valid || pending || conflict
+              }
+            >
+              {pending ? "저장 중…" : "지금 저장"}
+            </button>
+          </div>
+        </section>
+        <ImageUploader
+          postId={draft.postId}
+          disabled={
+            !ready || !editable || dirty || pending || composing || conflict
+          }
+          onPendingChange={updatePendingUploadCount}
+        />
+        <DeliveryControls
+          postId={draft.postId}
+          disabled={
+            !ready || !editable || dirty || pending || composing || conflict
+          }
+        />
+      </form>
+
+      <dialog
+        ref={navigationDialogRef}
+        className={styles.navigationDialog}
+        onCancel={() => setMoving(false)}
+      >
+        <h2>저장하지 못해 이동을 멈췄어요</h2>
+        <p>{navigationReason}</p>
+        {pendingUploadCount > 0 ? (
+          <p>현재 화면에서 남은 원본을 접수한 뒤 다시 시도해 주세요.</p>
+        ) : null}
+        <div>
           <button
-            type="submit"
-            disabled={!ready || !dirty || !valid || pending || conflict}
+            type="button"
+            onClick={() => {
+              navigationDialogRef.current?.close();
+              void requestNavigation(navigationTargetRef.current);
+            }}
           >
-            {pending ? "저장 중…" : "지금 저장"}
+            다시 저장
+          </button>
+          <button
+            type="button"
+            onClick={() => navigationDialogRef.current?.close()}
+          >
+            현재 화면 유지
+          </button>
+          <button type="button" onClick={() => void copyCurrentChanges()}>
+            변경 내용 복사
           </button>
         </div>
-      </section>
-      <ImageUploader
-        postId={draft.postId}
-        disabled={!ready || dirty || pending || composing || conflict}
-      />
-      <DeliveryControls
-        postId={draft.postId}
-        disabled={!ready || dirty || pending || composing || conflict}
-      />
-    </form>
+      </dialog>
+    </>
   );
 }

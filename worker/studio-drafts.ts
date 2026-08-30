@@ -1,6 +1,7 @@
 import {
   draftKinds,
   type DraftKind,
+  type PostStatus,
 } from "../db/schema";
 import type { PhaseAEnv, StudioD1 } from "./phase-a-env";
 import {
@@ -22,12 +23,32 @@ type Draft = {
 
 type DraftRow = {
   post_id: string;
+  post_status: PostStatus;
   version_id: string;
   revision: number;
   title: string;
   body_markdown: string;
   kind: DraftKind;
   updated_at: string;
+};
+
+const draftFilters = ["all", "working", "attention"] as const;
+type DraftFilter = (typeof draftFilters)[number];
+
+type DraftListRow = {
+  post_id: string;
+  post_status: PostStatus;
+  draft_version_id: string | null;
+  title: string;
+  revision: number | null;
+  saved_at: string;
+  asset_count: number;
+  pending_asset_count: number;
+  failed_asset_count: number;
+  failed_job_status: string | null;
+  failed_job_error: string | null;
+  failed_job_at: string | null;
+  failed_asset_at: string | null;
 };
 
 function json(value: unknown, status = 200) {
@@ -163,23 +184,29 @@ async function readDraft(request: Request, database: StudioD1) {
 
   const row = requestedPostId
     ? await database.prepare(`
-        SELECT post.id AS post_id, version.id AS version_id, version.revision,
-          version.title, version.body_markdown, version.kind, version.updated_at
+        SELECT post.id AS post_id, post.status AS post_status,
+          version.id AS version_id, version.revision, version.title,
+          version.body_markdown, version.kind, version.updated_at
         FROM studio_posts AS post
         JOIN studio_post_versions AS version ON version.id = post.draft_version_id
-        WHERE post.id = ? AND post.status IN ('draft', 'published')
+        WHERE post.id = ? AND post.status != 'purged'
           AND version.state = 'draft'
       `).bind(requestedPostId).first<DraftRow>()
     : await database.prepare(`
-        SELECT post.id AS post_id, version.id AS version_id, version.revision,
-          version.title, version.body_markdown, version.kind, version.updated_at
+        SELECT post.id AS post_id, post.status AS post_status,
+          version.id AS version_id, version.revision, version.title,
+          version.body_markdown, version.kind, version.updated_at
         FROM studio_posts AS post
         JOIN studio_post_versions AS version ON version.id = post.draft_version_id
         WHERE post.status IN ('draft', 'published') AND version.state = 'draft'
         ORDER BY post.updated_at DESC, post.id ASC
         LIMIT 1
       `).first<DraftRow>();
-  if (!row) return new Response(null, { status: 204 });
+  if (!row) {
+    return requestedPostId
+      ? json({ error: "draft_not_found" }, 404)
+      : new Response(null, { status: 204 });
+  }
 
   const topicRows = await database.prepare(`
     SELECT taxonomy.stable_key
@@ -198,6 +225,114 @@ async function readDraft(request: Request, database: StudioD1) {
     kind: row.kind,
     topics: (topicRows.results ?? []).map(({ stable_key }) => stable_key),
     savedAt: row.updated_at,
+    postStatus: row.post_status,
+    editable: row.post_status === "draft" || row.post_status === "published",
+  });
+}
+
+function attentionReason(row: DraftListRow) {
+  if (row.post_status === "withheld") return "post_withheld";
+  if (row.failed_job_status === "outcome_unknown") {
+    return "delivery_outcome_unknown";
+  }
+  if (row.failed_job_status === "queue_failed") return "delivery_queue_failed";
+  if (row.failed_job_status === "failed") {
+    return row.failed_job_error || "delivery_failed";
+  }
+  if (row.failed_asset_count > 0) return "asset_failed";
+  return null;
+}
+
+async function listDrafts(database: StudioD1, filter: DraftFilter) {
+  const rows = await database.prepare(`
+    SELECT post.id AS post_id, post.status AS post_status,
+      draft.id AS draft_version_id,
+      coalesce(draft.title, current.title, '제목 없음') AS title,
+      draft.revision,
+      coalesce(draft.updated_at, current.updated_at, post.updated_at) AS saved_at,
+      (SELECT count(*) FROM studio_assets AS asset
+        WHERE asset.post_id = post.id AND asset.status != 'orphan') AS asset_count,
+      (SELECT count(*) FROM studio_assets AS asset
+        WHERE asset.post_id = post.id
+          AND asset.status IN ('uploading', 'processing')) AS pending_asset_count,
+      (SELECT count(*) FROM studio_assets AS asset
+        WHERE asset.post_id = post.id AND asset.status = 'failed') AS failed_asset_count,
+      (SELECT job.status FROM delivery_jobs AS job
+        WHERE job.post_id = post.id
+          AND job.status IN ('queue_failed', 'failed', 'outcome_unknown')
+        ORDER BY job.updated_at DESC, job.id DESC LIMIT 1) AS failed_job_status,
+      (SELECT job.error_code FROM delivery_jobs AS job
+        WHERE job.post_id = post.id
+          AND job.status IN ('queue_failed', 'failed', 'outcome_unknown')
+        ORDER BY job.updated_at DESC, job.id DESC LIMIT 1) AS failed_job_error,
+      (SELECT job.updated_at FROM delivery_jobs AS job
+        WHERE job.post_id = post.id
+          AND job.status IN ('queue_failed', 'failed', 'outcome_unknown')
+        ORDER BY job.updated_at DESC, job.id DESC LIMIT 1) AS failed_job_at,
+      (SELECT asset.updated_at FROM studio_assets AS asset
+        WHERE asset.post_id = post.id AND asset.status = 'failed'
+        ORDER BY asset.updated_at DESC, asset.id DESC LIMIT 1) AS failed_asset_at
+    FROM studio_posts AS post
+    LEFT JOIN studio_post_versions AS draft
+      ON draft.id = post.draft_version_id AND draft.state = 'draft'
+    LEFT JOIN studio_post_versions AS current
+      ON current.id = post.current_version_id
+    WHERE post.status != 'purged'
+      AND (draft.id IS NOT NULL OR current.id IS NOT NULL)
+    ORDER BY
+      CASE WHEN post.status = 'withheld'
+        OR EXISTS (
+          SELECT 1 FROM delivery_jobs AS job
+          WHERE job.post_id = post.id
+            AND job.status IN ('queue_failed', 'failed', 'outcome_unknown')
+        )
+        OR EXISTS (
+          SELECT 1 FROM studio_assets AS asset
+          WHERE asset.post_id = post.id AND asset.status = 'failed'
+        ) THEN 0 ELSE 1 END,
+      saved_at DESC, post.id ASC
+  `).all<DraftListRow>();
+
+  const all = (rows.results ?? []).map((row) => {
+    const reason = attentionReason(row);
+    const working = row.draft_version_id !== null &&
+      row.post_status !== "archived" &&
+      row.post_status !== "purging" &&
+      row.post_status !== "purged";
+    return {
+      postId: row.post_id,
+      title: row.title,
+      postStatus: row.post_status,
+      revision: row.revision,
+      savedAt: row.saved_at,
+      hasDraft: row.draft_version_id !== null,
+      editable: row.draft_version_id !== null &&
+        (row.post_status === "draft" || row.post_status === "published"),
+      working,
+      needsAttention: reason !== null,
+      attentionReason: reason,
+      attentionAt: row.post_status === "withheld"
+        ? row.saved_at
+        : row.failed_job_at ?? row.failed_asset_at,
+      assetCount: row.asset_count,
+      pendingAssetCount: row.pending_asset_count,
+      failedAssetCount: row.failed_asset_count,
+    };
+  });
+  const items = filter === "working"
+    ? all.filter(({ working }) => working)
+    : filter === "attention"
+    ? all.filter(({ needsAttention }) => needsAttention)
+    : all;
+
+  return json({
+    filter,
+    counts: {
+      all: all.length,
+      working: all.filter(({ working }) => working).length,
+      attention: all.filter(({ needsAttention }) => needsAttention).length,
+    },
+    items,
   });
 }
 
@@ -262,7 +397,18 @@ export async function handleStudioDraftRequest(
   if (!database) return json({ error: "draft_storage_unavailable" }, 503);
 
   try {
-    if (request.method === "GET") return readDraft(request, database);
+    if (request.method === "GET") {
+      const url = new URL(request.url);
+      const filter = url.searchParams.get("filter");
+      if (filter !== null) {
+        if (url.searchParams.has("postId") ||
+          !draftFilters.includes(filter as DraftFilter)) {
+          return json({ error: "invalid_draft_filter" }, 400);
+        }
+        return listDrafts(database, filter as DraftFilter);
+      }
+      return readDraft(request, database);
+    }
     if (request.method === "POST") return saveDraft(request, database);
     return methodNotAllowed();
   } catch {
