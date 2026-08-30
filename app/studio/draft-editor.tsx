@@ -16,6 +16,7 @@ import {
   type DraftTopic,
 } from "../../db/schema";
 import { ImageUploader } from "./image-uploader";
+import { DeliveryControls } from "./delivery-controls";
 import styles from "./studio.module.css";
 
 const topicLabels: Record<DraftTopic, string> = {
@@ -471,6 +472,10 @@ export function DraftEditor() {
         </div>
       </section>
       <ImageUploader
+        postId={draft.postId}
+        disabled={!ready || dirty || pending || composing || conflict}
+      />
+      <DeliveryControls
         postId={draft.postId}
         disabled={!ready || dirty || pending || composing || conflict}
       />

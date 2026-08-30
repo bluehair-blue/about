@@ -26,8 +26,8 @@ export default function StudioPage() {
         <DraftEditor />
         <footer className={styles.actions}>
           <p>
-            Access·same-origin 경계 안에서 draft revision과 Discord 역할 패널을
-            각각 검증합니다.
+            Access·same-origin 경계 안에서 draft, R2 파생본, Queue delivery와
+            Discord 역할 패널을 검증합니다.
           </p>
           <RolePanelButton />
         </footer>

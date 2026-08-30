@@ -243,6 +243,70 @@
   color: #cdd8ff;
 }
 
+.deliveryFacts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.deliveryFacts > div {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.9rem;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 0.8rem;
+  background: rgb(5 7 13 / 48%);
+}
+
+.deliveryFacts dt {
+  color: #8f96aa;
+  font-size: 0.75rem;
+}
+
+.deliveryFacts dd {
+  margin: 0;
+  color: #dfe4f4;
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.deliveryButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.deliveryButtons button {
+  min-height: 2.75rem;
+  padding: 0 1rem;
+  border: 0;
+  border-radius: 999px;
+  color: #090b12;
+  background: #8baaff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 750;
+}
+
+.deliveryButtons button:disabled {
+  color: #727788;
+  background: #242733;
+  cursor: not-allowed;
+}
+
+.deliveryButtons .dangerButton {
+  color: #ffe5de;
+  background: #7b2f2f;
+}
+
+.deliveryWarning {
+  margin: 1rem 0 0;
+  color: #ffbd8b;
+  line-height: 1.6;
+}
+
 .assetItem > p[role="alert"] {
   grid-column: 1 / -1;
   color: #ffbd8b;
@@ -349,6 +413,10 @@
   }
 
   .assetItem {
+    grid-template-columns: 1fr;
+  }
+
+  .deliveryFacts {
     grid-template-columns: 1fr;
   }
 

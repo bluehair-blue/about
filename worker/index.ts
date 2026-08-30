@@ -8,10 +8,13 @@ import {
 import { phaseAEnvironmentErrors, type PhaseAEnv } from "./phase-a-env";
 import { handleStudioAssetRequest } from "./studio-assets";
 import { handleStudioDraftRequest } from "./studio-drafts";
+import { handleStudioPublishRequest } from "./studio-publishing";
+import { handleStudioQueue } from "./studio-queue";
 
 const INTERACTIONS_PATH = "/api/discord/interactions";
 const DRAFTS_PATH = "/studio/api/drafts";
 const ASSETS_PATH = "/studio/api/assets";
+const PUBLISH_PATH = "/studio/api/publish";
 const STUDIO_WRITE_HEADER = "x-studio-request";
 type VinextContext = Parameters<typeof handler.fetch>[2];
 
@@ -119,12 +122,19 @@ const worker = {
         return privateResponse(await handleStudioAssetRequest(request, env));
       }
 
+      if (url.pathname === PUBLISH_PATH) {
+        return privateResponse(await handleStudioPublishRequest(request, env));
+      }
+
       return privateResponse(
         await handler.fetch(request, env, context),
       );
     }
 
     return handler.fetch(request, env, context);
+  },
+  async queue(batch: Parameters<typeof handleStudioQueue>[0], env: PhaseAEnv = {}) {
+    await handleStudioQueue(batch, env);
   },
 };
 

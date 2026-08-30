@@ -3,6 +3,7 @@ import type {
   StudioD1,
   StudioImageInfo,
   StudioImages,
+  StudioQueueProducer,
   StudioR2,
 } from "./phase-a-env";
 import type { AssetStatus } from "../db/schema";
@@ -10,6 +11,11 @@ import type { AssetStatus } from "../db/schema";
 const ASSETS_PATH = "/studio/api/assets";
 const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 const MAX_MULTIPART_BYTES = MAX_SOURCE_BYTES + 64 * 1024;
+const MAX_PORTFOLIO_BYTES = 12 * 1024 * 1024;
+export const MAX_DISCORD_ASSET_BYTES = 8 * 1024 * 1024;
+export const MAX_DISCORD_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const PORTFOLIO_WIDTH = 2_560;
+const DISCORD_WIDTH = 2_048;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type SourceMime = "image/jpeg" | "image/png" | "image/webp";
@@ -28,9 +34,35 @@ type AssetRow = {
   height: number;
   source_mime: SourceMime;
   source_bytes: number;
+  public_bytes: number | null;
+  discord_bytes: number | null;
   ordinal: number;
   alt: string;
   created_at: string;
+};
+
+type ProcessingAssetRow = {
+  id: string;
+  post_id: string;
+  status: AssetStatus;
+  title_snapshot: string;
+  width: number;
+  height: number;
+  source_sha256: string;
+  private_source_key: string;
+  discord_r2_key: string;
+  public_r2_key: string;
+  created_at: string;
+  public_bytes: number | null;
+  public_sha256: string | null;
+  discord_bytes: number | null;
+  discord_sha256: string | null;
+};
+
+type RetryAssetRow = {
+  post_id: string;
+  status: AssetStatus;
+  job_id: string;
 };
 
 type DeletingAssetRow = {
@@ -41,6 +73,7 @@ type DeletingAssetRow = {
   private_source_key: string;
   discord_r2_key: string;
   public_r2_key: string;
+  retained: number;
 };
 
 function json(value: unknown, status = 200) {
@@ -174,7 +207,7 @@ function objectPrefix(postId: string, title: string, date: Date) {
   return `posts/${iso.slice(0, 4)}/${iso.slice(5, 7)}/${iso.slice(8, 10)}/${compact}--${postId}--${titleSnapshot(title)}`;
 }
 
-async function hashSource(bytes: ArrayBuffer) {
+async function hashBytes(bytes: ArrayBuffer) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const hex = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0")
@@ -192,7 +225,8 @@ async function draftContext(database: StudioD1, postId: string) {
       ) AS asset_count
     FROM studio_posts AS post
     JOIN studio_post_versions AS version ON version.id = post.draft_version_id
-    WHERE post.id = ? AND post.status = 'draft' AND version.state = 'draft'
+    WHERE post.id = ? AND post.status IN ('draft', 'published')
+      AND version.state = 'draft'
   `).bind(postId).first<DraftContext>();
 }
 
@@ -206,8 +240,8 @@ async function listAssets(request: Request, database: StudioD1) {
 
   const rows = await database.prepare(`
     SELECT asset.id, asset.status, asset.width, asset.height,
-      asset.source_mime, asset.source_bytes, selected.ordinal, selected.alt,
-      asset.created_at
+      asset.source_mime, asset.source_bytes, asset.public_bytes,
+      asset.discord_bytes, selected.ordinal, selected.alt, asset.created_at
     FROM studio_post_version_assets AS selected
     JOIN studio_assets AS asset ON asset.id = selected.asset_id
     WHERE selected.version_id = ? AND asset.post_id = ?
@@ -222,6 +256,8 @@ async function listAssets(request: Request, database: StudioD1) {
       height: asset.height,
       sourceMime: asset.source_mime,
       sourceBytes: asset.source_bytes,
+      publicBytes: asset.public_bytes,
+      discordBytes: asset.discord_bytes,
       ordinal: asset.ordinal,
       alt: asset.alt,
       createdAt: asset.created_at,
@@ -255,6 +291,7 @@ async function uploadSource(
   database: StudioD1,
   media: StudioR2,
   images: StudioImages,
+  queue: StudioQueueProducer,
 ) {
   const declaredLength = Number(request.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_MULTIPART_BYTES) {
@@ -320,7 +357,7 @@ async function uploadSource(
   const privateSourceKey = `${prefix}/private/${assetId}/source.${extension}`;
   const discordKey = `${prefix}/private/${assetId}/discord-v1.webp`;
   const publicKey = `${prefix}/public/${assetId}/portfolio-v1.webp`;
-  const sourceHash = await hashSource(source);
+  const sourceHash = await hashBytes(source);
 
   await database.batch([
     database.prepare(`
@@ -373,18 +410,50 @@ async function uploadSource(
     return json({ error: "asset_storage_failed", assetId }, 503);
   }
 
-  const updated = await database.prepare(`
-    UPDATE studio_assets
-    SET status = 'processing', updated_at = ?
-    WHERE id = ? AND post_id = ? AND status = 'uploading'
-  `).bind(new Date().toISOString(), assetId, postId).run();
-  if (updated.meta?.changes !== 1) {
+  const jobId = crypto.randomUUID();
+  const queuedAt = new Date().toISOString();
+  let queued;
+  try {
+    queued = await database.batch([
+      database.prepare(`
+        UPDATE studio_assets
+        SET status = 'processing', processing_error = NULL, updated_at = ?
+        WHERE id = ? AND post_id = ? AND status = 'uploading'
+      `).bind(queuedAt, assetId, postId),
+      database.prepare(`
+        INSERT INTO delivery_jobs (
+          id, dedupe_key, post_id, version_id, asset_id, target, action,
+          status, attempts, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'asset', 'process', 'queued', 0, ?, ?)
+      `).bind(
+        jobId,
+        `asset:${assetId}:process:v1`,
+        postId,
+        context.version_id,
+        assetId,
+        queuedAt,
+        queuedAt,
+      ),
+    ]);
+  } catch {
+    await markFailed(database, assetId);
     return json({ error: "asset_manifest_unavailable", assetId }, 503);
+  }
+  if (queued[0]?.meta?.changes !== 1) {
+    return json({ error: "asset_manifest_unavailable", assetId }, 503);
+  }
+
+  try {
+    await queue.send({ type: "asset_process", jobId, assetId });
+  } catch {
+    await markAssetQueueFailure(database, jobId, assetId, "queue_send_failed", true);
+    return json({ error: "asset_queue_unavailable", assetId, jobId }, 503);
   }
 
   return json(
     {
       assetId,
+      jobId,
       status: "processing",
       width: info.width,
       height: info.height,
@@ -396,6 +465,316 @@ async function uploadSource(
     },
     201,
   );
+}
+
+function parseEmptyJson(request: Request) {
+  return request.json().then((body) =>
+    typeof body === "object" &&
+      body !== null &&
+      !Array.isArray(body) &&
+      Object.keys(body as object).length === 0
+  ).catch(() => false);
+}
+
+function derivativeDimensions(width: number, height: number, limit: number) {
+  const scale = Math.min(1, limit / Math.max(width, height));
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+async function transformDerivative(
+  images: StudioImages,
+  source: ArrayBuffer,
+  limit: number,
+  quality: number,
+) {
+  const transformed = await images
+    .input(new Blob([source]).stream())
+    .transform({ width: limit, height: limit, fit: "scale-down" })
+    .output({ format: "image/webp", quality });
+  const response = transformed.response();
+  if (!response.ok) throw new Error("image_transform_failed");
+  return response.arrayBuffer();
+}
+
+async function storeDerivative(
+  media: StudioR2,
+  key: string,
+  bytes: ArrayBuffer,
+  metadata: Record<string, string>,
+) {
+  const hash = await hashBytes(bytes);
+  const stored = await media.put(key, bytes, {
+    httpMetadata: { contentType: "image/webp" },
+    customMetadata: metadata,
+    sha256: hash.digest,
+  });
+  if (!stored || stored.key !== key || stored.size !== bytes.byteLength) {
+    throw new Error("derivative_storage_failed");
+  }
+  return hash.hex;
+}
+
+function assetProcessingCode(error: unknown) {
+  const code = error instanceof Error ? error.message : "asset_processing_failed";
+  return [
+    "source_missing",
+    "source_hash_mismatch",
+    "image_transform_failed",
+    "portfolio_derivative_too_large",
+    "discord_derivative_too_large",
+    "derivative_storage_failed",
+    "asset_manifest_unavailable",
+  ].includes(code)
+    ? code
+    : "asset_processing_failed";
+}
+
+async function markAssetQueueFailure(
+  database: StudioD1,
+  jobId: string,
+  assetId: string,
+  code: string,
+  terminal: boolean,
+) {
+  const updatedAt = new Date().toISOString();
+  try {
+    await database.batch([
+      database.prepare(`
+        UPDATE delivery_jobs
+        SET status = ?, error_code = ?, last_error = ?, updated_at = ?,
+          completed_at = CASE WHEN ? = 1 THEN ? ELSE NULL END
+        WHERE id = ? AND asset_id = ? AND target = 'asset'
+          AND status != 'succeeded'
+      `).bind(
+        terminal ? "failed" : "retrying",
+        code,
+        code,
+        updatedAt,
+        terminal ? 1 : 0,
+        updatedAt,
+        jobId,
+        assetId,
+      ),
+      database.prepare(`
+        UPDATE studio_assets
+        SET status = ?, processing_error = ?, updated_at = ?
+        WHERE id = ? AND status NOT IN ('ready', 'deleting', 'orphan')
+      `).bind(
+        terminal ? "failed" : "processing",
+        code,
+        updatedAt,
+        assetId,
+      ),
+    ]);
+  } catch {
+    // Queue retry remains the recovery path if D1 is temporarily unavailable.
+  }
+}
+
+export async function recordStudioAssetQueueFailure(
+  jobId: string,
+  assetId: string,
+  env: PhaseAEnv,
+  error: unknown,
+  terminal: boolean,
+) {
+  if (!env.STUDIO_DB) return;
+  await markAssetQueueFailure(
+    env.STUDIO_DB,
+    jobId,
+    assetId,
+    assetProcessingCode(error),
+    terminal,
+  );
+}
+
+export async function processStudioAssetJob(
+  jobId: string,
+  assetId: string,
+  env: PhaseAEnv,
+) {
+  if (!uuidPattern.test(jobId) || !uuidPattern.test(assetId)) return;
+  const database = env.STUDIO_DB;
+  const media = env.STUDIO_MEDIA;
+  const images = env.IMAGES;
+  if (!database || !media || !images) throw new Error("asset_processing_failed");
+
+  const claimed = await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'processing', attempts = attempts + 1,
+      error_code = NULL, last_error = NULL, updated_at = ?
+    WHERE id = ? AND asset_id = ? AND target = 'asset' AND action = 'process'
+      AND status IN ('queued', 'retrying', 'processing')
+  `).bind(new Date().toISOString(), jobId, assetId).run();
+  if (claimed.meta?.changes !== 1) return;
+
+  const asset = await database.prepare(`
+    SELECT id, post_id, status, title_snapshot, width, height, source_sha256,
+      private_source_key, discord_r2_key, public_r2_key, created_at,
+      public_bytes, public_sha256, discord_bytes, discord_sha256
+    FROM studio_assets
+    WHERE id = ?
+  `).bind(assetId).first<ProcessingAssetRow>();
+  if (!asset) return;
+
+  if (
+    asset.status === "ready" &&
+    asset.public_bytes &&
+    asset.public_sha256 &&
+    asset.discord_bytes &&
+    asset.discord_sha256
+  ) {
+    await database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'succeeded', error_code = NULL, last_error = NULL,
+        updated_at = ?, completed_at = ?
+      WHERE id = ? AND status = 'processing'
+    `).bind(new Date().toISOString(), new Date().toISOString(), jobId).run();
+    return;
+  }
+  if (asset.status !== "processing") return;
+
+  const sourceObject = await media.get(asset.private_source_key);
+  if (!sourceObject) throw new Error("source_missing");
+  const source = await sourceObject.arrayBuffer();
+  const sourceHash = await hashBytes(source);
+  if (sourceHash.hex !== asset.source_sha256) {
+    throw new Error("source_hash_mismatch");
+  }
+
+  const [portfolio, discord] = await Promise.all([
+    transformDerivative(images, source, PORTFOLIO_WIDTH, 85),
+    transformDerivative(images, source, DISCORD_WIDTH, 80),
+  ]);
+  if (portfolio.byteLength > MAX_PORTFOLIO_BYTES) {
+    throw new Error("portfolio_derivative_too_large");
+  }
+  if (discord.byteLength > MAX_DISCORD_ASSET_BYTES) {
+    throw new Error("discord_derivative_too_large");
+  }
+
+  const metadata = {
+    post_id: asset.post_id,
+    asset_id: asset.id,
+    created_at: asset.created_at,
+    title_snapshot: asset.title_snapshot,
+    source_sha256: asset.source_sha256,
+  };
+  const publicHash = await storeDerivative(
+    media,
+    asset.public_r2_key,
+    portfolio,
+    metadata,
+  );
+  const discordHash = await storeDerivative(
+    media,
+    asset.discord_r2_key,
+    discord,
+    metadata,
+  );
+  const publicDimensions = derivativeDimensions(
+    asset.width,
+    asset.height,
+    PORTFOLIO_WIDTH,
+  );
+  const discordDimensions = derivativeDimensions(
+    asset.width,
+    asset.height,
+    DISCORD_WIDTH,
+  );
+  const completedAt = new Date().toISOString();
+  const ready = await database.prepare(`
+    UPDATE studio_assets
+    SET status = 'ready', public_bytes = ?, public_sha256 = ?,
+      public_width = ?, public_height = ?, discord_bytes = ?,
+      discord_sha256 = ?, discord_width = ?, discord_height = ?,
+      processing_error = NULL, updated_at = ?
+    WHERE id = ? AND status = 'processing'
+  `).bind(
+    portfolio.byteLength,
+    publicHash,
+    publicDimensions.width,
+    publicDimensions.height,
+    discord.byteLength,
+    discordHash,
+    discordDimensions.width,
+    discordDimensions.height,
+    completedAt,
+    assetId,
+  ).run();
+  if (ready.meta?.changes !== 1) {
+    await media.delete([asset.public_r2_key, asset.discord_r2_key]);
+    throw new Error("asset_manifest_unavailable");
+  }
+
+  await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'succeeded', error_code = NULL, last_error = NULL,
+      updated_at = ?, completed_at = ?
+    WHERE id = ? AND asset_id = ? AND status = 'processing'
+  `).bind(completedAt, completedAt, jobId, assetId).run();
+}
+
+async function retryAsset(
+  request: Request,
+  assetId: string,
+  database: StudioD1,
+  queue: StudioQueueProducer,
+) {
+  if (!uuidPattern.test(assetId)) return json({ error: "invalid_asset_id" }, 400);
+  if (!(await parseEmptyJson(request))) return json({ error: "invalid_json_object" }, 400);
+
+  const asset = await database.prepare(`
+    SELECT asset.post_id, asset.status, job.id AS job_id
+    FROM studio_assets AS asset
+    JOIN studio_posts AS post ON post.id = asset.post_id
+    JOIN delivery_jobs AS job
+      ON job.asset_id = asset.id AND job.target = 'asset' AND job.action = 'process'
+    WHERE asset.id = ? AND post.status IN ('draft', 'published')
+    ORDER BY job.created_at DESC, job.id DESC
+    LIMIT 1
+  `).bind(assetId).first<RetryAssetRow>();
+  if (!asset) return json({ error: "asset_not_found" }, 404);
+  if (asset.status === "ready") return json({ error: "asset_already_ready" }, 409);
+  if (!assetStatusesCanRetry(asset.status)) {
+    return json({ error: "asset_retry_conflict" }, 409);
+  }
+
+  const queuedAt = new Date().toISOString();
+  await database.batch([
+    database.prepare(`
+      UPDATE studio_assets
+      SET status = 'processing', processing_error = NULL, updated_at = ?
+      WHERE id = ? AND status IN ('failed', 'processing')
+    `).bind(queuedAt, assetId),
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'queued', error_code = NULL, last_error = NULL,
+        completed_at = NULL, updated_at = ?
+      WHERE id = ? AND asset_id = ? AND status != 'succeeded'
+    `).bind(queuedAt, asset.job_id, assetId),
+  ]);
+
+  try {
+    await queue.send({ type: "asset_process", jobId: asset.job_id, assetId });
+  } catch {
+    await markAssetQueueFailure(
+      database,
+      asset.job_id,
+      assetId,
+      "queue_send_failed",
+      true,
+    );
+    return json({ error: "asset_queue_unavailable" }, 503);
+  }
+  return json({ assetId, jobId: asset.job_id, status: "processing" }, 202);
+}
+
+function assetStatusesCanRetry(status: AssetStatus) {
+  return status === "failed" || status === "processing";
 }
 
 async function deleteAsset(
@@ -421,20 +800,40 @@ async function deleteAsset(
 
   const asset = await database.prepare(`
     SELECT asset.post_id, selected.version_id, selected.ordinal, asset.status,
-      asset.private_source_key, asset.discord_r2_key, asset.public_r2_key
+      asset.private_source_key, asset.discord_r2_key, asset.public_r2_key,
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM studio_post_version_assets AS other
+        WHERE other.asset_id = asset.id AND other.version_id != version.id
+      ) THEN 1 ELSE 0 END AS retained
     FROM studio_assets AS asset
     JOIN studio_posts AS post ON post.id = asset.post_id
     JOIN studio_post_versions AS version ON version.id = post.draft_version_id
     JOIN studio_post_version_assets AS selected
       ON selected.asset_id = asset.id AND selected.version_id = version.id
-    WHERE asset.id = ? AND post.status = 'draft' AND version.state = 'draft'
-      AND NOT EXISTS (
-        SELECT 1
-        FROM studio_post_version_assets AS other
-        WHERE other.asset_id = asset.id AND other.version_id != version.id
-      )
+    WHERE asset.id = ? AND post.status IN ('draft', 'published')
+      AND version.state = 'draft'
   `).bind(assetId).first<DeletingAssetRow>();
   if (!asset) return json({ error: "asset_not_found" }, 404);
+  if (asset.retained === 1) {
+    await database.batch([
+      database.prepare(`
+        DELETE FROM studio_post_version_assets
+        WHERE version_id = ? AND asset_id = ?
+      `).bind(asset.version_id, assetId),
+      database.prepare(`
+        UPDATE studio_post_version_assets
+        SET ordinal = ordinal + 100
+        WHERE version_id = ? AND ordinal > ?
+      `).bind(asset.version_id, asset.ordinal),
+      database.prepare(`
+        UPDATE studio_post_version_assets
+        SET ordinal = ordinal - 101
+        WHERE version_id = ? AND ordinal >= 100
+      `).bind(asset.version_id),
+    ]);
+    return new Response(null, { status: 204 });
+  }
   if (asset.status !== "deleting") {
     const marked = await database.prepare(`
       UPDATE studio_assets
@@ -494,7 +893,8 @@ export async function handleStudioAssetRequest(
   const database = env.STUDIO_DB;
   const media = env.STUDIO_MEDIA;
   const images = env.IMAGES;
-  if (!database || !media || !images) {
+  const queue = env.PUBLISH_QUEUE;
+  if (!database || !media || !images || !queue) {
     return json({ error: "asset_storage_unavailable" }, 503);
   }
 
@@ -503,7 +903,7 @@ export async function handleStudioAssetRequest(
     if (pathname === ASSETS_PATH) {
       if (request.method === "GET") return listAssets(request, database);
       if (request.method === "POST") {
-        return uploadSource(request, database, media, images);
+        return uploadSource(request, database, media, images, queue);
       }
       return new Response("Method not allowed", {
         status: 405,
@@ -515,10 +915,13 @@ export async function handleStudioAssetRequest(
     if (!assetId || assetId.includes("/")) {
       return json({ error: "asset_not_found" }, 404);
     }
+    if (request.method === "POST") {
+      return retryAsset(request, assetId, database, queue);
+    }
     if (request.method !== "DELETE") {
       return new Response("Method not allowed", {
         status: 405,
-        headers: { allow: "DELETE" },
+        headers: { allow: "POST, DELETE" },
       });
     }
     return deleteAsset(request, assetId, database, media);

@@ -238,7 +238,7 @@ async function updateDraft(database: StudioD1, draft: Draft) {
   const pointer = await database.prepare(`
     SELECT draft_version_id
     FROM studio_posts
-    WHERE id = ? AND status = 'draft'
+    WHERE id = ? AND status IN ('draft', 'published')
   `).bind(draft.postId).first<{ draft_version_id: string }>();
   if (!pointer) return json({ error: "draft_not_found" }, 404);
 
@@ -338,14 +338,15 @@ async function readDraft(request: Request, database: StudioD1) {
           version.title, version.body_markdown, version.kind, version.updated_at
         FROM studio_posts AS post
         JOIN studio_post_versions AS version ON version.id = post.draft_version_id
-        WHERE post.id = ? AND post.status = 'draft' AND version.state = 'draft'
+        WHERE post.id = ? AND post.status IN ('draft', 'published')
+          AND version.state = 'draft'
       `).bind(requestedPostId).first<DraftRow>()
     : await database.prepare(`
         SELECT post.id AS post_id, version.id AS version_id, version.revision,
           version.title, version.body_markdown, version.kind, version.updated_at
         FROM studio_posts AS post
         JOIN studio_post_versions AS version ON version.id = post.draft_version_id
-        WHERE post.status = 'draft' AND version.state = 'draft'
+        WHERE post.status IN ('draft', 'published') AND version.state = 'draft'
         ORDER BY post.updated_at DESC, post.id ASC
         LIMIT 1
       `).first<DraftRow>();

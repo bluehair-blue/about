@@ -1,6 +1,6 @@
 # Phase A — Studio Console ↔ Discord vertical slice
 
-> 상태: 진행 중 — Access·Discord BOT TEST·staging draft·role panel·private source ingest 연결 완료, image derivative·Forum·Queue delivery 미구현
+> 상태: 진행 중 — staging vertical slice와 실제 BOT TEST create → update → delete 완료, multi-fixture·promotion audit 남음
 >
 > 목적: 관리자 전용 test 환경에서 Studio 입력 한 건이 Discord Forum에 생성·수정·삭제되는 실제 delivery 계약을 증명한다.
 >
@@ -123,10 +123,10 @@ Markdown은 문단·줄바꿈·굵게·기울임·취소선·목록·인용·inl
 - [x] role add·remove와 정확한 role allowlist 확인
 - [x] staging D1 migration과 draft create → restore → revision update → stale conflict 불변성 확인
 - [x] build된 Worker에서 static source의 MIME·dimension·animation·alt·order를 검증하고 private R2 exact key·SHA·metadata 저장, D1 manifest, 삭제 재정렬·재시도를 확인
-- [ ] 한 fixture의 create → update → attachment/tag 교체 → delete 확인
-- [ ] delete 재시도 404와 Queue retry·DLQ 확인
-- [ ] 실제 staging R2에서 날짜·post ID·제목 prefix 검색과 D1 exact-key 삭제 확인
-- [ ] test resource 밖의 D1 row·R2 object·Queue depth가 변하지 않음
+- [x] 한 fixture의 create → update → attachment/tag 교체 → delete 확인
+- [x] build된 Worker에서 delete 재시도 404와 Queue retry exhaustion·DLQ 기록 확인
+- [x] 실제 staging R2의 날짜·post ID·제목 prefix exact key 3개를 내려받아 D1 byte·SHA-256과 일치 확인
+- [x] production D1 migration 3개가 모두 pending, R2 object 0개, publish Queue producer·consumer 0개이고 production Worker를 배포하지 않았음을 확인
 - [x] `npm run lint`와 `npm test` 통과
 - [x] `dist/server/index.js`, `dist/client`, `dist/.openai/hosting.json` 존재
 - [x] secret과 `.dev.vars`가 build output에 없음
@@ -135,7 +135,7 @@ Markdown은 문단·줄바꿈·굵게·기울임·취소선·목록·인용·inl
 
 - baseline: `4e345013961c1d430a2017f65b83bee6e99bc508` · Node `v25.5.0` · npm `11.8.0`
 - local slice: Phase A environment/binding 존재·형식·중복 preflight, Access JWT, same-origin write, Discord PING·role add/remove 경계, 보호된 Studio editor와 role panel upsert action. editor는 title·body·kind·topic을 1.5초 debounce와 `Ctrl/Cmd+S`로 저장하고 IME 조합 중에는 저장하지 않으며 stale revision에서 로컬 입력을 보존한 채 자동 저장을 중단함
-- local verification: build된 Worker 회귀 test로 누락 preflight, 유효·무효 Access JWT, 유효·무효 Discord signature, 5분 timestamp, exact target allowlist와 role panel create 경계를 확인함. 실제 SQLite에 production과 같은 migration SQL을 적용해 draft create·restore·update·stale conflict 후 본문·topic 불변성과 active draft 고유 제약을 검증함. source ingest는 static PNG 저장, exact R2 key·SHA·custom metadata, 두 asset 순서·삭제 재정렬, R2 삭제 실패 후 멱등 재시도, request size·GIF·APNG·animated WebP·40MP 초과 거부, R2 put 실패의 D1 `failed` manifest 보존을 검증했으며 lint와 전체 test 13개가 통과함
+- local verification: build된 Worker 회귀 test로 누락 preflight, 유효·무효 Access JWT, 유효·무효 Discord signature, 5분 timestamp, exact target allowlist와 role panel create 경계를 확인함. 실제 SQLite에 production과 같은 migration SQL을 적용해 draft create·restore·update·stale conflict 후 본문·topic 불변성과 active draft 고유 제약을 검증함. source ingest는 static PNG 저장, exact R2 key·SHA·custom metadata, 두 asset 순서·삭제 재정렬, R2 삭제 실패 후 멱등 재시도, request size·GIF·APNG·animated WebP·40MP 초과 거부, R2 put 실패의 D1 `failed` manifest 보존을 검증함. Images 파생본, delivery read-after-write, Forum create·update·attachment/tag 교체·delete/404, Discord 429 retry와 outcome-unknown create 무재전송, Queue retry exhaustion·DLQ 기록까지 포함해 lint·TypeScript와 전체 test 16개가 통과함
 - Cloudflare bootstrap: `about-studio-{staging,production}` D1, `about-studio-media-{staging,production}` R2, `about-studio-publish-{staging,production}` Queue와 `about-studio-publish-dlq-{staging,production}` DLQ를 각각 생성함. 생성 직후 D1은 table 0개, Queue는 producer·consumer 0개이며 기존 `about` Worker는 배포하지 않음
 - Cloudflare Access bootstrap: Zero Trust Free 구독, staging self-hosted Access application·AUD와 관리자 email 한 주소 Allow policy를 연결함. Worker에서 Access JWT issuer·audience·email·signature를 검증하며 `/studio` authorized render를 실제 origin에서 확인함
 - Discord bootstrap: `Studio Bot Test` application·Bot을 생성하고 User Install을 끄고 Guild Install만 유지했으며 privileged Gateway Intent를 모두 끔. 최소 권한 Bot을 `한파란 TEST` server의 비공개 `BOT TEST` surface에 설치하고 start·announcements·Forum channel과 test notify role을 staging allowlist에 연결함. Bot token은 `about-staging`의 secret으로만 저장함
@@ -143,13 +143,15 @@ Markdown은 문단·줄바꿈·굵게·기울임·취소선·목록·인용·inl
 - staging D1 draft: `0001_phase_a_drafts.sql`을 `about-studio-staging`에 적용함. Phase B가 이어 쓰는 `studio_posts`, `studio_post_versions`, `studio_taxonomy`, `studio_post_version_topics`와 active draft partial unique index만 만들었고 taxonomy 6개를 seed함. 적용 직후 post·version·topic link는 모두 0개이고 `PRAGMA foreign_key_check` 결과는 비어 있으며 production D1은 table 0개를 유지함
 - staging Worker bootstrap: Phase A 앱을 `about-staging`에 배포함. Cloudflare Workers에서 지원하지 않는 JWKS fetch의 `redirect: "error"`가 Access 검증을 `Forbidden`으로 만들던 원인을 `redirect: "manual"`과 non-2xx 거부로 고쳐 fail closed를 유지했고, `/studio` authorized render를 확인함. D1 draft editor 배포 version은 `6ec74c8e-4bbe-4621-a056-5150ae0f7fcc`
 - staging D1 source manifest: `0002_phase_a_assets.sql`을 `about-studio-staging`에 적용해 최종 이름인 `studio_assets`, `studio_post_version_assets`를 추가함. 적용 직후 asset·version link는 모두 0개이며 production D1에는 `0001`, `0002`가 모두 미적용 상태로 남아 있음
-- staging source ingest: Images `info()`로 실제 decode format·dimension을 검사하고 source를 `posts/YYYY/MM/DD/timestamp--post_id--title/private/asset_id/source.ext`에 한 번 저장하는 UI·API를 배포함. 파생본 변환이나 Queue publish는 시작하지 않아 asset은 `processing`에서 fail closed함. 현재 배포 version은 `37bc0e8e-4bd0-486c-a5fa-237dc8b15ab2`
+- staging image/delivery runtime: `0003_phase_a_delivery.sql`을 staging D1에만 적용하고 Images binding으로 Portfolio·Discord WebP 파생본을 생성해 exact R2 key·byte·SHA-256을 기록함. `about-studio-publish-staging` producer·consumer와 staging DLQ routing, Discord Forum create·update·delete, Studio delivery 상태 polling을 배포함. 현재 staging version은 `48d9ffb6-760e-4746-89bf-76ea605e10dd`이며 production의 `0001`–`0003` migration은 모두 pending 상태임
 - role panel verification: protected Studio action이 `#bot-test-start`에 message `1543216853948698666`을 생성한 뒤 ID를 staging allowlist에 고정함. 재배포 후 같은 action이 새 message를 만들지 않고 기존 message를 PATCH해 `연결됨`을 반환했으며 Discord desktop에서 정확한 본문·`알림 받기`·`알림 끄기` component와 수정 표시를 확인함. HTTP Interaction endpoint의 PING 등록과 live component signature 경계가 동작하는 상태에서 실제 관리자 계정으로 add를 2회 실행해 두 번 모두 `알림을 켰어요.`, remove를 2회 실행해 두 번 모두 `알림을 껐어요.` ephemeral 응답을 3초 이내에 받았고, 최종 member row에 `Bot Test 알림` role이 남지 않음을 확인함. invalid signature는 build된 Worker 회귀 test에서 거부됨
-- external state remaining: 실제 browser의 한국어 IME·debounce·reload restore와 staging R2 source upload·list·delete 확인, Discord·Portfolio image derivative, Forum delivery, Queue consumer·retry·DLQ, production ID 거부 비교와 member row·token·user log 비저장 audit가 미완료
-- commit: Access·Discord·draft bootstrap checkpoint `b6a0e1d`; private source ingest는 이 완료 기록을 포함한 현재 checkpoint
+- actual staging fixture: `prime-city.webp`를 source 103,534 bytes → Portfolio 114,014 bytes → Discord 100,106 bytes로 처리해 `작업+일러스트` thread를 생성함. 이어 `smoke-ribbon.png`를 source 767,479 bytes → Portfolio 17,840 bytes → Discord 14,624 bytes로 처리하고 같은 thread의 제목·본문·attachment·tag를 `업데이트+개발`로 교체한 뒤 삭제함. create·update·delete job은 각각 1회에 성공했고 모두 같은 remote ID를 유지함
+- exact R2 proof: 교체 asset의 source·Portfolio·Discord exact key를 staging bucket에서 직접 내려받았고 D1 매니페스트의 byte와 SHA-256이 세 파일 모두 일치함. published history가 참조하는 두 asset object는 post archive 뒤에도 보존됨
+- external state remaining: 혼합 비율·다중 이미지·보수 한도 근접 fixture, 실제 browser의 한국어 IME·native undo/redo, production ID 거부 비교와 member row·token·user log 비저장 audit가 미완료. 핵심 delivery와 Queue/DLQ 계약은 실제 staging 및 build된 Worker 회귀 test로 확인함
+- commit: Access·Discord·draft bootstrap `b6a0e1d`; private source ingest `46a01e6`; image derivative·Queue·Forum delivery는 이 완료 기록을 포함한 현재 checkpoint
 - staging origin: `https://about-staging.odeye3217.workers.dev/studio`
-- Discord fixture/thread: role panel `1543216853948698666`; Forum fixture/thread 미기록
-- attachment budget: 미확정
+- Discord fixture/thread: role panel `1543216853948698666`; Forum thread·starter `1543467063626960967`은 실제 create·update 뒤 delete 완료. job은 create `fdae8368-fa92-4d6b-9a3c-20e6f2662338`, update `c348ad18-a920-4225-a615-7108e2d69f9e`, delete `266067e0-9513-4991-afe6-365c2c9eb0c4`
+- attachment budget: Phase A 보수 한도는 전체 20 MiB·파일당 8 MiB. 실제 전달 최대 관측값은 파일 1개 100,106 bytes
 - Go/No-Go: 미통과
 
 ## 다음 Phase

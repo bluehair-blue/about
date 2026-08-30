@@ -20,8 +20,13 @@ export interface StudioR2Object {
   size: number;
 }
 
+export interface StudioR2ObjectBody extends StudioR2Object {
+  body: ReadableStream<Uint8Array>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
 export interface StudioR2 {
-  get(key: string): Promise<unknown>;
+  get(key: string): Promise<StudioR2ObjectBody | null>;
   put(
     key: string,
     value: ArrayBuffer | Blob | ReadableStream<Uint8Array>,
@@ -45,6 +50,40 @@ export interface StudioImageInfo {
 
 export interface StudioImages {
   info(stream: ReadableStream<Uint8Array>): Promise<StudioImageInfo>;
+  input(stream: ReadableStream<Uint8Array>): {
+    transform(options: {
+      width: number;
+      height: number;
+      fit: "scale-down";
+    }): {
+      output(options: {
+        format: "image/webp";
+        quality: number;
+      }): Promise<{ response(): Response }>;
+    };
+  };
+}
+
+export type StudioQueueBody =
+  | { type: "asset_process"; jobId: string; assetId: string }
+  | { type: "discord_delivery"; jobId: string };
+
+export interface StudioQueueProducer {
+  send(
+    body: StudioQueueBody,
+    options?: { contentType?: "json"; delaySeconds?: number },
+  ): Promise<void>;
+}
+
+export interface StudioQueueMessage {
+  body: unknown;
+  attempts: number;
+  ack(): void;
+  retry(options?: { delaySeconds?: number }): void;
+}
+
+export interface StudioQueueBatch {
+  messages: StudioQueueMessage[];
 }
 
 export interface PhaseAEnv {
@@ -66,7 +105,7 @@ export interface PhaseAEnv {
   STUDIO_DB?: StudioD1;
   STUDIO_MEDIA?: StudioR2;
   IMAGES?: StudioImages;
-  PUBLISH_QUEUE?: unknown;
+  PUBLISH_QUEUE?: StudioQueueProducer;
 }
 
 const requiredText = [
@@ -160,7 +199,7 @@ export function phaseAEnvironmentErrors(env: PhaseAEnv) {
   if (!hasMethods(env.STUDIO_MEDIA, ["get", "put", "delete", "list"])) {
     errors.push("Missing STUDIO_MEDIA binding");
   }
-  if (!hasMethods(env.IMAGES, ["info"])) {
+  if (!hasMethods(env.IMAGES, ["info", "input"])) {
     errors.push("Missing IMAGES binding");
   }
   if (!hasMethods(env.PUBLISH_QUEUE, ["send"])) {

@@ -13,6 +13,10 @@ const assetMigration = readFileSync(
   new URL("../migrations/0002_phase_a_assets.sql", import.meta.url),
   "utf8",
 );
+const deliveryMigration = readFileSync(
+  new URL("../migrations/0003_phase_a_delivery.sql", import.meta.url),
+  "utf8",
+);
 
 class SqliteD1Statement {
   constructor(database, query, values = []) {
@@ -46,6 +50,7 @@ class SqliteD1 {
     this.database = new DatabaseSync(":memory:");
     this.database.exec(draftMigration);
     this.database.exec(assetMigration);
+    this.database.exec(deliveryMigration);
   }
 
   prepare(query) {
@@ -79,7 +84,16 @@ class MemoryR2 {
   }
 
   async get(key) {
-    return this.objects.get(key) ?? null;
+    const stored = this.objects.get(key);
+    if (!stored) return null;
+    return {
+      key,
+      size: stored.bytes.byteLength,
+      body: new Blob([stored.bytes]).stream(),
+      async arrayBuffer() {
+        return stored.bytes.slice().buffer;
+      },
+    };
   }
 
   async put(key, value, options = {}) {
@@ -128,6 +142,160 @@ class FakeImages {
       ...this.result,
       fileSize: this.result.fileSize ?? bytes.byteLength,
     };
+  }
+
+  input(stream) {
+    const source = new Response(stream).arrayBuffer();
+    return {
+      transform: (transform) => ({
+        output: async (output) => {
+          await source;
+          this.calls.push({ transform, output });
+          const bytes = Buffer.from(
+            `RIFF-${transform.width}x${transform.height}-${output.quality}-WEBP`,
+          );
+          return { response: () => new Response(bytes) };
+        },
+      }),
+    };
+  }
+}
+
+class MemoryQueue {
+  constructor() {
+    this.messages = [];
+    this.failSend = false;
+  }
+
+  async send(message) {
+    if (this.failSend) throw new Error("Queue send failed");
+    this.messages.push(structuredClone(message));
+  }
+}
+
+function queueMessage(body, attempts = 1) {
+  return {
+    body,
+    attempts,
+    acked: false,
+    retryOptions: null,
+    ack() {
+      this.acked = true;
+    },
+    retry(options) {
+      this.retryOptions = options ?? {};
+    },
+  };
+}
+
+class FakeDiscordForum {
+  constructor(env) {
+    this.env = env;
+    this.threadId = "200000000000000001";
+    this.starterMessageId = "200000000000000002";
+    this.deleted = false;
+    this.thread = null;
+    this.message = null;
+    this.attachmentSequence = 0;
+    this.deleteCalls = 0;
+    this.createCalls = 0;
+    this.updateCalls = 0;
+    this.failNextCreate = null;
+    this.tags = [
+      ["업데이트", "300000000000000001"],
+      ["작업", "300000000000000002"],
+      ["캐릭터", "300000000000000003"],
+      ["세계관", "300000000000000004"],
+      ["일러스트", "300000000000000005"],
+      ["개발", "300000000000000006"],
+    ].map(([name, id]) => ({ name, id }));
+  }
+
+  async messageFromForm(form, nested = false) {
+    assert.ok(form instanceof FormData);
+    const payload = JSON.parse(form.get("payload_json"));
+    const source = nested ? payload.message : payload;
+    const files = [...form.entries()]
+      .filter(([key]) => key.startsWith("files["))
+      .map(([, file]) => file);
+    const attachments = (source.attachments ?? []).map((attachment, index) => ({
+      id: String(400000000000000001n + BigInt(this.attachmentSequence++)),
+      filename: attachment.filename,
+      description: attachment.description,
+      size: files[index].size,
+    }));
+    return {
+      id: this.starterMessageId,
+      channel_id: this.threadId,
+      content: source.content,
+      attachments,
+    };
+  }
+
+  async fetch(input, init = {}) {
+    const url = new URL(String(input));
+    assert.equal(init.headers?.authorization, `Bot ${this.env.DISCORD_BOT_TOKEN}`);
+    const forumPath = `/api/v10/channels/${this.env.DISCORD_FORUM_CHANNEL_ID}`;
+    const threadPath = `/api/v10/channels/${this.threadId}`;
+    const messagePath = `${threadPath}/messages/${this.starterMessageId}`;
+
+    if (url.pathname === forumPath && (!init.method || init.method === "GET")) {
+      return Response.json({
+        id: this.env.DISCORD_FORUM_CHANNEL_ID,
+        guild_id: this.env.DISCORD_GUILD_ID,
+        type: 15,
+        available_tags: this.tags,
+      });
+    }
+    if (url.pathname === `${forumPath}/threads` && init.method === "POST") {
+      this.createCalls += 1;
+      if (this.failNextCreate === "network") {
+        this.failNextCreate = null;
+        throw new Error("unknown network result");
+      }
+      if (this.failNextCreate === "rate_limit") {
+        this.failNextCreate = null;
+        return Response.json({ retry_after: 2 }, { status: 429 });
+      }
+      const payload = JSON.parse(init.body.get("payload_json"));
+      this.deleted = false;
+      this.message = await this.messageFromForm(init.body, true);
+      this.thread = {
+        id: this.threadId,
+        guild_id: this.env.DISCORD_GUILD_ID,
+        parent_id: this.env.DISCORD_FORUM_CHANNEL_ID,
+        name: payload.name,
+        applied_tags: payload.applied_tags,
+      };
+      return Response.json({ ...this.thread, message: this.message });
+    }
+    if (url.pathname === threadPath && init.method === "PATCH") {
+      this.updateCalls += 1;
+      const payload = JSON.parse(init.body);
+      Object.assign(this.thread, payload);
+      return Response.json(this.thread);
+    }
+    if (url.pathname === messagePath && init.method === "PATCH") {
+      this.message = await this.messageFromForm(init.body);
+      return Response.json(this.message);
+    }
+    if (url.pathname === threadPath && init.method === "DELETE") {
+      this.deleteCalls += 1;
+      if (this.deleted) return Response.json({ message: "Unknown Channel" }, { status: 404 });
+      this.deleted = true;
+      return Response.json(this.thread);
+    }
+    if (url.pathname === threadPath && (!init.method || init.method === "GET")) {
+      return this.deleted
+        ? Response.json({ message: "Unknown Channel" }, { status: 404 })
+        : Response.json(this.thread);
+    }
+    if (url.pathname === messagePath && (!init.method || init.method === "GET")) {
+      return this.deleted
+        ? Response.json({ message: "Unknown Channel" }, { status: 404 })
+        : Response.json(this.message);
+    }
+    assert.fail(`Unexpected Discord request: ${init.method ?? "GET"} ${url.pathname}`);
   }
 }
 
@@ -178,7 +346,7 @@ function phaseAEnv(overrides = {}) {
     DISCORD_NOTIFY_ROLE_ID: "100000000000000007",
     STUDIO_DB: { prepare() {}, batch() {} },
     STUDIO_MEDIA: { get() {}, put() {}, delete() {}, list() {} },
-    IMAGES: { info() {} },
+    IMAGES: { info() {}, input() {} },
     PUBLISH_QUEUE: { send() {} },
     ...overrides,
   };
@@ -1066,6 +1234,420 @@ test("rejects unsafe image inputs and records recoverable R2 failures", async ()
   } finally {
     globalThis.fetch = originalFetch;
     database.close();
+  }
+});
+
+test("creates both derivatives and records Queue retry exhaustion for the DLQ", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const media = new MemoryR2();
+  const images = new FakeImages();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: media,
+    IMAGES: images,
+    PUBLISH_QUEUE: queue,
+  });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const request = studioRequester(worker, env, keys, token);
+  const originalFetch = globalThis.fetch;
+
+  try {
+    const draft = await createDraftFixture(request, "파생본 검증");
+    const upload = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng),
+    );
+    assert.equal(upload.status, 201);
+    const uploaded = await upload.json();
+    assert.deepEqual(queue.messages, [
+      { type: "asset_process", jobId: uploaded.jobId, assetId: uploaded.assetId },
+    ]);
+
+    const message = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [message] }, env);
+    assert.equal(message.acked, true);
+    assert.equal(message.retryOptions, null);
+    const ready = database.database.prepare(`
+      SELECT status, private_source_key, public_r2_key, discord_r2_key,
+        public_bytes, public_sha256, public_width, public_height,
+        discord_bytes, discord_sha256, discord_width, discord_height
+      FROM studio_assets WHERE id = ?
+    `).get(uploaded.assetId);
+    assert.equal(ready.status, "ready");
+    assert.equal(ready.public_width, 1);
+    assert.equal(ready.public_height, 1);
+    assert.equal(ready.discord_width, 1);
+    assert.equal(ready.discord_height, 1);
+    assert.match(ready.public_sha256, /^[0-9a-f]{64}$/);
+    assert.match(ready.discord_sha256, /^[0-9a-f]{64}$/);
+    assert.equal(media.objects.has(ready.private_source_key), true);
+    assert.equal(media.objects.has(ready.public_r2_key), true);
+    assert.equal(media.objects.has(ready.discord_r2_key), true);
+    assert.equal(
+      media.objects.get(ready.public_r2_key).options.httpMetadata.contentType,
+      "image/webp",
+    );
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(uploaded.jobId).status,
+      "succeeded",
+    );
+
+    const listed = await request(`/studio/api/assets?postId=${draft.postId}`);
+    const manifest = await listed.json();
+    assert.equal(manifest.assets[0].status, "ready");
+    assert.equal(manifest.assets[0].publicBytes, ready.public_bytes);
+    assert.equal(manifest.assets[0].discordBytes, ready.discord_bytes);
+
+    const poisonDraft = await createDraftFixture(request, "DLQ 검증");
+    const poisonUpload = await request(
+      "/studio/api/assets",
+      sourceUpload(poisonDraft.postId, 0, staticPng),
+    );
+    const poison = await poisonUpload.json();
+    const poisonRow = database.database.prepare(`
+      SELECT private_source_key FROM studio_assets WHERE id = ?
+    `).get(poison.assetId);
+    media.objects.delete(poisonRow.private_source_key);
+
+    const firstAttempt = queueMessage(queue.messages.shift(), 1);
+    await worker.queue({ messages: [firstAttempt] }, env);
+    assert.deepEqual(firstAttempt.retryOptions, {});
+    assert.equal(firstAttempt.acked, false);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(poison.jobId).status,
+      "retrying",
+    );
+
+    const dlqAttempt = queueMessage(firstAttempt.body, 4);
+    await worker.queue({ messages: [dlqAttempt] }, env);
+    assert.deepEqual(dlqAttempt.retryOptions, {});
+    assert.equal(dlqAttempt.acked, false);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(poison.jobId).status,
+      "failed",
+    );
+    const failedAsset = database.database.prepare(`
+      SELECT status, processing_error FROM studio_assets WHERE id = ?
+    `).get(poison.assetId);
+    assert.equal(failedAsset.status, "failed");
+    assert.equal(failedAsset.processing_error, "source_missing");
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("creates, updates, replaces tags and attachments, then deletes one Forum mapping", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const media = new MemoryR2();
+  const images = new FakeImages();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: media,
+    IMAGES: images,
+    PUBLISH_QUEUE: queue,
+  });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const discord = new FakeDiscordForum(env);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [keys.publicJwk] });
+    }
+    return discord.fetch(input, init);
+  };
+  const request = async (pathname, init = {}) => worker.fetch(
+    new Request(`https://staging.example${pathname}`, {
+      ...init,
+      headers: {
+        "cf-access-jwt-assertion": token,
+        ...(init.headers ?? {}),
+      },
+    }),
+    env,
+    executionContext(),
+  );
+  const jsonWrite = (body) => ({
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: "https://staging.example",
+      "x-studio-request": "1",
+    },
+    body: JSON.stringify(body),
+  });
+
+  try {
+    const draft = await createDraftFixture(request, "첫 Forum fixture");
+    const firstUpload = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng, { alt: "첫 attachment" }),
+    );
+    const firstAsset = await firstUpload.json();
+    const firstAssetMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [firstAssetMessage] }, env);
+    assert.equal(firstAssetMessage.acked, true);
+
+    const createResponse = await request(
+      "/studio/api/publish",
+      jsonWrite({ action: "publish", postId: draft.postId }),
+    );
+    assert.equal(createResponse.status, 202);
+    const create = await createResponse.json();
+    assert.equal(create.action, "create");
+    const createMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [createMessage] }, env);
+    assert.equal(createMessage.acked, true);
+    assert.equal(discord.createCalls, 1);
+    assert.equal(discord.thread.name, "첫 Forum fixture");
+    assert.equal(discord.message.attachments[0].description, "첫 attachment");
+    assert.deepEqual(
+      [...discord.thread.applied_tags].sort(),
+      ["300000000000000002", "300000000000000005"].sort(),
+    );
+    const published = database.database.prepare(`
+      SELECT status, current_version_id, discord_thread_id,
+        discord_starter_message_id, discord_remote_hash
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    assert.equal(published.status, "published");
+    assert.equal(published.discord_thread_id, discord.threadId);
+    assert.equal(published.discord_starter_message_id, discord.starterMessageId);
+    assert.equal(published.discord_remote_hash, create.expectedHash);
+
+    const detach = deleteSource(firstAsset.assetId);
+    const detached = await request(detach.pathname, detach.init);
+    assert.equal(detached.status, 204);
+    assert.equal(
+      database.database.prepare("SELECT status FROM studio_assets WHERE id = ?")
+        .get(firstAsset.assetId).status,
+      "ready",
+    );
+    assert.equal(media.objects.size, 3);
+
+    const editedResponse = await request(
+      "/studio/api/drafts",
+      jsonWrite({
+        postId: draft.postId,
+        revision: 1,
+        title: "수정된 Forum fixture",
+        body: "attachment와 tag를 모두 교체했습니다.",
+        kind: "update",
+        topics: ["character", "development"],
+      }),
+    );
+    assert.equal(editedResponse.status, 200);
+
+    const secondUpload = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng, { alt: "교체 attachment" }),
+    );
+    const secondAsset = await secondUpload.json();
+    const secondAssetMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [secondAssetMessage] }, env);
+    assert.equal(secondAssetMessage.acked, true);
+
+    const updateResponse = await request(
+      "/studio/api/publish",
+      jsonWrite({ action: "publish", postId: draft.postId }),
+    );
+    assert.equal(updateResponse.status, 202);
+    const update = await updateResponse.json();
+    assert.equal(update.action, "update");
+    const updateMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [updateMessage] }, env);
+    assert.equal(updateMessage.acked, true);
+    assert.equal(discord.createCalls, 1);
+    assert.equal(discord.updateCalls, 1);
+    assert.equal(discord.thread.name, "수정된 Forum fixture");
+    assert.equal(discord.message.content, "attachment와 tag를 모두 교체했습니다.");
+    assert.equal(discord.message.attachments.length, 1);
+    assert.equal(discord.message.attachments[0].description, "교체 attachment");
+    assert.deepEqual(
+      [...discord.thread.applied_tags].sort(),
+      [
+        "300000000000000001",
+        "300000000000000003",
+        "300000000000000006",
+      ].sort(),
+    );
+    assert.equal(
+      database.database.prepare(`
+        SELECT count(*) AS count
+        FROM studio_post_version_assets
+        WHERE version_id = (SELECT current_version_id FROM studio_posts WHERE id = ?)
+          AND asset_id = ?
+      `).get(draft.postId, secondAsset.assetId).count,
+      1,
+    );
+
+    const deleteResponse = await request(
+      "/studio/api/publish",
+      jsonWrite({ action: "delete", postId: draft.postId }),
+    );
+    assert.equal(deleteResponse.status, 202);
+    const deleteMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [deleteMessage] }, env);
+    assert.equal(deleteMessage.acked, true);
+    assert.equal(discord.deleteCalls, 1);
+    assert.equal(
+      database.database.prepare("SELECT status FROM studio_posts WHERE id = ?")
+        .get(draft.postId).status,
+      "archived",
+    );
+
+    const retryDeleteJobId = crypto.randomUUID();
+    const retryAt = new Date().toISOString();
+    database.database.prepare(`
+      UPDATE studio_posts SET status = 'archiving' WHERE id = ?
+    `).run(draft.postId);
+    database.database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, version_id, target, action, payload_json,
+        status, attempts, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'discord', 'delete', ?, 'queued', 0, ?, ?)
+    `).run(
+      retryDeleteJobId,
+      `discord:delete-retry:${draft.postId}`,
+      draft.postId,
+      database.database.prepare("SELECT current_version_id FROM studio_posts WHERE id = ?")
+        .get(draft.postId).current_version_id,
+      JSON.stringify({
+        threadId: discord.threadId,
+        starterMessageId: discord.starterMessageId,
+      }),
+      retryAt,
+      retryAt,
+    );
+    const retryDelete = queueMessage({
+      type: "discord_delivery",
+      jobId: retryDeleteJobId,
+    });
+    await worker.queue({ messages: [retryDelete] }, env);
+    assert.equal(retryDelete.acked, true);
+    assert.equal(discord.deleteCalls, 2);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(retryDeleteJobId).status,
+      "succeeded",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("retries Discord 429 responses but never replays an unknown create result", async () => {
+  async function runCase(failure) {
+    const worker = await loadWorker();
+    const database = new SqliteD1();
+    const queue = new MemoryQueue();
+    const env = phaseAEnv({
+      STUDIO_DB: database,
+      STUDIO_MEDIA: new MemoryR2(),
+      IMAGES: new FakeImages(),
+      PUBLISH_QUEUE: queue,
+    });
+    const keys = await accessKeys();
+    const token = await keys.token();
+    const discord = new FakeDiscordForum(env);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init = {}) => {
+      if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+        return Response.json({ keys: [keys.publicJwk] });
+      }
+      return discord.fetch(input, init);
+    };
+    const request = async (pathname, init = {}) => worker.fetch(
+      new Request(`https://staging.example${pathname}`, {
+        ...init,
+        headers: {
+          "cf-access-jwt-assertion": token,
+          ...(init.headers ?? {}),
+        },
+      }),
+      env,
+      executionContext(),
+    );
+    try {
+      const draft = await createDraftFixture(request, `${failure} fixture`);
+      const response = await request("/studio/api/publish", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://staging.example",
+          "x-studio-request": "1",
+        },
+        body: JSON.stringify({ action: "publish", postId: draft.postId }),
+      });
+      assert.equal(response.status, 202);
+      const published = await response.json();
+      discord.failNextCreate = failure;
+      const message = queueMessage(queue.messages.shift(), 1);
+      await worker.queue({ messages: [message] }, env);
+      return { worker, database, env, discord, message, published };
+    } catch (error) {
+      database.close();
+      throw error;
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  const rateLimited = await runCase("rate_limit");
+  try {
+    assert.equal(rateLimited.message.acked, false);
+    assert.deepEqual(rateLimited.message.retryOptions, { delaySeconds: 2 });
+    assert.equal(
+      rateLimited.database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(rateLimited.published.jobId).status,
+      "retrying",
+    );
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input, init = {}) => rateLimited.discord.fetch(input, init);
+    try {
+      const replay = queueMessage(rateLimited.message.body, 2);
+      await rateLimited.worker.queue({ messages: [replay] }, rateLimited.env);
+      assert.equal(replay.acked, true);
+      assert.equal(replay.retryOptions, null);
+      assert.equal(rateLimited.discord.createCalls, 2);
+      assert.equal(
+        rateLimited.database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+          .get(rateLimited.published.jobId).status,
+        "succeeded",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    rateLimited.database.close();
+  }
+
+  const unknown = await runCase("network");
+  try {
+    assert.equal(unknown.message.acked, true);
+    assert.equal(unknown.message.retryOptions, null);
+    assert.equal(
+      unknown.database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(unknown.published.jobId).status,
+      "outcome_unknown",
+    );
+    const replay = queueMessage(unknown.message.body, 2);
+    await unknown.worker.queue({ messages: [replay] }, unknown.env);
+    assert.equal(replay.acked, true);
+    assert.equal(replay.retryOptions, null);
+    assert.equal(unknown.discord.createCalls, 1);
+  } finally {
+    unknown.database.close();
   }
 });
 

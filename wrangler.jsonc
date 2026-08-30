@@ -28,6 +28,16 @@
         "binding": "PUBLISH_QUEUE",
         "queue": "about-studio-publish-production"
       }
+    ],
+    "consumers": [
+      {
+        "queue": "about-studio-publish-production",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "about-studio-publish-dlq-production",
+        "max_concurrency": 1
+      }
     ]
   },
   "routes": [
@@ -78,6 +88,16 @@
           {
             "binding": "PUBLISH_QUEUE",
             "queue": "about-studio-publish-staging"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "about-studio-publish-staging",
+            "max_batch_size": 1,
+            "max_batch_timeout": 5,
+            "max_retries": 3,
+            "dead_letter_queue": "about-studio-publish-dlq-staging",
+            "max_concurrency": 1
           }
         ]
       },

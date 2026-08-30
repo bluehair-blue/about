@@ -14,6 +14,8 @@ type Asset = {
   height: number;
   sourceMime: "image/jpeg" | "image/png" | "image/webp";
   sourceBytes: number;
+  publicBytes: number | null;
+  discordBytes: number | null;
   ordinal: number;
   alt: string;
   createdAt: string;
@@ -41,6 +43,8 @@ function isAsset(value: unknown): value is Asset {
       asset.sourceMime === "image/png" ||
       asset.sourceMime === "image/webp") &&
     typeof asset.sourceBytes === "number" &&
+    (asset.publicBytes === null || typeof asset.publicBytes === "number") &&
+    (asset.discordBytes === null || typeof asset.discordBytes === "number") &&
     typeof asset.ordinal === "number" &&
     typeof asset.alt === "string" &&
     typeof asset.createdAt === "string"
@@ -120,15 +124,32 @@ export function ImageUploader({
   useEffect(() => {
     if (!postId) return;
     let active = true;
-    void requestAssets(postId)
-      .then((next) => {
-        if (active) setLoaded({ postId, assets: next });
-      })
-      .catch(() => {
+    let timer = 0;
+    const refresh = async () => {
+      try {
+        const next = await requestAssets(postId);
+        if (!active) return;
+        setLoaded({ postId, assets: next });
+        setStatus((current) =>
+          current === "이미지 목록을 불러오지 못했습니다." ? "" : current
+        );
+        if (next.some((asset) => asset.status === "processing" || asset.status === "uploading")) {
+          timer = window.setTimeout(refresh, 2_000);
+        }
+      } catch {
         if (active) setStatus("이미지 목록을 불러오지 못했습니다.");
-      });
+      }
+    };
+    const handleStateChanged = () => {
+      window.clearTimeout(timer);
+      void refresh();
+    };
+    window.addEventListener("studio-state-changed", handleStateChanged);
+    void refresh();
     return () => {
       active = false;
+      window.clearTimeout(timer);
+      window.removeEventListener("studio-state-changed", handleStateChanged);
     };
   }, [postId]);
 
@@ -203,14 +224,35 @@ export function ImageUploader({
       setPendingFiles((current) =>
         current.filter((candidate) => candidate.id !== item.id),
       );
-      setStatus("private R2 원본과 D1 manifest를 저장했습니다.");
-      try {
-        await loadAssets(postId);
-      } catch {
-        setStatus("원본은 저장됐습니다 · 목록은 페이지를 새로고침해 주세요.");
-      }
+      setStatus("원본을 저장하고 파생본 작업을 Queue에 등록했습니다.");
+      window.dispatchEvent(new Event("studio-state-changed"));
     } catch {
       updatePending(item.id, { error: "원본 업로드에 실패했습니다." });
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function retry(asset: Asset) {
+    if (!postId || disabled || busyId) return;
+    setBusyId(asset.assetId);
+    try {
+      const response = await fetch(
+        `/studio/api/assets/${encodeURIComponent(asset.assetId)}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-studio-request": "1",
+          },
+          body: "{}",
+        },
+      );
+      if (!response.ok) throw new Error("Asset retry failed");
+      setStatus("같은 asset job을 Queue에 다시 등록했습니다.");
+      window.dispatchEvent(new Event("studio-state-changed"));
+    } catch {
+      setStatus("파생본 처리를 다시 등록하지 못했습니다.");
     } finally {
       setBusyId("");
     }
@@ -232,12 +274,8 @@ export function ImageUploader({
         },
       );
       if (!response.ok) throw new Error("Asset delete failed");
-      setStatus("D1 exact key로 private 원본을 삭제했습니다.");
-      try {
-        await loadAssets(postId);
-      } catch {
-        setStatus("원본은 삭제됐습니다 · 목록은 페이지를 새로고침해 주세요.");
-      }
+      setStatus("초안에서 이미지를 제거했습니다. 공유되지 않은 object는 exact key로 함께 삭제됩니다.");
+      window.dispatchEvent(new Event("studio-state-changed"));
     } catch {
       setStatus("이미지를 삭제하지 못했습니다.");
     } finally {
@@ -331,13 +369,29 @@ export function ImageUploader({
                 </small>
               </div>
               <p className={styles.assetState}>{statusLabel(asset.status)}</p>
-              <button
-                type="button"
-                disabled={disabled || busyId !== ""}
-                onClick={() => void remove(asset)}
-              >
-                {busyId === asset.assetId ? "삭제 중…" : "원본 삭제"}
-              </button>
+              {asset.status === "ready" && asset.discordBytes && asset.publicBytes ? (
+                <small>
+                  Portfolio {byteLabel(asset.publicBytes)} · Discord {byteLabel(asset.discordBytes)}
+                </small>
+              ) : null}
+              <div className={styles.assetButtons}>
+                {asset.status === "failed" ? (
+                  <button
+                    type="button"
+                    disabled={disabled || busyId !== ""}
+                    onClick={() => void retry(asset)}
+                  >
+                    처리 재시도
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  disabled={disabled || busyId !== ""}
+                  onClick={() => void remove(asset)}
+                >
+                  {busyId === asset.assetId ? "처리 중…" : "원본 삭제"}
+                </button>
+              </div>
             </li>
           ))}
         </ol>

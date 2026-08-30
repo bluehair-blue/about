@@ -29,6 +29,9 @@ const physicalResources = [
   config.queues?.producers?.find(({ binding }) => binding === "PUBLISH_QUEUE")
     ?.queue,
 ];
+const queueConsumer = config.queues?.consumers?.find(
+  ({ queue }) => queue === `about-studio-publish-${target}`,
+);
 
 if (
   physicalResources.some(
@@ -37,6 +40,18 @@ if (
 ) {
   throw new Error(
     `Refusing ${target} deploy: Studio bindings do not target ${target} resources`,
+  );
+}
+
+if (
+  !queueConsumer ||
+  queueConsumer.max_batch_size !== 1 ||
+  queueConsumer.max_retries !== 3 ||
+  queueConsumer.max_concurrency !== 1 ||
+  queueConsumer.dead_letter_queue !== `about-studio-publish-dlq-${target}`
+) {
+  throw new Error(
+    `Refusing ${target} deploy without the isolated Queue consumer and DLQ contract`,
   );
 }
 
