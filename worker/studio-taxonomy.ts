@@ -393,10 +393,11 @@ export async function handleStudioTaxonomyRequest(
   env: PhaseAEnv,
 ) {
   const database = env.STUDIO_DB;
-  const queue = env.PUBLISH_QUEUE;
-  if (!database || !queue) return json({ error: "taxonomy_unavailable" }, 503);
+  if (!database) return json({ error: "taxonomy_unavailable" }, 503);
   try {
     if (request.method === "GET") return readCatalog(database);
+    const queue = env.PUBLISH_QUEUE;
+    if (!queue) return json({ error: "taxonomy_unavailable" }, 503);
     if (request.method === "POST") return writeCatalog(request, database, queue);
     return new Response("Method not allowed", {
       status: 405,

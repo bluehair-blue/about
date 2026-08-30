@@ -6,7 +6,7 @@ import type {
   StudioQueueProducer,
   StudioR2,
 } from "./phase-a-env";
-import type { AssetStatus } from "../db/schema";
+import { assetStatuses, type AssetStatus } from "../db/schema";
 
 const ASSETS_PATH = "/studio/api/assets";
 const ASSET_CLEANUP_PATH = `${ASSETS_PATH}/cleanup`;
@@ -27,6 +27,7 @@ type SourceMime = "image/jpeg" | "image/png" | "image/webp";
 type DraftContext = {
   post_id: string;
   version_id: string;
+  revision: number;
   title: string;
   asset_count: number;
 };
@@ -44,6 +45,7 @@ type AssetRow = {
   alt: string;
   processing_error: string | null;
   created_at: string;
+  updated_at: string;
 };
 
 type ProcessingAssetRow = {
@@ -73,6 +75,7 @@ type RetryAssetRow = {
 type DeletingAssetRow = {
   post_id: string;
   version_id: string;
+  revision: number;
   ordinal: number;
   status: string;
   created_prefix: string;
@@ -135,6 +138,40 @@ type VersionCleanupPayload = {
   versionId: string;
   supersededAt: string;
   assetIds: string[];
+};
+
+type MediaRow = {
+  id: string;
+  post_id: string;
+  post_status: string;
+  title_snapshot: string;
+  current_post_title: string;
+  status: AssetStatus;
+  width: number;
+  height: number;
+  source_mime: SourceMime;
+  source_bytes: number;
+  public_bytes: number | null;
+  discord_bytes: number | null;
+  processing_error: string | null;
+  created_at: string;
+  updated_at: string;
+  orphaned_at: string | null;
+  first_published_at: string | null;
+  reference_count: number;
+  cleanup_status: string | null;
+  cleanup_error: string | null;
+  cleanup_updated_at: string | null;
+  total_count: number;
+};
+
+type PreviewAssetRow = {
+  status: AssetStatus;
+  source_mime: SourceMime;
+  processing_error: string | null;
+  private_source_key: string;
+  public_r2_key: string;
+  discord_r2_key: string;
 };
 
 function json(value: unknown, status = 200) {
@@ -282,7 +319,8 @@ async function draftContext(
   editableOnly = true,
 ) {
   return database.prepare(`
-    SELECT post.id AS post_id, version.id AS version_id, version.title,
+    SELECT post.id AS post_id, version.id AS version_id, version.revision,
+      version.title,
       (
         SELECT count(*)
         FROM studio_post_version_assets
@@ -308,7 +346,7 @@ async function listAssets(request: Request, database: StudioD1) {
     SELECT asset.id, asset.status, asset.width, asset.height,
       asset.source_mime, asset.source_bytes, asset.public_bytes,
       asset.discord_bytes, selected.ordinal, selected.alt, asset.created_at,
-      asset.processing_error
+      asset.processing_error, asset.updated_at
     FROM studio_post_version_assets AS selected
     JOIN studio_assets AS asset ON asset.id = selected.asset_id
     WHERE selected.version_id = ? AND asset.post_id = ?
@@ -329,12 +367,371 @@ async function listAssets(request: Request, database: StudioD1) {
       alt: asset.alt,
       processingError: asset.processing_error,
       createdAt: asset.created_at,
+      updatedAt: asset.updated_at,
     })),
+    revision: context.revision,
   });
 }
 
+function parseMediaDay(value: string | null) {
+  if (!value) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return undefined;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(date.valueOf()) || date.toISOString().slice(0, 10) !== value
+    ? undefined
+    : date;
+}
+
+function escapeLike(value: string) {
+  return value.replace(/[\\%_]/gu, "\\$&");
+}
+
+async function listMedia(
+  request: Request,
+  env: PhaseAEnv,
+  database: StudioD1,
+) {
+  const url = new URL(request.url);
+  const q = (url.searchParams.get("q") ?? "").normalize("NFC").trim();
+  const status = url.searchParams.get("status") ?? "all";
+  const from = parseMediaDay(url.searchParams.get("from"));
+  const through = parseMediaDay(url.searchParams.get("to"));
+  if (
+    codePointLength(q) > 100 ||
+    (status !== "all" && !assetStatuses.includes(status as AssetStatus)) ||
+    from === undefined ||
+    through === undefined ||
+    (from && through && from > through)
+  ) {
+    return json({ error: "invalid_media_filter" }, 400);
+  }
+
+  const clauses = ["post.status != 'purged'"];
+  const values: Array<string | number> = [];
+  if (q) {
+    const pattern = `%${escapeLike(q)}%`;
+    clauses.push(`(
+      asset.title_snapshot LIKE ? ESCAPE '\\'
+      OR coalesce(draft.title, current.title, '') LIKE ? ESCAPE '\\'
+    )`);
+    values.push(pattern, pattern);
+  }
+  if (status !== "all") {
+    clauses.push("asset.status = ?");
+    values.push(status);
+  }
+  if (from) {
+    clauses.push("asset.created_at >= ?");
+    values.push(from.toISOString());
+  }
+  if (through) {
+    clauses.push("asset.created_at < ?");
+    values.push(new Date(through.valueOf() + DAY_MS).toISOString());
+  }
+
+  const rows = await database.prepare(`
+    SELECT asset.id, asset.post_id, post.status AS post_status,
+      asset.title_snapshot,
+      coalesce(draft.title, current.title, asset.title_snapshot) AS current_post_title,
+      asset.status, asset.width, asset.height, asset.source_mime,
+      asset.source_bytes, asset.public_bytes, asset.discord_bytes,
+      asset.processing_error, asset.created_at, asset.updated_at,
+      asset.orphaned_at, asset.first_published_at,
+      (SELECT count(*) FROM studio_post_version_assets AS selected
+        WHERE selected.asset_id = asset.id) AS reference_count,
+      cleanup.status AS cleanup_status,
+      cleanup.error_code AS cleanup_error,
+      cleanup.updated_at AS cleanup_updated_at,
+      count(*) OVER () AS total_count
+    FROM studio_assets AS asset
+    JOIN studio_posts AS post ON post.id = asset.post_id
+    LEFT JOIN studio_post_versions AS draft ON draft.id = post.draft_version_id
+    LEFT JOIN studio_post_versions AS current ON current.id = post.current_version_id
+    LEFT JOIN delivery_jobs AS cleanup
+      ON cleanup.dedupe_key = 'asset:' || asset.id || ':cleanup:v1'
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY asset.created_at DESC, asset.id ASC
+    LIMIT 100
+  `).bind(...values).all<MediaRow>();
+
+  const orphanDays = retentionDays(env.ASSET_ORPHAN_RETENTION_DAYS);
+  const cleanupAvailable = cleanupConfiguration(env) !== null;
+  const cutoff = orphanDays
+    ? new Date(Date.now() - orphanDays * DAY_MS).toISOString()
+    : null;
+  const summary = await database.prepare(`
+    SELECT sum(CASE
+        WHEN ? IS NOT NULL AND asset.orphaned_at <= ? THEN 1 ELSE 0
+      END) AS eligible_count,
+      min(asset.orphaned_at) AS first_orphaned_at
+    FROM studio_assets AS asset
+    WHERE asset.status IN ('orphan', 'deleting')
+      AND asset.orphaned_at IS NOT NULL
+      AND asset.first_published_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM studio_post_version_assets WHERE asset_id = asset.id
+      )
+  `).bind(cutoff, cutoff).first<{
+    eligible_count: number;
+    first_orphaned_at: string | null;
+  }>();
+  const items = rows.results ?? [];
+  return json({
+    filter: {
+      q,
+      status,
+      from: from ? from.toISOString().slice(0, 10) : "",
+      to: through ? through.toISOString().slice(0, 10) : "",
+    },
+    total: Number(items[0]?.total_count ?? 0),
+    truncated: Number(items[0]?.total_count ?? 0) > items.length,
+    retention: {
+      orphanDays,
+      cleanupAvailable,
+      eligibleOrphanCount: cutoff ? Number(summary?.eligible_count ?? 0) : 0,
+      nextCleanupAt:
+        orphanDays && summary?.first_orphaned_at
+          ? new Date(
+              Date.parse(summary.first_orphaned_at) + orphanDays * DAY_MS,
+            ).toISOString()
+          : null,
+    },
+    items: items.map((asset) => {
+      const cleanupEligible = Boolean(
+        cutoff &&
+        asset.status === "orphan" &&
+        asset.orphaned_at &&
+        asset.orphaned_at <= cutoff &&
+        asset.first_published_at === null &&
+        asset.reference_count === 0,
+      );
+      return {
+        assetId: asset.id,
+        postId: asset.post_id,
+        postStatus: asset.post_status,
+        titleSnapshot: asset.title_snapshot,
+        currentPostTitle: asset.current_post_title,
+        status: asset.status,
+        width: asset.width,
+        height: asset.height,
+        sourceMime: asset.source_mime,
+        sourceBytes: asset.source_bytes,
+        publicBytes: asset.public_bytes,
+        discordBytes: asset.discord_bytes,
+        processingError: asset.processing_error,
+        createdAt: asset.created_at,
+        updatedAt: asset.updated_at,
+        orphanedAt: asset.orphaned_at,
+        publishedOnce: asset.first_published_at !== null,
+        referenceCount: Number(asset.reference_count),
+        cleanupEligible,
+        cleanupJob: asset.cleanup_status
+          ? {
+              status: asset.cleanup_status,
+              error: asset.cleanup_error,
+              updatedAt: asset.cleanup_updated_at,
+            }
+          : null,
+      };
+    }),
+  });
+}
+
+async function previewAsset(
+  request: Request,
+  assetId: string,
+  database: StudioD1,
+  media: StudioR2,
+) {
+  if (!uuidPattern.test(assetId)) return json({ error: "invalid_asset_id" }, 400);
+  const surface = new URL(request.url).searchParams.get("surface");
+  if (surface !== "portfolio" && surface !== "discord") {
+    return json({ error: "invalid_preview_surface" }, 400);
+  }
+  const asset = await database.prepare(`
+    SELECT status, source_mime, processing_error, private_source_key,
+      public_r2_key, discord_r2_key
+    FROM studio_assets
+    WHERE id = ? AND status != 'deleting'
+  `).bind(assetId).first<PreviewAssetRow>();
+  if (!asset || asset.processing_error === "asset_storage_failed") {
+    return json({ error: "asset_preview_not_found" }, 404);
+  }
+
+  const derivativeKey = surface === "portfolio"
+    ? asset.public_r2_key
+    : asset.discord_r2_key;
+  let object = asset.status === "ready" ? await media.get(derivativeKey) : null;
+  let contentType = "image/webp";
+  let source = "derivative";
+  if (!object) {
+    object = await media.get(asset.private_source_key);
+    contentType = asset.source_mime;
+    source = "private-source";
+  }
+  if (!object) return json({ error: "asset_preview_not_found" }, 404);
+  return new Response(object.body, {
+    headers: {
+      "cache-control": "private, no-store",
+      "content-type": contentType,
+      "content-length": String(object.size),
+      "content-disposition": "inline",
+      "x-content-type-options": "nosniff",
+      "x-studio-preview-source": source,
+    },
+  });
+}
+
+type AssetManifestInput = {
+  postId: string;
+  revision: number;
+  assets: Array<{ assetId: string; ordinal: number; alt: string }>;
+};
+
+async function parseAssetManifestPatch(
+  request: Request,
+): Promise<AssetManifestInput | string> {
+  const declaredLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > 16_384) {
+    return "request_too_large";
+  }
+  const text = await request.text();
+  if (new TextEncoder().encode(text).byteLength > 16_384) {
+    return "request_too_large";
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return "invalid_json";
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return "invalid_asset_manifest";
+  }
+  const input = value as Record<string, unknown>;
+  if (
+    Object.keys(input).some((key) => !["postId", "revision", "assets"].includes(key)) ||
+    typeof input.postId !== "string" ||
+    !uuidPattern.test(input.postId) ||
+    typeof input.revision !== "number" ||
+    !Number.isSafeInteger(input.revision) ||
+    input.revision < 1 ||
+    !Array.isArray(input.assets) ||
+    input.assets.length > 10
+  ) {
+    return "invalid_asset_manifest";
+  }
+  const assets: AssetManifestInput["assets"] = [];
+  for (const [index, value] of input.assets.entries()) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return "invalid_asset_manifest";
+    }
+    const item = value as Record<string, unknown>;
+    const alt = typeof item.alt === "string" ? normalizeAlt(item.alt) : null;
+    if (
+      Object.keys(item).some((key) => !["assetId", "ordinal", "alt"].includes(key)) ||
+      typeof item.assetId !== "string" ||
+      !uuidPattern.test(item.assetId) ||
+      item.ordinal !== index ||
+      !alt
+    ) {
+      return "invalid_asset_manifest";
+    }
+    assets.push({ assetId: item.assetId, ordinal: index, alt });
+  }
+  if (new Set(assets.map(({ assetId }) => assetId)).size !== assets.length) {
+    return "invalid_asset_manifest";
+  }
+  return {
+    postId: input.postId,
+    revision: input.revision,
+    assets,
+  };
+}
+
+async function updateAssetManifest(request: Request, database: StudioD1) {
+  const input = await parseAssetManifestPatch(request);
+  if (typeof input === "string") {
+    return json({ error: input }, input === "request_too_large" ? 413 : 400);
+  }
+  const context = await draftContext(database, input.postId);
+  if (!context) return json({ error: "draft_not_found" }, 404);
+  if (context.revision !== input.revision) {
+    return json(
+      { error: "revision_conflict", currentRevision: context.revision },
+      409,
+    );
+  }
+  const selected = await database.prepare(`
+    SELECT asset_id
+    FROM studio_post_version_assets
+    WHERE version_id = ?
+    ORDER BY ordinal ASC, asset_id ASC
+  `).bind(context.version_id).all<{ asset_id: string }>();
+  const currentIds = (selected.results ?? []).map(({ asset_id }) => asset_id).sort();
+  const requestedIds = input.assets.map(({ assetId }) => assetId).sort();
+  if (
+    currentIds.length !== requestedIds.length ||
+    currentIds.some((assetId, index) => assetId !== requestedIds[index])
+  ) {
+    return json({ error: "asset_manifest_conflict" }, 409);
+  }
+  if (input.assets.length === 0) {
+    return json({ revision: input.revision, savedAt: new Date().toISOString() });
+  }
+
+  const savedAt = new Date().toISOString();
+  const results = await database.batch([
+    database.prepare(`
+      UPDATE studio_post_version_assets
+      SET ordinal = ordinal + 100
+      WHERE version_id = ?
+        AND EXISTS (
+          SELECT 1 FROM studio_post_versions
+          WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
+        )
+    `).bind(
+      context.version_id,
+      context.version_id,
+      input.postId,
+      input.revision,
+    ),
+    ...input.assets.map((asset) => database.prepare(`
+      UPDATE studio_post_version_assets
+      SET ordinal = ?, alt = ?
+      WHERE version_id = ? AND asset_id = ? AND ordinal >= 100
+        AND EXISTS (
+          SELECT 1 FROM studio_post_versions
+          WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
+        )
+    `).bind(
+      asset.ordinal,
+      asset.alt,
+      context.version_id,
+      asset.assetId,
+      context.version_id,
+      input.postId,
+      input.revision,
+    )),
+    database.prepare(`
+      UPDATE studio_post_versions
+      SET revision = revision + 1, updated_at = ?
+      WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
+    `).bind(savedAt, context.version_id, input.postId, input.revision),
+  ]);
+  const revisionResult = results.at(-1);
+  if (
+    results[0]?.meta?.changes !== input.assets.length ||
+    results.slice(1, -1).some((result) => result.meta?.changes !== 1) ||
+    revisionResult?.meta?.changes !== 1
+  ) {
+    return json({ error: "revision_conflict" }, 409);
+  }
+  return json({ revision: input.revision + 1, savedAt });
+}
+
 function exactUploadFields(form: FormData) {
-  const expected = new Set(["postId", "ordinal", "alt", "file"]);
+  const expected = new Set(["postId", "revision", "ordinal", "alt", "file"]);
   const keys = [...form.keys()];
   return (
     keys.every((key) => expected.has(key)) &&
@@ -377,12 +774,15 @@ async function uploadSource(
   }
 
   const postId = form.get("postId");
+  const revisionText = form.get("revision");
   const ordinalText = form.get("ordinal");
   const alt = normalizeAlt(form.get("alt"));
   const file = form.get("file");
   if (
     typeof postId !== "string" ||
     !uuidPattern.test(postId) ||
+    typeof revisionText !== "string" ||
+    !/^\d+$/u.test(revisionText) ||
     typeof ordinalText !== "string" ||
     !/^\d$/u.test(ordinalText) ||
     !alt ||
@@ -390,13 +790,23 @@ async function uploadSource(
   ) {
     return json({ error: "invalid_upload_fields" }, 400);
   }
+  const expectedRevision = Number(revisionText);
   const ordinal = Number(ordinalText);
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+    return json({ error: "invalid_revision" }, 400);
+  }
   if (file.size < 1 || file.size > MAX_SOURCE_BYTES) {
     return json({ error: "invalid_image_size" }, file.size > MAX_SOURCE_BYTES ? 413 : 400);
   }
 
   const context = await draftContext(database, postId);
   if (!context) return json({ error: "draft_not_found" }, 404);
+  if (context.revision !== expectedRevision) {
+    return json(
+      { error: "revision_conflict", currentRevision: context.revision },
+      409,
+    );
+  }
   if (context.asset_count >= 10) return json({ error: "asset_limit" }, 409);
   if (ordinal !== context.asset_count) {
     return json({ error: "asset_order_conflict" }, 409);
@@ -427,16 +837,22 @@ async function uploadSource(
   const publicKey = `${prefix}/public/${assetId}/portfolio-v1.webp`;
   const sourceHash = await hashBytes(source);
 
-  await database.batch([
-    database.prepare(`
+  let manifest;
+  try {
+    manifest = await database.batch([
+      database.prepare(`
       INSERT INTO studio_assets (
         id, post_id, status, created_prefix, title_snapshot, width, height,
         source_mime, source_bytes, source_sha256, private_source_key,
         discord_r2_key, public_r2_key, created_at, updated_at
-      ) VALUES (?, ?, 'uploading', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      )
+      SELECT ?, post.id, 'uploading', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      FROM studio_posts AS post
+      JOIN studio_post_versions AS version ON version.id = post.draft_version_id
+      WHERE post.id = ? AND post.status IN ('draft', 'published')
+        AND version.id = ? AND version.state = 'draft' AND version.revision = ?
     `).bind(
       assetId,
-      postId,
       prefix,
       titleSnapshot(context.title),
       info.width,
@@ -449,12 +865,33 @@ async function uploadSource(
       publicKey,
       createdAtText,
       createdAtText,
+      postId,
+      context.version_id,
+      expectedRevision,
     ),
-    database.prepare(`
+      database.prepare(`
       INSERT INTO studio_post_version_assets (version_id, asset_id, ordinal, alt)
       VALUES (?, ?, ?, ?)
     `).bind(context.version_id, assetId, ordinal, alt),
-  ]);
+      database.prepare(`
+        UPDATE studio_post_versions
+        SET revision = revision + 1, updated_at = ?
+        WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
+      `).bind(createdAtText, context.version_id, postId, expectedRevision),
+    ]);
+  } catch {
+    const current = await draftContext(database, postId).catch(() => null);
+    return current && current.revision !== expectedRevision
+      ? json(
+          { error: "revision_conflict", currentRevision: current.revision },
+          409,
+        )
+      : json({ error: "asset_manifest_unavailable" }, 503);
+  }
+  if (manifest[0]?.meta?.changes !== 1 || manifest[2]?.meta?.changes !== 1) {
+    return json({ error: "revision_conflict" }, 409);
+  }
+  const revision = expectedRevision + 1;
 
   try {
     const stored = await media.put(privateSourceKey, source, {
@@ -471,11 +908,11 @@ async function uploadSource(
     });
     if (!stored || stored.key !== privateSourceKey || stored.size !== source.byteLength) {
       await markFailed(database, assetId, "asset_storage_failed");
-      return json({ error: "asset_storage_failed", assetId }, 503);
+      return json({ error: "asset_storage_failed", assetId, revision, savedAt: createdAtText }, 503);
     }
   } catch {
     await markFailed(database, assetId, "asset_storage_failed");
-    return json({ error: "asset_storage_failed", assetId }, 503);
+    return json({ error: "asset_storage_failed", assetId, revision, savedAt: createdAtText }, 503);
   }
 
   const jobId = crypto.randomUUID();
@@ -505,17 +942,17 @@ async function uploadSource(
     ]);
   } catch {
     await markFailed(database, assetId, "asset_manifest_unavailable");
-    return json({ error: "asset_manifest_unavailable", assetId }, 503);
+    return json({ error: "asset_manifest_unavailable", assetId, revision, savedAt: createdAtText }, 503);
   }
   if (queued[0]?.meta?.changes !== 1) {
-    return json({ error: "asset_manifest_unavailable", assetId }, 503);
+    return json({ error: "asset_manifest_unavailable", assetId, revision, savedAt: createdAtText }, 503);
   }
 
   try {
     await queue.send({ type: "asset_process", jobId, assetId });
   } catch {
     await markAssetQueueFailure(database, jobId, assetId, "queue_send_failed", true);
-    return json({ error: "asset_queue_unavailable", assetId, jobId }, 503);
+    return json({ error: "asset_queue_unavailable", assetId, jobId, revision, savedAt: createdAtText }, 503);
   }
 
   return json(
@@ -530,6 +967,8 @@ async function uploadSource(
       ordinal,
       alt,
       createdAt: createdAtText,
+      revision,
+      savedAt: createdAtText,
     },
     201,
   );
@@ -668,6 +1107,25 @@ export async function recordStudioAssetQueueFailure(
     assetProcessingCode(error),
     terminal,
   );
+}
+
+async function parseRevisionJson(request: Request) {
+  try {
+    const body = await request.json() as Record<string, unknown>;
+    return (
+      typeof body === "object" &&
+      body !== null &&
+      !Array.isArray(body) &&
+      Object.keys(body).length === 1 &&
+      typeof body.expectedRevision === "number" &&
+      Number.isSafeInteger(body.expectedRevision) &&
+      body.expectedRevision >= 1
+    )
+      ? body.expectedRevision
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function processStudioAssetJob(
@@ -869,22 +1327,36 @@ function detachAssetStatements(
   versionId: string,
   assetId: string,
   ordinal: number,
+  postId: string,
+  expectedRevision: number,
 ) {
   return [
     database.prepare(`
       DELETE FROM studio_post_version_assets
       WHERE version_id = ? AND asset_id = ?
-    `).bind(versionId, assetId),
+        AND EXISTS (
+          SELECT 1 FROM studio_post_versions
+          WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
+        )
+    `).bind(versionId, assetId, versionId, postId, expectedRevision),
     database.prepare(`
       UPDATE studio_post_version_assets
       SET ordinal = ordinal + 100
       WHERE version_id = ? AND ordinal > ?
-    `).bind(versionId, ordinal),
+        AND EXISTS (
+          SELECT 1 FROM studio_post_versions
+          WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
+        )
+    `).bind(versionId, ordinal, versionId, postId, expectedRevision),
     database.prepare(`
       UPDATE studio_post_version_assets
       SET ordinal = ordinal - 101
       WHERE version_id = ? AND ordinal >= 100
-    `).bind(versionId),
+        AND EXISTS (
+          SELECT 1 FROM studio_post_versions
+          WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
+        )
+    `).bind(versionId, versionId, postId, expectedRevision),
   ];
 }
 
@@ -894,10 +1366,12 @@ async function deleteAsset(
   database: StudioD1,
 ) {
   if (!uuidPattern.test(assetId)) return json({ error: "invalid_asset_id" }, 400);
-  if (!(await parseEmptyJson(request))) return json({ error: "invalid_json_object" }, 400);
+  const expectedRevision = await parseRevisionJson(request);
+  if (expectedRevision === null) return json({ error: "invalid_revision" }, 400);
 
   const asset = await database.prepare(`
-    SELECT asset.post_id, selected.version_id, selected.ordinal, asset.status,
+    SELECT asset.post_id, selected.version_id, version.revision,
+      selected.ordinal, asset.status,
       asset.created_prefix,
       asset.private_source_key, asset.discord_r2_key, asset.public_r2_key,
       CASE WHEN EXISTS (
@@ -914,15 +1388,44 @@ async function deleteAsset(
       AND version.state = 'draft'
   `).bind(assetId).first<DeletingAssetRow>();
   if (!asset) return json({ error: "asset_not_found" }, 404);
-  if (asset.retained === 1) {
-    await database.batch(
-      detachAssetStatements(database, asset.version_id, assetId, asset.ordinal),
+  if (asset.revision !== expectedRevision) {
+    return json(
+      { error: "revision_conflict", currentRevision: asset.revision },
+      409,
     );
-    return new Response(null, { status: 204 });
   }
-  const orphanedAt = new Date().toISOString();
+  const updatedAt = new Date().toISOString();
+  if (asset.retained === 1) {
+    const results = await database.batch([
+      ...detachAssetStatements(
+        database,
+        asset.version_id,
+        assetId,
+        asset.ordinal,
+        asset.post_id,
+        expectedRevision,
+      ),
+      database.prepare(`
+        UPDATE studio_post_versions
+        SET revision = revision + 1, updated_at = ?
+        WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
+      `).bind(updatedAt, asset.version_id, asset.post_id, expectedRevision),
+    ]);
+    if (results[0]?.meta?.changes !== 1 || results.at(-1)?.meta?.changes !== 1) {
+      return json({ error: "revision_conflict" }, 409);
+    }
+    return json({ revision: expectedRevision + 1, savedAt: updatedAt });
+  }
+  const orphanedAt = updatedAt;
   const results = await database.batch([
-    ...detachAssetStatements(database, asset.version_id, assetId, asset.ordinal),
+    ...detachAssetStatements(
+      database,
+      asset.version_id,
+      assetId,
+      asset.ordinal,
+      asset.post_id,
+      expectedRevision,
+    ),
     database.prepare(`
       UPDATE studio_assets
       SET status = 'orphan', orphaned_at = ?, processing_error = NULL,
@@ -946,11 +1449,20 @@ async function deleteAsset(
       WHERE asset_id = ? AND target = 'asset' AND action = 'process'
         AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
     `).bind(orphanedAt, orphanedAt, assetId),
+    database.prepare(`
+      UPDATE studio_post_versions
+      SET revision = revision + 1, updated_at = ?
+      WHERE id = ? AND post_id = ? AND state = 'draft' AND revision = ?
+    `).bind(updatedAt, asset.version_id, asset.post_id, expectedRevision),
   ]);
-  if (results[3]?.meta?.changes !== 1) {
+  if (
+    results[0]?.meta?.changes !== 1 ||
+    results[3]?.meta?.changes !== 1 ||
+    results.at(-1)?.meta?.changes !== 1
+  ) {
     return json({ error: "asset_delete_conflict" }, 409);
   }
-  return new Response(null, { status: 204 });
+  return json({ revision: expectedRevision + 1, savedAt: updatedAt });
 }
 
 function retentionDays(value: string | undefined) {
@@ -1058,13 +1570,35 @@ async function markVersionCleanupQueueFailure(
   `).bind(new Date().toISOString(), jobId).run();
 }
 
+async function parseCleanupAssetId(request: Request) {
+  try {
+    const body = await request.json() as Record<string, unknown>;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return undefined;
+    }
+    const keys = Object.keys(body);
+    if (keys.length === 0) return null;
+    return keys.length === 1 &&
+        keys[0] === "assetId" &&
+        typeof body.assetId === "string" &&
+        uuidPattern.test(body.assetId)
+      ? body.assetId
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function queueExpiredRetentionCleanup(
   request: Request,
   env: PhaseAEnv,
   database: StudioD1,
   queue: StudioQueueProducer,
 ) {
-  if (!(await parseEmptyJson(request))) return json({ error: "invalid_json_object" }, 400);
+  const requestedAssetId = await parseCleanupAssetId(request);
+  if (requestedAssetId === undefined) {
+    return json({ error: "invalid_json_object" }, 400);
+  }
   const config = cleanupConfiguration(env);
   if (!config) return json({ error: "asset_cleanup_configuration_invalid" }, 503);
   const cutoff = new Date(Date.now() - config.orphanDays * DAY_MS).toISOString();
@@ -1078,6 +1612,7 @@ async function queueExpiredRetentionCleanup(
       AND asset.orphaned_at IS NOT NULL
       AND asset.orphaned_at <= ?
       AND asset.first_published_at IS NULL
+      AND (? IS NULL OR asset.id = ?)
       AND NOT EXISTS (
         SELECT 1 FROM studio_post_version_assets WHERE asset_id = asset.id
       )
@@ -1090,12 +1625,19 @@ async function queueExpiredRetentionCleanup(
       )
     ORDER BY asset.orphaned_at ASC, asset.id ASC
     LIMIT ?
-  `).bind(cutoff, CLEANUP_BATCH_SIZE).all<CleanupCandidateRow>();
+  `).bind(
+    cutoff,
+    requestedAssetId,
+    requestedAssetId,
+    CLEANUP_BATCH_SIZE,
+  ).all<CleanupCandidateRow>();
 
   const versionCutoff = new Date(
     Date.now() - config.rollbackDays * DAY_MS,
   ).toISOString();
-  const versionRows = await database.prepare(`
+  const versionRows: { results?: VersionCleanupCandidateRow[] } = requestedAssetId
+    ? { results: [] }
+    : await database.prepare(`
     SELECT * FROM (
       SELECT version.id, version.post_id, version.superseded_at,
         cleanup.id AS job_id, cleanup.status AS job_status,
@@ -1335,6 +1877,7 @@ async function queueExpiredRetentionCleanup(
       queued,
       queueFailed,
       scanned: (assetRows.results?.length ?? 0) + (versionRows.results?.length ?? 0),
+      ...(requestedAssetId ? { requestedAssetId } : {}),
     },
     queueFailed > 0 ? 503 : 202,
   );
@@ -1871,13 +2414,20 @@ export async function handleStudioAssetRequest(
   try {
     const pathname = new URL(request.url).pathname;
     if (pathname === ASSETS_PATH) {
-      if (request.method === "GET") return listAssets(request, database);
+      if (request.method === "GET") {
+        return new URL(request.url).searchParams.get("view") === "media"
+          ? listMedia(request, env, database)
+          : listAssets(request, database);
+      }
       if (request.method === "POST") {
         return uploadSource(request, database, media, images, queue);
       }
+      if (request.method === "PATCH") {
+        return updateAssetManifest(request, database);
+      }
       return new Response("Method not allowed", {
         status: 405,
-        headers: { allow: "GET, POST" },
+        headers: { allow: "GET, POST, PATCH" },
       });
     }
 
@@ -1891,9 +2441,19 @@ export async function handleStudioAssetRequest(
       });
     }
 
-    const assetId = pathname.slice(`${ASSETS_PATH}/`.length);
-    if (!assetId || assetId.includes("/")) {
+    const remainder = pathname.slice(`${ASSETS_PATH}/`.length);
+    const [assetId, action, ...extra] = remainder.split("/");
+    if (!assetId || extra.length > 0 || (action && action !== "preview")) {
       return json({ error: "asset_not_found" }, 404);
+    }
+    if (action === "preview") {
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", {
+          status: 405,
+          headers: { allow: "GET" },
+        });
+      }
+      return previewAsset(request, assetId, database, media);
     }
     if (request.method === "POST") {
       return retryAsset(request, assetId, database, queue);

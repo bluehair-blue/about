@@ -110,6 +110,7 @@ function activeTopicInsert(
   versionId: string,
   topic: string,
   condition?: { postId: string; revision: number; sourceHash: string },
+  retainArchived = false,
 ) {
   if (!condition) {
     return database.prepare(`
@@ -127,7 +128,8 @@ function activeTopicInsert(
     SELECT ?, (
       SELECT id
       FROM studio_taxonomy
-      WHERE dimension = 'topic' AND stable_key = ? AND status = 'active'
+      WHERE dimension = 'topic' AND stable_key = ?
+        AND (status = 'active' OR (status = 'archived' AND ? = 1))
     )
     WHERE EXISTS (
       SELECT 1
@@ -138,6 +140,7 @@ function activeTopicInsert(
   `).bind(
     versionId,
     topic,
+    retainArchived ? 1 : 0,
     versionId,
     condition.postId,
     condition.revision,
@@ -209,6 +212,15 @@ export async function saveDraftRevisionCas(
   if (!pointer) return { outcome: "not_found" };
 
   const versionId = pointer.draft_version_id;
+  const existingTopics = await database.prepare(`
+    SELECT taxonomy.stable_key
+    FROM studio_post_version_topics AS selected
+    JOIN studio_taxonomy AS taxonomy ON taxonomy.id = selected.taxonomy_id
+    WHERE selected.version_id = ? AND taxonomy.dimension = 'topic'
+  `).bind(versionId).all<{ stable_key: string }>();
+  const retainedTopicKeys = new Set(
+    (existingTopics.results ?? []).map(({ stable_key }) => stable_key),
+  );
   const sourceHash = await draftHash(content);
   const statements: StudioD1Statement[] = [
     database.prepare(`
@@ -261,7 +273,7 @@ export async function saveDraftRevisionCas(
         postId,
         revision: expectedRevision + 1,
         sourceHash,
-      })
+      }, retainedTopicKeys.has(topic))
     ),
     database.prepare(`
       UPDATE studio_posts

@@ -9,6 +9,9 @@ type DeliveryStatus = {
   postStatus: string;
   mode: "create" | "update";
   threadId: string | null;
+  hasCurrentVersion: boolean;
+  discordDeliveryState: string | null;
+  discordCheckedAt: string | null;
   remoteHash: string | null;
   assets: {
     count: number;
@@ -42,13 +45,27 @@ function isDeliveryStatus(value: unknown): value is DeliveryStatus {
     typeof status.postStatus === "string" &&
     (status.mode === "create" || status.mode === "update") &&
     (status.threadId === null || typeof status.threadId === "string") &&
+    typeof status.hasCurrentVersion === "boolean" &&
+    (status.discordDeliveryState === null || typeof status.discordDeliveryState === "string") &&
+    (status.discordCheckedAt === null || typeof status.discordCheckedAt === "string") &&
     typeof assets === "object" && assets !== null &&
     typeof (assets as Record<string, unknown>).count === "number" &&
     typeof (assets as Record<string, unknown>).notReadyCount === "number" &&
     typeof (assets as Record<string, unknown>).discordBytes === "number" &&
     typeof status.budgetBytes === "number" &&
     typeof status.canPublish === "boolean" &&
-    typeof status.canDelete === "boolean";
+    typeof status.canDelete === "boolean" &&
+    (status.latestJob === null || (
+      typeof status.latestJob === "object" &&
+      status.latestJob !== null &&
+      typeof (status.latestJob as Record<string, unknown>).jobId === "string" &&
+      typeof (status.latestJob as Record<string, unknown>).action === "string" &&
+      typeof (status.latestJob as Record<string, unknown>).status === "string" &&
+      typeof (status.latestJob as Record<string, unknown>).attempts === "number" &&
+      ((status.latestJob as Record<string, unknown>).error === null ||
+        typeof (status.latestJob as Record<string, unknown>).error === "string") &&
+      typeof (status.latestJob as Record<string, unknown>).updatedAt === "string"
+    ));
 }
 
 function active(status: DeliveryStatus | null) {
@@ -56,6 +73,28 @@ function active(status: DeliveryStatus | null) {
     ["queued", "processing", "retrying", "verifying", "finalizing"].includes(
       status.latestJob.status,
     );
+}
+
+function timeLabel(value: string | null | undefined) {
+  if (!value) return "확인 시각 없음";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf())
+    ? "확인 시각 없음"
+    : `${date.toLocaleString("ko-KR")} 확인`;
+}
+
+function errorLabel(value: string | null | undefined) {
+  if (!value) return "원인 없음";
+  const labels: Record<string, string> = {
+    queue_send_failed: "Queue 등록 실패",
+    discord_rate_limited: "Discord 요청 제한",
+    discord_create_failed: "Discord 생성 실패",
+    discord_update_failed: "Discord 수정 실패",
+    discord_delete_failed: "Discord 삭제 실패",
+    remote_verification_failed: "fresh remote 재확인 실패",
+    finalization_failed: "D1 finalization 실패",
+  };
+  return labels[value] ?? value;
 }
 
 export function DeliveryControls({
@@ -68,7 +107,9 @@ export function DeliveryControls({
   const [delivery, setDelivery] = useState<DeliveryStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const currentDelivery = delivery?.postId === postId ? delivery : null;
+  const [freshPostId, setFreshPostId] = useState("");
+  const shownDelivery = delivery?.postId === postId ? delivery : null;
+  const currentDelivery = freshPostId === postId ? shownDelivery : null;
 
   const load = useCallback(async (targetPostId: string) => {
     const response = await fetch(
@@ -80,6 +121,7 @@ export function DeliveryControls({
       throw new Error("Delivery status load failed");
     }
     setDelivery(result);
+    setFreshPostId(targetPostId);
     return result;
   }, []);
 
@@ -99,7 +141,10 @@ export function DeliveryControls({
           timer = window.setTimeout(refresh, 2_000);
         }
       } catch {
-        if (!stopped) setMessage("전달 상태를 불러오지 못했습니다.");
+        if (!stopped) {
+          setFreshPostId("");
+          setMessage("전달 상태를 불러오지 못했습니다 · 이전 표시는 오래된 상태이며 action을 막았습니다.");
+        }
       }
     };
     const handleStateChanged = () => {
@@ -169,14 +214,14 @@ export function DeliveryControls({
   }
 
   const retryable = currentDelivery?.latestJob &&
-    ["queue_failed", "retrying", "failed"].includes(currentDelivery.latestJob.status);
-  const outcomeUnknown = currentDelivery?.latestJob?.status === "outcome_unknown";
+    ["queue_failed", "retrying", "failed", "finalizing"].includes(currentDelivery.latestJob.status);
+  const outcomeUnknown = shownDelivery?.latestJob?.status === "outcome_unknown";
 
   return (
     <section className={styles.card} aria-labelledby="delivery-heading">
       <div className={styles.sectionHeading}>
         <div>
-          <p className={styles.step}>03</p>
+          <p className={styles.step}>04</p>
           <h2 id="delivery-heading">Discord Forum 전달</h2>
         </div>
         <p>Queue · exact mapping · read-after-write</p>
@@ -185,27 +230,54 @@ export function DeliveryControls({
       <dl className={styles.deliveryFacts}>
         <div>
           <dt>상태</dt>
-          <dd>{currentDelivery?.postStatus ?? "초안 저장 대기"}</dd>
+          <dd>{shownDelivery?.postStatus ?? "초안 저장 대기"}</dd>
         </div>
         <div>
           <dt>작업</dt>
-          <dd>{currentDelivery?.mode === "update" ? "같은 thread 수정" : "새 thread 생성"}</dd>
+          <dd>{shownDelivery?.mode === "update" ? "같은 thread 수정" : "새 thread 생성"}</dd>
         </div>
         <div>
           <dt>Discord 파생본</dt>
           <dd>
-            {currentDelivery
-              ? `${currentDelivery.assets.count}장 · ${byteLabel(currentDelivery.assets.discordBytes)} / ${byteLabel(currentDelivery.budgetBytes)}`
+            {shownDelivery
+              ? `${shownDelivery.assets.count}장 · ${byteLabel(shownDelivery.assets.discordBytes)} / ${byteLabel(shownDelivery.budgetBytes)}`
               : "—"}
           </dd>
         </div>
         <div>
           <dt>최근 job</dt>
           <dd>
-            {currentDelivery?.latestJob
-              ? `${currentDelivery.latestJob.action} · ${currentDelivery.latestJob.status} · ${currentDelivery.latestJob.attempts}회`
+            {shownDelivery?.latestJob
+              ? `${shownDelivery.latestJob.action} · ${shownDelivery.latestJob.status} · ${shownDelivery.latestJob.attempts}회`
               : "없음"}
           </dd>
+        </div>
+        <div>
+          <dt>Portfolio</dt>
+          <dd>
+            {shownDelivery?.postStatus === "published" && shownDelivery.hasCurrentVersion
+              ? "승인 current 공개됨"
+              : shownDelivery?.postStatus === "withheld"
+              ? "공개 차단 · 원격 대조 필요"
+              : shownDelivery?.hasCurrentVersion
+              ? "current 보존 · 현재 비공개"
+              : "공개 전"}
+          </dd>
+        </div>
+        <div>
+          <dt>Discord</dt>
+          <dd>
+            {shownDelivery?.threadId ? "thread 연결됨" : "thread mapping 없음"}
+            {shownDelivery?.discordDeliveryState ? ` · ${shownDelivery.discordDeliveryState}` : ""}
+          </dd>
+        </div>
+        <div>
+          <dt>원인</dt>
+          <dd>{errorLabel(shownDelivery?.latestJob?.error)}</dd>
+        </div>
+        <div>
+          <dt>마지막 확인</dt>
+          <dd>{timeLabel(shownDelivery?.discordCheckedAt ?? shownDelivery?.latestJob?.updatedAt)}</dd>
         </div>
       </dl>
 
@@ -217,31 +289,38 @@ export function DeliveryControls({
       {message ? <p className={styles.assetMessage} role="status">{message}</p> : null}
 
       <div className={styles.deliveryButtons}>
-        <button
-          type="button"
-          disabled={!postId || disabled || busy || !currentDelivery?.canPublish || Boolean(active(currentDelivery))}
-          onClick={() => void submit("publish")}
-        >
-          {busy
-            ? "요청 중…"
-            : currentDelivery?.mode === "update"
-            ? "같은 thread 수정"
-            : "BOT TEST에 게시"}
-        </button>
         {retryable ? (
           <button type="button" disabled={busy} onClick={() => void submit("retry")}>
-            같은 job 재시도
+            {currentDelivery.latestJob?.status === "finalizing"
+              ? "Discord 재전송 없이 D1 반영 재시도"
+              : "같은 job 재시도"}
           </button>
         ) : null}
-        <button
-          type="button"
-          className={styles.dangerButton}
-          disabled={disabled || busy || !currentDelivery?.canDelete || Boolean(active(currentDelivery))}
-          onClick={() => void submit("delete")}
-        >
-          Forum thread 삭제
-        </button>
       </div>
+      <details className={styles.deliveryActions}>
+        <summary>게시·Forum 작업</summary>
+        <div className={styles.deliveryButtons}>
+          <button
+            type="button"
+            disabled={!postId || disabled || busy || !currentDelivery?.canPublish || Boolean(active(currentDelivery))}
+            onClick={() => void submit("publish")}
+          >
+            {busy
+              ? "요청 중…"
+              : currentDelivery?.mode === "update"
+              ? "같은 thread 수정"
+              : "BOT TEST에 게시"}
+          </button>
+          <button
+            type="button"
+            className={styles.dangerButton}
+            disabled={disabled || busy || !currentDelivery?.canDelete || Boolean(active(currentDelivery))}
+            onClick={() => void submit("delete")}
+          >
+            Forum thread 삭제
+          </button>
+        </div>
+      </details>
     </section>
   );
 }

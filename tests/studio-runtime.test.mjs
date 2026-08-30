@@ -72,7 +72,8 @@ test("keeps Studio task switches on stable URLs until draft and source receipts 
 
   assert.match(editor, /window\.history\.replaceState\([\s\S]*?\/studio\/posts\//);
   assert.match(editor, /window\.addEventListener\("beforeunload"/);
-  assert.match(editor, /const saved = await saveCurrent\(\)/);
+  assert.match(editor, /const initialDraftSaved = await saveCurrent\(\)/);
+  assert.match(editor, /assetManifestFlushRef\.current/);
   assert.match(editor, /pendingUploadCountRef\.current/);
   assert.match(editor, /window\.location\.assign\(target\)/);
   assert.match(editor, /<dialog/);
@@ -80,8 +81,8 @@ test("keeps Studio task switches on stable URLs until draft and source receipts 
   assert.match(editor, />\s*현재 화면 유지\s*</);
   assert.match(editor, />\s*변경 내용 복사\s*</);
   assert.doesNotMatch(editor, /저장하지 않고 이동|변경 내용 버리기/);
-  assert.match(uploader, /result\.error === "asset_storage_failed"/);
-  assert.match(uploader, /failedAssetId: result\.assetId/);
+  assert.match(uploader, /responseError === "asset_storage_failed"/);
+  assert.match(uploader, /failedAssetId: responseAssetId/);
   assert.match(uploader, /receiptUnknown: submitted \|\| undefined/);
   assert.match(uploader, /asset\.status === "uploading"/);
   assert.match(uploader, /asset\.processingError === "asset_storage_failed"/);
@@ -89,6 +90,68 @@ test("keeps Studio task switches on stable URLs until draft and source receipts 
   assert.match(list, /"all" \| "working" \| "attention"/);
   assert.match(list, /\/studio\/posts\/new/);
   assert.match(list, /작업 재개/);
+});
+
+test("keeps the Phase B Studio UI on canonical Markdown, taxonomy, Media, and surface contracts", () => {
+  const editor = readFileSync(
+    new URL("../app/studio/draft-editor.tsx", import.meta.url),
+    "utf8",
+  );
+  const preview = readFileSync(
+    new URL("../app/studio/surface-preview.tsx", import.meta.url),
+    "utf8",
+  );
+  const uploader = readFileSync(
+    new URL("../app/studio/image-uploader.tsx", import.meta.url),
+    "utf8",
+  );
+  const taxonomy = readFileSync(
+    new URL("../app/studio/taxonomy-controls.tsx", import.meta.url),
+    "utf8",
+  );
+  const media = readFileSync(
+    new URL("../app/studio/media-library.tsx", import.meta.url),
+    "utf8",
+  );
+  const list = readFileSync(
+    new URL("../app/studio/draft-list.tsx", import.meta.url),
+    "utf8",
+  );
+  const delivery = readFileSync(
+    new URL("../app/studio/delivery-controls.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(editor, /validateStudioMarkdown/);
+  assert.match(editor, /textarea\.setRangeText/);
+  assert.match(editor, /role="toolbar"/);
+  assert.match(editor, />굵게</);
+  assert.match(editor, />link</);
+  assert.match(preview, /Portfolio/);
+  assert.match(preview, /Discord Forum starter/);
+  assert.match(preview, /surface=portfolio/);
+  assert.match(preview, /surface=discord/);
+  assert.doesNotMatch(preview, /dangerouslySetInnerHTML/);
+
+  assert.match(taxonomy, /fetch\("\/studio\/api\/taxonomy"/);
+  assert.match(taxonomy, /const displayedTopics = result \? activeTopics : fallbackTopics/);
+  assert.match(taxonomy, /<details/);
+  assert.match(uploader, /method: "PATCH"/);
+  assert.match(uploader, /draggable=/);
+  assert.match(uploader, /window\.setTimeout\(\(\) => void saveManifest\(\), 1_500\)/);
+  assert.match(uploader, />\s*위\s*</);
+  assert.match(uploader, />\s*아래\s*</);
+
+  assert.match(media, /new URLSearchParams\(\{ view: "media" \}\)/);
+  assert.match(media, /소유 post 편집기/);
+  assert.match(media, /JSON\.stringify\(\{ assetId: item\.assetId \}\)/);
+  assert.match(media, /마지막 확인/);
+  assert.match(list, /Portfolio/);
+  assert.match(list, /Discord/);
+  assert.match(list, /href="\/studio\/media"/);
+  assert.match(delivery, /오래된 상태이며 action을 막았습니다/);
+  assert.match(delivery, /Discord 재전송 없이 D1 반영 재시도/);
+  assert.match(delivery, /<details/);
 });
 
 class SqliteD1Statement {
@@ -626,6 +689,7 @@ async function createDraftFixture(request, title = "이미지 원본") {
 function sourceUpload(postId, ordinal, bytes, options = {}) {
   const form = new FormData();
   form.set("postId", postId);
+  form.set("revision", String(options.revision ?? 1));
   form.set("ordinal", String(ordinal));
   form.set("alt", options.alt ?? "푸른 머리 캐릭터 테스트 이미지");
   form.set(
@@ -656,7 +720,7 @@ function studioJsonWrite(body) {
   };
 }
 
-function deleteSource(assetId) {
+function deleteSource(assetId, expectedRevision) {
   return {
     pathname: `/studio/api/assets/${assetId}`,
     init: {
@@ -666,7 +730,7 @@ function deleteSource(assetId) {
         origin: "https://staging.example",
         "x-studio-request": "1",
       },
-      body: "{}",
+      body: JSON.stringify({ expectedRevision }),
     },
   };
 }
@@ -1388,6 +1452,46 @@ test("adds, renames, reorders, and archives one canonical Forum taxonomy", async
       1,
     );
 
+    const savedWithArchivedTopic = await request(
+      "/studio/api/drafts",
+      studioJsonWrite({
+        postId: draft.postId,
+        revision: draft.revision,
+        title: "동적 taxonomy 초안 수정",
+        body: "이미 선택한 보관 topic은 같은 draft에서 계속 저장할 수 있습니다.",
+        kind: "work",
+        topics: ["music"],
+      }),
+    );
+    assert.equal(savedWithArchivedTopic.status, 200);
+    const kept = await savedWithArchivedTopic.json();
+    const withoutArchivedTopic = await request(
+      "/studio/api/drafts",
+      studioJsonWrite({
+        postId: draft.postId,
+        revision: kept.revision,
+        title: "동적 taxonomy 초안 수정",
+        body: "보관 topic 선택을 해제합니다.",
+        kind: "work",
+        topics: [],
+      }),
+    );
+    assert.equal(withoutArchivedTopic.status, 200);
+    const removed = await withoutArchivedTopic.json();
+    const reselectArchivedTopic = await request(
+      "/studio/api/drafts",
+      studioJsonWrite({
+        postId: draft.postId,
+        revision: removed.revision,
+        title: "동적 taxonomy 초안 수정",
+        body: "해제한 보관 topic을 다시 선택할 수는 없습니다.",
+        kind: "work",
+        topics: ["music"],
+      }),
+    );
+    assert.equal(reselectArchivedTopic.status, 409);
+    assert.deepEqual(await reselectArchivedTopic.json(), { error: "invalid_topics" });
+
     const archivedDraft = await request(
       "/studio/api/drafts",
       studioJsonWrite({
@@ -1570,6 +1674,200 @@ test("recovers a taxonomy outbox after Queue failure and Discord rate limiting",
   }
 });
 
+test("reorders the revisioned image manifest and exposes safe Studio Media previews", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const media = new MemoryR2();
+  const images = new FakeImages();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: media,
+    IMAGES: images,
+    PUBLISH_QUEUE: queue,
+  });
+  const keys = await accessKeys();
+  const request = studioRequester(worker, env, keys, await keys.token());
+  const originalFetch = globalThis.fetch;
+
+  try {
+    const draft = await createDraftFixture(request, "Media 검색 fixture");
+    const firstResponse = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng, {
+        alt: "첫 번째 alt",
+        revision: 1,
+      }),
+    );
+    assert.equal(firstResponse.status, 201);
+    const first = await firstResponse.json();
+    const secondResponse = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 1, staticPng, {
+        alt: "두 번째 alt",
+        revision: first.revision,
+      }),
+    );
+    assert.equal(secondResponse.status, 201);
+    const second = await secondResponse.json();
+    assert.equal(second.revision, 3);
+
+    for (const body of queue.messages.splice(0)) {
+      const message = queueMessage(body);
+      await worker.queue({ messages: [message] }, env);
+      assert.equal(message.acked, true);
+    }
+
+    const manifestBody = {
+      postId: draft.postId,
+      revision: second.revision,
+      assets: [
+        { assetId: second.assetId, ordinal: 0, alt: "앞으로 이동한 두 번째 alt" },
+        { assetId: first.assetId, ordinal: 1, alt: "뒤로 이동한 첫 번째 alt" },
+      ],
+    };
+    const reordered = await request("/studio/api/assets", {
+      ...studioJsonWrite(manifestBody),
+      method: "PATCH",
+    });
+    assert.equal(reordered.status, 200);
+    const reorderedBody = await reordered.json();
+    assert.equal(reorderedBody.revision, 4);
+
+    const listed = await request(`/studio/api/assets?postId=${draft.postId}`);
+    assert.equal(listed.status, 200);
+    const listedBody = await listed.json();
+    assert.equal(listedBody.revision, 4);
+    assert.deepEqual(
+      listedBody.assets.map(({ assetId, ordinal, alt, status }) => ({
+        assetId,
+        ordinal,
+        alt,
+        status,
+      })),
+      [
+        {
+          assetId: second.assetId,
+          ordinal: 0,
+          alt: "앞으로 이동한 두 번째 alt",
+          status: "ready",
+        },
+        {
+          assetId: first.assetId,
+          ordinal: 1,
+          alt: "뒤로 이동한 첫 번째 alt",
+          status: "ready",
+        },
+      ],
+    );
+
+    const stale = await request("/studio/api/assets", {
+      ...studioJsonWrite(manifestBody),
+      method: "PATCH",
+    });
+    assert.equal(stale.status, 409);
+    assert.deepEqual(await stale.json(), {
+      error: "revision_conflict",
+      currentRevision: 4,
+    });
+    const incomplete = await request("/studio/api/assets", {
+      ...studioJsonWrite({
+        postId: draft.postId,
+        revision: 4,
+        assets: [{ assetId: second.assetId, ordinal: 0, alt: "한 장만 전송" }],
+      }),
+      method: "PATCH",
+    });
+    assert.equal(incomplete.status, 409);
+    assert.deepEqual(await incomplete.json(), { error: "asset_manifest_conflict" });
+
+    for (const assetId of [first.assetId, second.assetId]) {
+      const portfolioPreview = await request(
+        `/studio/api/assets/${assetId}/preview?surface=portfolio`,
+      );
+      assert.equal(portfolioPreview.status, 200);
+      assert.equal(portfolioPreview.headers.get("content-type"), "image/webp");
+      assert.equal(portfolioPreview.headers.get("cache-control"), "private, no-store");
+      assert.equal(portfolioPreview.headers.get("x-content-type-options"), "nosniff");
+      assert.equal(portfolioPreview.headers.get("x-studio-preview-source"), "derivative");
+      assert.ok((await portfolioPreview.arrayBuffer()).byteLength > 0);
+    }
+
+    const mediaResponse = await request(
+      `/studio/api/assets?view=media&q=${encodeURIComponent("Media 검색")}&status=ready`,
+    );
+    assert.equal(mediaResponse.status, 200);
+    const mediaBody = await mediaResponse.json();
+    assert.equal(mediaBody.total, 2);
+    assert.equal(mediaBody.items.length, 2);
+    assert.equal(mediaBody.retention.orphanDays, 7);
+    assert.equal(mediaBody.retention.cleanupAvailable, true);
+    assert.deepEqual(
+      [...mediaBody.items.map(({ assetId }) => assetId)].sort(),
+      [first.assetId, second.assetId].sort(),
+    );
+    assert.ok(mediaBody.items.every((item) =>
+      item.currentPostTitle === "Media 검색 fixture" &&
+      item.sourceBytes === staticPng.byteLength &&
+      item.publicBytes > 0 &&
+      item.discordBytes > 0 &&
+      item.cleanupEligible === false
+    ));
+
+    const invalidDate = await request(
+      "/studio/api/assets?view=media&from=2026-02-30",
+    );
+    assert.equal(invalidDate.status, 400);
+    assert.deepEqual(await invalidDate.json(), { error: "invalid_media_filter" });
+
+    const detached = deleteSource(first.assetId, reorderedBody.revision);
+    const detachedResponse = await request(detached.pathname, detached.init);
+    assert.equal(detachedResponse.status, 200);
+    assert.equal((await detachedResponse.json()).revision, 5);
+    const orphanedAt = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString();
+    database.database.prepare(`
+      UPDATE studio_assets SET orphaned_at = ? WHERE id = ?
+    `).run(orphanedAt, first.assetId);
+
+    const orphanMedia = await request(
+      `/studio/api/assets?view=media&q=${encodeURIComponent("Media 검색")}&status=orphan`,
+    );
+    assert.equal(orphanMedia.status, 200);
+    const orphanBody = await orphanMedia.json();
+    assert.equal(orphanBody.total, 1);
+    assert.equal(orphanBody.retention.eligibleOrphanCount, 1);
+    assert.equal(orphanBody.items[0].assetId, first.assetId);
+    assert.equal(orphanBody.items[0].cleanupEligible, true);
+    assert.equal(orphanBody.items[0].referenceCount, 0);
+    assert.equal(
+      orphanBody.retention.nextCleanupAt,
+      new Date(Date.parse(orphanedAt) + 7 * 24 * 60 * 60 * 1_000).toISOString(),
+    );
+
+    const cleanup = await request(
+      "/studio/api/assets/cleanup",
+      studioJsonWrite({ assetId: first.assetId }),
+    );
+    assert.equal(cleanup.status, 202);
+    assert.deepEqual(await cleanup.json(), {
+      queued: 1,
+      queueFailed: 0,
+      scanned: 1,
+      requestedAssetId: first.assetId,
+    });
+    const cleanupMessage = queue.messages.shift();
+    assert.deepEqual(cleanupMessage, {
+      type: "asset_cleanup",
+      jobId: cleanupMessage.jobId,
+      assetId: first.assetId,
+    });
+    assert.equal(queue.messages.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
 test("retains orphan sources, then verifies exact cleanup and cache purge", async () => {
   const worker = await loadWorker();
   const database = new SqliteD1();
@@ -1597,7 +1895,7 @@ test("retains orphan sources, then verifies exact cleanup and cache purge", asyn
     const draft = await createDraftFixture(request);
     const empty = await request(`/studio/api/assets?postId=${draft.postId}`);
     assert.equal(empty.status, 200);
-    assert.deepEqual(await empty.json(), { assets: [] });
+    assert.deepEqual(await empty.json(), { assets: [], revision: 1 });
 
     const firstResponse = await request(
       "/studio/api/assets",
@@ -1609,6 +1907,7 @@ test("retains orphan sources, then verifies exact cleanup and cache purge", asyn
     assert.equal(first.sourceMime, "image/png");
     assert.equal(first.sourceBytes, staticPng.byteLength);
     assert.equal(first.ordinal, 0);
+    assert.equal(first.revision, 2);
 
     const row = database.database.prepare(`
       SELECT * FROM studio_assets WHERE id = ?
@@ -1656,7 +1955,10 @@ test("retains orphan sources, then verifies exact cleanup and cache purge", asyn
 
     const secondResponse = await request(
       "/studio/api/assets",
-      sourceUpload(draft.postId, 1, staticPng, { alt: "두 번째 이미지" }),
+      sourceUpload(draft.postId, 1, staticPng, {
+        alt: "두 번째 이미지",
+        revision: 2,
+      }),
     );
     assert.equal(secondResponse.status, 201);
     const second = await secondResponse.json();
@@ -1695,9 +1997,10 @@ test("retains orphan sources, then verifies exact cleanup and cache purge", asyn
       assert.equal(message.acked, true);
     }
 
-    const firstDelete = deleteSource(first.assetId);
+    const firstDelete = deleteSource(first.assetId, 3);
     const deleted = await request(firstDelete.pathname, firstDelete.init);
-    assert.equal(deleted.status, 204);
+    assert.equal(deleted.status, 200);
+    assert.equal((await deleted.json()).revision, 4);
     assert.equal(media.deleteCalls.length, 0);
     const orphan = database.database.prepare(`
       SELECT status, orphaned_at FROM studio_assets WHERE id = ?
@@ -1793,9 +2096,10 @@ test("retains orphan sources, then verifies exact cleanup and cache purge", asyn
       `https://staging.example/media/${first.assetId}/portfolio-v1.webp`,
     ]);
 
-    const secondDelete = deleteSource(second.assetId);
+    const secondDelete = deleteSource(second.assetId, 4);
     const secondOrphaned = await request(secondDelete.pathname, secondDelete.init);
-    assert.equal(secondOrphaned.status, 204);
+    assert.equal(secondOrphaned.status, 200);
+    assert.equal((await secondOrphaned.json()).revision, 5);
     database.database.prepare(`
       UPDATE studio_assets SET orphaned_at = ? WHERE id = ?
     `).run(new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString(), second.assetId);
@@ -2223,9 +2527,10 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
       /^\d{4}-\d{2}-\d{2}T/u,
     );
 
-    const detach = deleteSource(firstAsset.assetId);
+    const detach = deleteSource(firstAsset.assetId, 2);
     const detached = await request(detach.pathname, detach.init);
-    assert.equal(detached.status, 204);
+    assert.equal(detached.status, 200);
+    assert.equal((await detached.json()).revision, 3);
     assert.equal(
       database.database.prepare("SELECT status FROM studio_assets WHERE id = ?")
         .get(firstAsset.assetId).status,
@@ -2237,7 +2542,7 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
       "/studio/api/drafts",
       jsonWrite({
         postId: draft.postId,
-        revision: 1,
+        revision: 3,
         title: "수정된 Forum fixture",
         body: "attachment와 tag를 모두 교체했습니다.",
         kind: "update",
@@ -2248,7 +2553,10 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
 
     const secondUpload = await request(
       "/studio/api/assets",
-      sourceUpload(draft.postId, 0, staticPng, { alt: "교체 attachment" }),
+      sourceUpload(draft.postId, 0, staticPng, {
+        alt: "교체 attachment",
+        revision: 4,
+      }),
     );
     const secondAsset = await secondUpload.json();
     const secondAssetMessage = queueMessage(queue.messages.shift());

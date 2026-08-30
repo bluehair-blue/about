@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ChangeEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+} from "react";
 
 import { assetStatuses, type AssetStatus } from "../../db/schema";
 import styles from "./studio.module.css";
@@ -20,6 +27,12 @@ type Asset = {
   alt: string;
   processingError: string | null;
   createdAt: string;
+  updatedAt: string;
+};
+
+type AssetListResult = {
+  assets: Asset[];
+  revision: number;
 };
 
 type PendingFile = {
@@ -51,7 +64,8 @@ function isAsset(value: unknown): value is Asset {
     typeof asset.ordinal === "number" &&
     typeof asset.alt === "string" &&
     (asset.processingError === null || typeof asset.processingError === "string") &&
-    typeof asset.createdAt === "string"
+    typeof asset.createdAt === "string" &&
+    typeof asset.updatedAt === "string"
   );
 }
 
@@ -66,11 +80,14 @@ async function requestAssets(postId: string) {
     typeof result !== "object" ||
     result === null ||
     !Array.isArray((result as { assets?: unknown }).assets) ||
-    !(result as { assets: unknown[] }).assets.every(isAsset)
+    !(result as { assets: unknown[] }).assets.every(isAsset) ||
+    typeof (result as { revision?: unknown }).revision !== "number" ||
+    !Number.isSafeInteger((result as { revision: number }).revision) ||
+    (result as { revision: number }).revision < 1
   ) {
     throw new Error("Asset load failed");
   }
-  return (result as { assets: Asset[] }).assets;
+  return result as AssetListResult;
 }
 
 function altIsValid(value: string) {
@@ -107,14 +124,46 @@ function statusLabel(asset: Asset) {
   }
 }
 
+function checkedTime(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf())
+    ? "확인 시각 없음"
+    : `${date.toLocaleString("ko-KR")} 확인`;
+}
+
+function isRevisionResult(value: unknown): value is { revision: number; savedAt: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const result = value as Record<string, unknown>;
+  return (
+    typeof result.revision === "number" &&
+    Number.isSafeInteger(result.revision) &&
+    result.revision >= 1 &&
+    typeof result.savedAt === "string"
+  );
+}
+
 export function ImageUploader({
   postId,
   disabled,
   onPendingChange,
+  getRevision,
+  onRevisionChange,
+  onRevisionConflict,
+  onManifestPendingChange,
+  onManifestSavingChange,
+  onRegisterManifestFlush,
 }: {
   postId: string | null;
   disabled: boolean;
   onPendingChange: (count: number, checked: boolean) => void;
+  getRevision: () => number;
+  onRevisionChange: (revision: number, savedAt: string) => void;
+  onRevisionConflict: () => void;
+  onManifestPendingChange: (pending: boolean) => void;
+  onManifestSavingChange: (saving: boolean) => void;
+  onRegisterManifestFlush: (flush: (() => Promise<boolean>) | null) => void;
 }) {
   const [loaded, setLoaded] = useState<{ postId: string; assets: Asset[] } | null>(
     null,
@@ -122,6 +171,13 @@ export function ImageUploader({
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [busyId, setBusyId] = useState("");
   const [status, setStatus] = useState("");
+  const [manifestDirty, setManifestDirty] = useState(false);
+  const [manifestPending, setManifestPending] = useState(false);
+  const [draggingId, setDraggingId] = useState("");
+  const manifestDirtyRef = useRef(false);
+  const manifestChangeIdRef = useRef(0);
+  const manifestSavePromiseRef = useRef<Promise<boolean> | null>(null);
+  const loadedRef = useRef(loaded);
   const assets = loaded?.postId === postId ? loaded.assets : [];
   const unacceptedCount = pendingFiles.length + assets.filter((asset) =>
     asset.status === "uploading" ||
@@ -130,12 +186,16 @@ export function ImageUploader({
   const receiptChecked = postId === null || loaded?.postId === postId;
 
   useEffect(() => {
+    loadedRef.current = loaded;
+  }, [loaded]);
+
+  useEffect(() => {
     onPendingChange(unacceptedCount, receiptChecked);
   }, [onPendingChange, receiptChecked, unacceptedCount]);
 
   const loadAssets = useCallback(async (targetPostId: string) => {
     const next = await requestAssets(targetPostId);
-    setLoaded({ postId: targetPostId, assets: next });
+    setLoaded({ postId: targetPostId, assets: next.assets });
     return next;
   }, []);
 
@@ -147,11 +207,13 @@ export function ImageUploader({
       try {
         const next = await requestAssets(postId);
         if (!active) return;
-        setLoaded({ postId, assets: next });
+        if (!manifestDirtyRef.current && !manifestSavePromiseRef.current) {
+          setLoaded({ postId, assets: next.assets });
+        }
         setStatus((current) =>
           current === "이미지 목록을 불러오지 못했습니다." ? "" : current
         );
-        if (next.some((asset) => asset.status === "processing" || asset.status === "uploading")) {
+        if (next.assets.some((asset) => asset.status === "processing" || asset.status === "uploading")) {
           timer = window.setTimeout(refresh, 2_000);
         }
       } catch {
@@ -170,6 +232,99 @@ export function ImageUploader({
       window.removeEventListener("studio-state-changed", handleStateChanged);
     };
   }, [postId]);
+
+  function editManifest(change: (current: Asset[]) => Asset[]) {
+    if (!postId || disabled || manifestPending || busyId) return;
+    const current = loadedRef.current?.postId === postId
+      ? loadedRef.current.assets
+      : [];
+    const next = change(current).map((asset, ordinal) => ({ ...asset, ordinal }));
+    const nextLoaded = { postId, assets: next };
+    loadedRef.current = nextLoaded;
+    setLoaded(nextLoaded);
+    manifestDirtyRef.current = true;
+    manifestChangeIdRef.current += 1;
+    setManifestDirty(true);
+    onManifestPendingChange(true);
+    setStatus("alt·순서 변경됨 · 1.5초 후 자동 저장");
+  }
+
+  const saveManifest = useCallback(function saveAssetManifest(): Promise<boolean> {
+    if (manifestSavePromiseRef.current) return manifestSavePromiseRef.current;
+    if (!manifestDirtyRef.current) return Promise.resolve(true);
+    if (!postId) return Promise.resolve(false);
+
+    const cycle = (async () => {
+      setManifestPending(true);
+      onManifestSavingChange(true);
+      try {
+        do {
+          const current = loadedRef.current;
+          if (!current || current.postId !== postId) return false;
+          const savedChangeId = manifestChangeIdRef.current;
+          setStatus("alt·순서 저장 중…");
+          const response = await fetch("/studio/api/assets", {
+            method: "PATCH",
+            headers: {
+              "content-type": "application/json",
+              "x-studio-request": "1",
+            },
+            body: JSON.stringify({
+              postId,
+              revision: getRevision(),
+              assets: current.assets.map(({ assetId, ordinal, alt }) => ({
+                assetId,
+                ordinal,
+                alt,
+              })),
+            }),
+          });
+          const result: unknown = await response.json();
+          if (response.status === 409) {
+            setStatus("다른 창에서 이미지 순서나 alt가 수정됨 · 현재 화면을 유지합니다.");
+            onRevisionConflict();
+            return false;
+          }
+          if (!response.ok || !isRevisionResult(result)) {
+            setStatus("alt·순서를 저장하지 못했습니다 · 다시 시도해 주세요");
+            return false;
+          }
+          onRevisionChange(result.revision, result.savedAt);
+          if (manifestChangeIdRef.current === savedChangeId) {
+            manifestDirtyRef.current = false;
+            setManifestDirty(false);
+            setStatus(`${checkedTime(result.savedAt)} · alt·순서 저장됨`);
+          }
+        } while (manifestDirtyRef.current);
+        return true;
+      } catch {
+        setStatus("alt·순서 저장 결과를 확인하지 못했습니다 · 자동 재시도하지 않습니다");
+        return false;
+      } finally {
+        setManifestPending(false);
+        onManifestSavingChange(false);
+        if (!manifestDirtyRef.current) onManifestPendingChange(false);
+      }
+    })();
+    manifestSavePromiseRef.current = cycle;
+    void cycle.finally(() => {
+      if (manifestSavePromiseRef.current === cycle) {
+        manifestSavePromiseRef.current = null;
+      }
+    });
+    return cycle;
+  }, [getRevision, onManifestPendingChange, onManifestSavingChange, onRevisionChange, onRevisionConflict, postId]);
+
+  useEffect(() => {
+    onRegisterManifestFlush(saveManifest);
+    return () => onRegisterManifestFlush(null);
+  }, [onRegisterManifestFlush, saveManifest]);
+
+  useEffect(() => {
+    if (!manifestDirty || manifestPending || disabled) return;
+    const timer = window.setTimeout(() => void saveManifest(), 1_500);
+    return () => window.clearTimeout(timer);
+  }, [disabled, manifestDirty, manifestPending, saveManifest]);
 
   function selectFiles(event: ChangeEvent<HTMLInputElement>) {
     const selected = [...(event.target.files ?? [])];
@@ -194,7 +349,7 @@ export function ImageUploader({
   }
 
   async function upload(item: PendingFile) {
-    if (!postId || disabled || busyId) return;
+    if (!postId || disabled || busyId || manifestDirty || manifestPending) return;
     if (item.file.size < 1 || item.file.size > MAX_SOURCE_BYTES) {
       updatePending(item.id, { error: "1 byte 이상 20MB 이하 파일만 가능합니다." });
       return;
@@ -207,6 +362,7 @@ export function ImageUploader({
     setBusyId(item.id);
     updatePending(item.id, { error: "" });
     let submitted = false;
+    let expectedRevision = getRevision();
 
     try {
       if (item.failedAssetId) {
@@ -218,16 +374,30 @@ export function ImageUploader({
               "content-type": "application/json",
               "x-studio-request": "1",
             },
-            body: "{}",
+            body: JSON.stringify({ expectedRevision }),
           },
         );
-        if (!removed.ok) throw new Error("Failed receipt cleanup failed");
+        const removedResult: unknown = await removed.json();
+        if (removed.status === 409) {
+          onRevisionConflict();
+          throw new Error("revision_conflict");
+        }
+        if (!removed.ok || !isRevisionResult(removedResult)) {
+          throw new Error("Failed receipt cleanup failed");
+        }
+        expectedRevision = removedResult.revision;
+        onRevisionChange(removedResult.revision, removedResult.savedAt);
         updatePending(item.id, { failedAssetId: undefined });
       }
       const currentAssets = await loadAssets(postId);
+      if (currentAssets.revision !== expectedRevision) {
+        onRevisionConflict();
+        throw new Error("revision_conflict");
+      }
       const form = new FormData();
       form.set("postId", postId);
-      form.set("ordinal", String(currentAssets.length));
+      form.set("revision", String(expectedRevision));
+      form.set("ordinal", String(currentAssets.assets.length));
       form.set("alt", item.alt);
       form.set("file", item.file);
       submitted = true;
@@ -239,18 +409,30 @@ export function ImageUploader({
       const result = (await response.json()) as {
         assetId?: unknown;
         error?: unknown;
+        revision?: unknown;
+        savedAt?: unknown;
       };
+      const responseError = result.error;
+      const responseAssetId = result.assetId;
+      if (isRevisionResult(result)) {
+        onRevisionChange(result.revision, result.savedAt);
+      }
       if (!response.ok) {
+        if (response.status === 409 && responseError === "revision_conflict") {
+          onRevisionConflict();
+          updatePending(item.id, { error: "다른 창에서 이미지 목록이 수정되었습니다." });
+          return;
+        }
         if (
-          result.error === "asset_storage_failed" &&
-          typeof result.assetId === "string"
+          responseError === "asset_storage_failed" &&
+          typeof responseAssetId === "string"
         ) {
           updatePending(item.id, {
             error: "private 원본 저장에 실패했습니다. 파일을 유지했으니 다시 시도해 주세요.",
-            failedAssetId: result.assetId,
+            failedAssetId: responseAssetId,
           });
           setStatus("private upload 접수가 끝나지 않아 작업 이동을 막습니다.");
-        } else if (typeof result.assetId === "string") {
+        } else if (typeof responseAssetId === "string") {
           setPendingFiles((current) =>
             current.filter((candidate) => candidate.id !== item.id),
           );
@@ -290,7 +472,7 @@ export function ImageUploader({
       );
       return;
     }
-    if (busyId) return;
+    if (busyId || manifestDirty || manifestPending) return;
     setBusyId(item.id);
     try {
       const response = await fetch(
@@ -301,10 +483,18 @@ export function ImageUploader({
             "content-type": "application/json",
             "x-studio-request": "1",
           },
-          body: "{}",
+          body: JSON.stringify({ expectedRevision: getRevision() }),
         },
       );
-      if (!response.ok) throw new Error("Failed receipt cleanup failed");
+      const result: unknown = await response.json();
+      if (response.status === 409) {
+        onRevisionConflict();
+        throw new Error("revision_conflict");
+      }
+      if (!response.ok || !isRevisionResult(result)) {
+        throw new Error("Failed receipt cleanup failed");
+      }
+      onRevisionChange(result.revision, result.savedAt);
       setPendingFiles((current) =>
         current.filter((candidate) => candidate.id !== item.id),
       );
@@ -319,7 +509,7 @@ export function ImageUploader({
   }
 
   async function retry(asset: Asset) {
-    if (!postId || disabled || busyId) return;
+    if (!postId || disabled || busyId || manifestDirty || manifestPending) return;
     setBusyId(asset.assetId);
     try {
       const response = await fetch(
@@ -344,7 +534,7 @@ export function ImageUploader({
   }
 
   async function remove(asset: Asset) {
-    if (!postId || disabled || busyId) return;
+    if (!postId || disabled || busyId || manifestDirty || manifestPending) return;
     setBusyId(asset.assetId);
     try {
       const response = await fetch(
@@ -355,11 +545,19 @@ export function ImageUploader({
             "content-type": "application/json",
             "x-studio-request": "1",
           },
-          body: "{}",
+          body: JSON.stringify({ expectedRevision: getRevision() }),
         },
       );
-      if (!response.ok) throw new Error("Asset delete failed");
-      setStatus("초안에서 이미지를 제거했습니다. 공유되지 않은 object는 exact key로 함께 삭제됩니다.");
+      const result: unknown = await response.json();
+      if (response.status === 409) {
+        onRevisionConflict();
+        throw new Error("revision_conflict");
+      }
+      if (!response.ok || !isRevisionResult(result)) {
+        throw new Error("Asset delete failed");
+      }
+      onRevisionChange(result.revision, result.savedAt);
+      setStatus("초안에서 이미지를 제거했습니다. 원본은 retention 계약에 따라 안전하게 보존됩니다.");
       window.dispatchEvent(new Event("studio-state-changed"));
     } catch {
       setStatus("이미지를 삭제하지 못했습니다.");
@@ -368,11 +566,37 @@ export function ImageUploader({
     }
   }
 
+  function moveAsset(index: number, offset: -1 | 1) {
+    editManifest((current) => {
+      const target = index + offset;
+      if (target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }
+
+  function dropAsset(event: DragEvent<HTMLLIElement>, targetId: string) {
+    event.preventDefault();
+    const sourceId = draggingId || event.dataTransfer.getData("text/plain");
+    setDraggingId("");
+    if (!sourceId || sourceId === targetId) return;
+    editManifest((current) => {
+      const sourceIndex = current.findIndex(({ assetId }) => assetId === sourceId);
+      const targetIndex = current.findIndex(({ assetId }) => assetId === targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return current;
+      const next = [...current];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+  }
+
   return (
     <section className={styles.card} aria-labelledby="media-heading">
       <div className={styles.sectionHeading}>
         <div>
-          <p className={styles.step}>02</p>
+          <p className={styles.step}>03</p>
           <h2 id="media-heading">이미지 원본</h2>
         </div>
         <p>JPEG · PNG · static WebP · 최대 10장</p>
@@ -385,7 +609,7 @@ export function ImageUploader({
           name="images"
           accept="image/jpeg,image/png,image/webp"
           multiple
-          disabled={!postId || disabled || assets.length + pendingFiles.length >= 10}
+          disabled={!postId || disabled || manifestDirty || manifestPending || assets.length + pendingFiles.length >= 10}
           onChange={selectFiles}
         />
       </label>
@@ -446,26 +670,79 @@ export function ImageUploader({
       {assets.length > 0 ? (
         <ol className={styles.assetList} aria-label="저장된 이미지">
           {assets.map((asset) => (
-            <li key={asset.assetId} className={styles.assetItem}>
+            <li
+              key={asset.assetId}
+              className={styles.assetItem}
+              draggable={!disabled && !manifestPending && busyId === ""}
+              onDragStart={(event) => {
+                setDraggingId(asset.assetId);
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", asset.assetId);
+              }}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => dropAsset(event, asset.assetId)}
+              onDragEnd={() => setDraggingId("")}
+            >
+              <img
+                className={styles.assetThumb}
+                src={`/studio/api/assets/${encodeURIComponent(asset.assetId)}/preview?surface=portfolio`}
+                alt=""
+              />
               <div>
-                <strong>{asset.ordinal + 1}. {asset.alt}</strong>
+                <strong>{asset.ordinal + 1}. 이미지</strong>
                 <small>
                   {asset.width}×{asset.height} · {byteLabel(asset.sourceBytes)}
                 </small>
               </div>
-              <p className={styles.assetState}>{statusLabel(asset)}</p>
-              {asset.status === "ready" && asset.discordBytes && asset.publicBytes ? (
-                <small>
-                  Portfolio {byteLabel(asset.publicBytes)} · Discord {byteLabel(asset.discordBytes)}
-                </small>
-              ) : null}
+              <label className={styles.assetAlt}>
+                <span>alt</span>
+                <input
+                  value={asset.alt}
+                  maxLength={1_000}
+                  disabled={disabled || manifestPending || busyId !== ""}
+                  aria-invalid={!altIsValid(asset.alt)}
+                  onChange={(event) =>
+                    editManifest((current) =>
+                      current.map((candidate) =>
+                        candidate.assetId === asset.assetId
+                          ? { ...candidate, alt: event.target.value }
+                          : candidate
+                      )
+                    )
+                  }
+                />
+              </label>
+              <div className={styles.assetState}>
+                <strong>{statusLabel(asset)}</strong>
+                <small>{checkedTime(asset.updatedAt)}</small>
+                {asset.processingError ? <small>원인 · {asset.processingError}</small> : null}
+                {asset.status === "ready" && asset.discordBytes && asset.publicBytes ? (
+                  <small>
+                    Portfolio {byteLabel(asset.publicBytes)} · Discord {byteLabel(asset.discordBytes)}
+                  </small>
+                ) : null}
+              </div>
               <div className={styles.assetButtons}>
+                <button
+                  type="button"
+                  disabled={disabled || manifestPending || busyId !== "" || asset.ordinal === 0}
+                  onClick={() => moveAsset(asset.ordinal, -1)}
+                >
+                  위
+                </button>
+                <button
+                  type="button"
+                  disabled={disabled || manifestPending || busyId !== "" || asset.ordinal === assets.length - 1}
+                  onClick={() => moveAsset(asset.ordinal, 1)}
+                >
+                  아래
+                </button>
                 {asset.status === "failed" &&
                 asset.processingError !== "asset_storage_failed" &&
                 asset.processingError !== "asset_manifest_unavailable" ? (
                   <button
                     type="button"
-                    disabled={disabled || busyId !== ""}
+                    disabled={disabled || manifestDirty || manifestPending || busyId !== ""}
                     onClick={() => void retry(asset)}
                   >
                     처리 재시도
@@ -473,10 +750,10 @@ export function ImageUploader({
                 ) : null}
                 <button
                   type="button"
-                  disabled={disabled || busyId !== ""}
+                  disabled={disabled || manifestDirty || manifestPending || busyId !== ""}
                   onClick={() => void remove(asset)}
                 >
-                  {busyId === asset.assetId ? "처리 중…" : "원본 삭제"}
+                  {busyId === asset.assetId ? "처리 중…" : "초안에서 제거"}
                 </button>
               </div>
             </li>
@@ -484,7 +761,17 @@ export function ImageUploader({
         </ol>
       ) : null}
 
-      {status ? <p className={styles.assetMessage} role="status">{status}</p> : null}
+      {status ? <p className={styles.assetMessage} role="status" aria-live="polite">{status}</p> : null}
+      {manifestDirty ? (
+        <button
+          className={styles.retryButton}
+          type="button"
+          disabled={manifestPending || assets.some((asset) => !altIsValid(asset.alt))}
+          onClick={() => void saveManifest()}
+        >
+          alt·순서 다시 저장
+        </button>
+      ) : null}
     </section>
   );
 }

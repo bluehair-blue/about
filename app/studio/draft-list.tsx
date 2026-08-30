@@ -23,6 +23,17 @@ type DraftListItem = {
   assetCount: number;
   pendingAssetCount: number;
   failedAssetCount: number;
+  kindLabel: string;
+  topics: string[];
+  hasCurrentVersion: boolean;
+  hasDiscordThread: boolean;
+  discordDeliveryState: string | null;
+  discordCheckedAt: string | null;
+  latestDelivery: null | {
+    status: string;
+    error: string | null;
+    updatedAt: string | null;
+  };
 };
 
 type DraftListResult = {
@@ -54,6 +65,16 @@ function isCount(value: unknown) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function isLatestDelivery(value: unknown): value is NonNullable<DraftListItem["latestDelivery"]> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const delivery = value as Record<string, unknown>;
+  return (
+    typeof delivery.status === "string" &&
+    (delivery.error === null || typeof delivery.error === "string") &&
+    (delivery.updatedAt === null || typeof delivery.updatedAt === "string")
+  );
+}
+
 function isDraftListItem(value: unknown): value is DraftListItem {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -74,7 +95,15 @@ function isDraftListItem(value: unknown): value is DraftListItem {
     (item.attentionAt === null || typeof item.attentionAt === "string") &&
     isCount(item.assetCount) &&
     isCount(item.pendingAssetCount) &&
-    isCount(item.failedAssetCount)
+    isCount(item.failedAssetCount) &&
+    typeof item.kindLabel === "string" &&
+    Array.isArray(item.topics) &&
+    item.topics.every((topic) => typeof topic === "string") &&
+    typeof item.hasCurrentVersion === "boolean" &&
+    typeof item.hasDiscordThread === "boolean" &&
+    (item.discordDeliveryState === null || typeof item.discordDeliveryState === "string") &&
+    (item.discordCheckedAt === null || typeof item.discordCheckedAt === "string") &&
+    (item.latestDelivery === null || isLatestDelivery(item.latestDelivery))
   );
 }
 
@@ -98,11 +127,11 @@ function isDraftListResult(value: unknown): value is DraftListResult {
   );
 }
 
-function timeLabel(value: string) {
+function timeLabel(value: string, suffix = "저장") {
   const date = new Date(value);
   return Number.isNaN(date.valueOf())
-    ? "저장 시각 확인 불가"
-    : `${date.toLocaleString("ko-KR")} 저장`;
+    ? `${suffix} 시각 확인 불가`
+    : `${date.toLocaleString("ko-KR")} ${suffix}`;
 }
 
 function attentionLabel(reason: string | null) {
@@ -125,6 +154,56 @@ function uploadLabel(item: DraftListItem) {
   return item.assetCount > 0
     ? `이미지 ${item.assetCount}장 접수됨`
     : "이미지 없음";
+}
+
+function portfolioSurface(item: DraftListItem) {
+  if (item.postStatus === "published" && item.hasCurrentVersion) {
+    return { label: "Portfolio 공개됨", reason: "D1 승인 current 사용", checkedAt: item.savedAt };
+  }
+  if (item.postStatus === "withheld") {
+    return { label: "Portfolio 공개 차단", reason: "원격 대조 필요", checkedAt: item.attentionAt ?? item.savedAt };
+  }
+  if (["publishing", "restoring"].includes(item.postStatus)) {
+    return { label: "Portfolio 전환 중", reason: "승인 current 확정 대기", checkedAt: item.savedAt };
+  }
+  if (["archived", "archiving"].includes(item.postStatus)) {
+    return { label: "Portfolio private archive", reason: "공개 참조 없음", checkedAt: item.savedAt };
+  }
+  return {
+    label: item.hasCurrentVersion ? "Portfolio 공개 중지" : "Portfolio 공개 전",
+    reason: item.hasCurrentVersion ? "current는 보존됨" : "승인 current 없음",
+    checkedAt: item.savedAt,
+  };
+}
+
+function discordSurface(item: DraftListItem) {
+  const job = item.latestDelivery;
+  if (job && ["queued", "processing", "retrying", "verifying", "finalizing"].includes(job.status)) {
+    return {
+      label: job.status === "finalizing" ? "Discord 확인 완료 · D1 반영 중" : "Discord 전달 중",
+      reason: job.error ?? job.status,
+      checkedAt: job.updatedAt ?? item.discordCheckedAt,
+    };
+  }
+  if (job && ["queue_failed", "failed", "outcome_unknown"].includes(job.status)) {
+    return {
+      label: "Discord 확인 필요",
+      reason: job.error ?? job.status,
+      checkedAt: job.updatedAt ?? item.discordCheckedAt,
+    };
+  }
+  if (item.hasDiscordThread) {
+    return {
+      label: "Discord thread 연결됨",
+      reason: item.discordDeliveryState ?? "fresh 확인 기록 사용",
+      checkedAt: item.discordCheckedAt,
+    };
+  }
+  return {
+    label: "Discord 미게시",
+    reason: item.discordDeliveryState ?? "thread mapping 없음",
+    checkedAt: item.discordCheckedAt ?? item.savedAt,
+  };
 }
 
 async function requestDraftList(filter: DraftFilter) {
@@ -179,9 +258,12 @@ export function DraftList({ filter }: { filter: DraftFilter }) {
           <p className={styles.step}>00</p>
           <h2 id="draft-list-heading">작업 목록</h2>
         </div>
-        <Link className={styles.primaryLink} href="/studio/posts/new">
-          새 초안
-        </Link>
+        <div className={styles.headingActions}>
+          <Link href="/studio/media">Media</Link>
+          <Link className={styles.primaryLink} href="/studio/posts/new">
+            새 초안
+          </Link>
+        </div>
       </div>
 
       <nav className={styles.filters} aria-label="작업 목록 필터">
@@ -224,13 +306,22 @@ export function DraftList({ filter }: { filter: DraftFilter }) {
               <div>
                 <h3>{item.title}</h3>
                 <p>
+                  {item.kindLabel}
+                  {item.topics.length > 0 ? ` · ${item.topics.join(" · ")}` : ""}
+                </p>
+                <p>
                   {timeLabel(item.savedAt)} · {uploadLabel(item)}
                   {item.revision === null ? "" : ` · revision ${item.revision}`}
                 </p>
+                {[portfolioSurface(item), discordSurface(item)].map((surface) => (
+                  <p key={surface.label} className={styles.surfaceState}>
+                    <strong>{surface.label}</strong> · {surface.reason} · {timeLabel(surface.checkedAt ?? item.savedAt, "확인")}
+                  </p>
+                ))}
                 {item.needsAttention ? (
                   <p className={styles.attentionReason}>
                     {attentionLabel(item.attentionReason)}
-                    {item.attentionAt ? ` · ${timeLabel(item.attentionAt)}` : ""}
+                    {item.attentionAt ? ` · ${timeLabel(item.attentionAt, "확인")}` : ""}
                   </p>
                 ) : null}
               </div>

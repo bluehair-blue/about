@@ -3,6 +3,7 @@ import {
   type DraftKind,
   type PostStatus,
 } from "../db/schema";
+import { validateStudioMarkdown } from "../lib/studio-markdown";
 import type { PhaseAEnv, StudioD1 } from "./phase-a-env";
 import {
   createDraftRecord,
@@ -42,6 +43,15 @@ type DraftListRow = {
   title: string;
   revision: number | null;
   saved_at: string;
+  kind_label: string;
+  topic_labels_json: string;
+  current_version_id: string | null;
+  discord_thread_id: string | null;
+  discord_delivery_state: string | null;
+  discord_checked_at: string | null;
+  latest_job_status: string | null;
+  latest_job_error: string | null;
+  latest_job_at: string | null;
   asset_count: number;
   pending_asset_count: number;
   failed_asset_count: number;
@@ -70,37 +80,6 @@ function methodNotAllowed() {
 
 function codePointLength(value: string) {
   return Array.from(value).length;
-}
-
-function markdownError(body: string) {
-  if (/\u0000|[\u0001-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(body)) {
-    return "body_control_character";
-  }
-  if (/<\/?[A-Za-z][^>]*>/u.test(body)) return "body_raw_html";
-  if (/!\[[^\]\n]*\]\([^\n)]*\)/u.test(body)) return "body_inline_image";
-  if (/<(?:@!?|@&|#|t:|a?:)[^>\n]+>|@(everyone|here)\b/iu.test(body)) {
-    return "body_discord_syntax";
-  }
-  if (/^#{1,6}\s/mu.test(body) || /\|\|/u.test(body)) {
-    return "body_unsupported_markdown";
-  }
-
-  for (const match of body.matchAll(/\[[^\]\n]+\]\(([^)\s]+)(?:\s+"[^"\n]*")?\)/gu)) {
-    try {
-      const url = new URL(match[1]);
-      if (url.protocol !== "https:" || url.username || url.password) {
-        return "body_unsafe_link";
-      }
-    } catch {
-      return "body_invalid_link";
-    }
-  }
-
-  for (const match of body.matchAll(/\b([A-Za-z][A-Za-z0-9+.-]*):\/\//gu)) {
-    if (match[1].toLowerCase() !== "https") return "body_unsafe_link";
-  }
-
-  return null;
 }
 
 function parseDraft(value: unknown): Draft | string {
@@ -135,8 +114,8 @@ function parseDraft(value: unknown): Draft | string {
   if (body.trim() === "" || codePointLength(body) > 2_000) {
     return "invalid_body";
   }
-  const invalidMarkdown = markdownError(body);
-  if (invalidMarkdown) return invalidMarkdown;
+  const invalidMarkdown = validateStudioMarkdown(body);
+  if (invalidMarkdown) return invalidMarkdown.code;
   if (typeof input.kind !== "string" || !draftKinds.includes(input.kind as DraftKind)) {
     return "invalid_kind";
   }
@@ -163,16 +142,30 @@ function parseDraft(value: unknown): Draft | string {
   };
 }
 
-async function activeTopics(database: StudioD1, topics: string[]) {
+async function activeTopics(
+  database: StudioD1,
+  topics: string[],
+  postId: string | null,
+) {
   if (topics.length === 0) return [];
   const placeholders = topics.map(() => "?").join(", ");
   const rows = await database.prepare(`
-    SELECT stable_key
-    FROM studio_taxonomy
-    WHERE dimension = 'topic' AND status = 'active'
-      AND stable_key IN (${placeholders})
-    ORDER BY ordinal ASC, id ASC
-  `).bind(...topics).all<{ stable_key: string }>();
+    SELECT taxonomy.stable_key
+    FROM studio_taxonomy AS taxonomy
+    WHERE taxonomy.dimension = 'topic'
+      AND taxonomy.stable_key IN (${placeholders})
+      AND (
+        taxonomy.status = 'active'
+        OR EXISTS (
+          SELECT 1
+          FROM studio_posts AS post
+          JOIN studio_post_version_topics AS selected
+            ON selected.version_id = post.draft_version_id
+          WHERE post.id = ? AND selected.taxonomy_id = taxonomy.id
+        )
+      )
+    ORDER BY taxonomy.ordinal ASC, taxonomy.id ASC
+  `).bind(...topics, postId).all<{ stable_key: string }>();
   return (rows.results ?? []).map(({ stable_key }) => stable_key);
 }
 
@@ -250,6 +243,29 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
       coalesce(draft.title, current.title, '제목 없음') AS title,
       draft.revision,
       coalesce(draft.updated_at, current.updated_at, post.updated_at) AS saved_at,
+      coalesce((
+        SELECT taxonomy.label
+        FROM studio_taxonomy AS taxonomy
+        WHERE taxonomy.dimension = 'kind'
+          AND taxonomy.stable_key = coalesce(draft.kind, current.kind)
+      ), coalesce(draft.kind, current.kind, '분류 없음')) AS kind_label,
+      coalesce((
+        SELECT json_group_array(ordered.label)
+        FROM (
+          SELECT taxonomy.label
+          FROM studio_post_version_topics AS selected
+          JOIN studio_taxonomy AS taxonomy ON taxonomy.id = selected.taxonomy_id
+          WHERE selected.version_id = coalesce(draft.id, current.id)
+          ORDER BY taxonomy.ordinal ASC, taxonomy.id ASC
+        ) AS ordered
+      ), '[]') AS topic_labels_json,
+      post.current_version_id,
+      post.discord_thread_id,
+      post.discord_delivery_state,
+      post.discord_checked_at,
+      latest_job.status AS latest_job_status,
+      latest_job.error_code AS latest_job_error,
+      latest_job.updated_at AS latest_job_at,
       (SELECT count(*) FROM studio_assets AS asset
         WHERE asset.post_id = post.id AND asset.status != 'orphan') AS asset_count,
       (SELECT count(*) FROM studio_assets AS asset
@@ -277,6 +293,13 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
       ON draft.id = post.draft_version_id AND draft.state = 'draft'
     LEFT JOIN studio_post_versions AS current
       ON current.id = post.current_version_id
+    LEFT JOIN delivery_jobs AS latest_job ON latest_job.id = (
+      SELECT job.id
+      FROM delivery_jobs AS job
+      WHERE job.post_id = post.id AND job.target = 'discord'
+      ORDER BY job.created_at DESC, job.id DESC
+      LIMIT 1
+    )
     WHERE post.status != 'purged'
       AND (draft.id IS NOT NULL OR current.id IS NOT NULL)
     ORDER BY
@@ -317,6 +340,28 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
       assetCount: row.asset_count,
       pendingAssetCount: row.pending_asset_count,
       failedAssetCount: row.failed_asset_count,
+      kindLabel: row.kind_label,
+      topics: (() => {
+        try {
+          const value = JSON.parse(row.topic_labels_json) as unknown;
+          return Array.isArray(value) && value.every((label) => typeof label === "string")
+            ? value
+            : [];
+        } catch {
+          return [];
+        }
+      })(),
+      hasCurrentVersion: row.current_version_id !== null,
+      hasDiscordThread: row.discord_thread_id !== null,
+      discordDeliveryState: row.discord_delivery_state,
+      discordCheckedAt: row.discord_checked_at,
+      latestDelivery: row.latest_job_status
+        ? {
+            status: row.latest_job_status,
+            error: row.latest_job_error,
+            updatedAt: row.latest_job_at,
+          }
+        : null,
     };
   });
   const items = filter === "working"
@@ -354,7 +399,7 @@ async function saveDraft(request: Request, database: StudioD1) {
   }
   const draft = parseDraft(decoded);
   if (typeof draft === "string") return json({ error: draft }, 400);
-  const topics = await activeTopics(database, draft.topics);
+  const topics = await activeTopics(database, draft.topics, draft.postId);
   if (topics.length !== draft.topics.length) {
     return json({ error: "invalid_topics" }, 409);
   }

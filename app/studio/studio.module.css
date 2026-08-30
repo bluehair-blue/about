@@ -69,6 +69,13 @@
   gap: 1rem;
 }
 
+.editorNavigation > div,
+.headingActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
 .editorNavigation span,
 .listStatus,
 .postItem p,
@@ -113,6 +120,17 @@
   color: #090b12;
   background: #8baaff;
   font-weight: 750;
+  text-decoration: none;
+}
+
+.headingActions > a:not(.primaryLink) {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+  padding: 0 1rem;
+  border: 1px solid rgb(255 255 255 / 16%);
+  border-radius: 999px;
+  color: #dfe4f4;
   text-decoration: none;
 }
 
@@ -208,6 +226,10 @@
   color: #ffbd8b;
 }
 
+.surfaceState strong {
+  color: #dfe4f4;
+}
+
 .navigationDialog {
   width: min(calc(100% - 2rem), 34rem);
   padding: 1.5rem;
@@ -282,6 +304,42 @@
   font: inherit;
 }
 
+.markdownToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.markdownToolbar button,
+.taxonomyStatus button,
+.taxonomyManager button,
+.mediaFilters button,
+.mediaActions button {
+  min-height: 2.35rem;
+  padding: 0 0.75rem;
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 0.65rem;
+  color: #dfe4f4;
+  background: rgb(5 7 13 / 64%);
+  cursor: pointer;
+  font: inherit;
+}
+
+.markdownToolbar button:disabled,
+.taxonomyStatus button:disabled,
+.taxonomyManager button:disabled,
+.mediaActions button:disabled {
+  color: #727788;
+  cursor: not-allowed;
+}
+
+.markdownError {
+  margin: 0;
+  color: #ffbd8b;
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
 .field textarea {
   resize: vertical;
   line-height: 1.65;
@@ -326,6 +384,222 @@
   font-size: 0.9rem;
 }
 
+.taxonomyBlock {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.taxonomyStatus {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.taxonomyStatus p,
+.taxonomyManager p {
+  margin: 0;
+  color: #a8adbd;
+  font-size: 0.84rem;
+}
+
+.taxonomyManager,
+.deliveryActions {
+  padding: 0.9rem 1rem;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 0.8rem;
+  background: rgb(5 7 13 / 35%);
+}
+
+.taxonomyManager summary,
+.deliveryActions summary {
+  color: #dfe4f4;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.taxonomyManager[open],
+.deliveryActions[open] {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.taxonomyAdd {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 0.6rem;
+}
+
+.taxonomyAdd label,
+.mediaFilters label {
+  display: grid;
+  gap: 0.35rem;
+  color: #c7ccda;
+  font-size: 0.8rem;
+}
+
+.taxonomyAdd input,
+.mediaFilters input,
+.mediaFilters select {
+  min-height: 2.5rem;
+  padding: 0 0.7rem;
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 0.65rem;
+  color: #f4f6fb;
+  background: #090b12;
+  font: inherit;
+}
+
+.taxonomyList {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.taxonomyList li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgb(255 255 255 / 8%);
+  color: #c7ccda;
+  font-size: 0.84rem;
+}
+
+.taxonomyList li > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.previewGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.portfolioPreview,
+.discordPreview {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 1rem;
+  background: rgb(5 7 13 / 54%);
+}
+
+.portfolioPreview > header,
+.discordPreview > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  color: #cdd8ff;
+  font-size: 0.82rem;
+}
+
+.portfolioPreview h3,
+.discordPreview h3,
+.markdownPreview p,
+.previewMeta {
+  margin: 0;
+}
+
+.portfolioPreview h3,
+.discordPreview h3 {
+  margin-bottom: 0.75rem;
+  font-size: 1.15rem;
+}
+
+.previewMeta {
+  color: #8baaff;
+  font-size: 0.76rem;
+}
+
+.previewSwitch {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.previewSwitch button {
+  padding: 0.3rem 0.55rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 999px;
+  color: #a8adbd;
+  background: transparent;
+  cursor: pointer;
+}
+
+.previewSwitch button[aria-pressed="true"] {
+  color: #f4f6fb;
+  background: rgb(139 170 255 / 18%);
+}
+
+.previewCardBody .markdownPreview {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.markdownPreview {
+  color: #dfe4f4;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.markdownPreview > * + * {
+  margin-top: 0.7rem;
+}
+
+.markdownPreview pre,
+.markdownPreview code {
+  border-radius: 0.35rem;
+  background: rgb(139 170 255 / 12%);
+  font-family: ui-monospace, monospace;
+}
+
+.markdownPreview pre {
+  overflow-x: auto;
+  padding: 0.75rem;
+}
+
+.markdownPreview code {
+  padding: 0.08rem 0.25rem;
+}
+
+.markdownPreview blockquote {
+  margin-left: 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid #8baaff;
+  color: #c7ccda;
+}
+
+.markdownPreview a {
+  color: #9db6ff;
+}
+
+.previewMedia {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+}
+
+.previewMedia img,
+.assetThumb,
+.mediaItem > img {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 0.65rem;
+  background: #121622;
+  object-fit: cover;
+}
+
 .upload {
   display: grid;
   gap: 0.75rem;
@@ -347,13 +621,17 @@
 
 .assetItem {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(12rem, 1fr) auto;
+  grid-template-columns: 4.5rem minmax(7rem, 0.7fr) minmax(12rem, 1fr) minmax(10rem, 0.8fr) auto;
   align-items: center;
   gap: 1rem;
   padding: 1rem;
   border: 1px solid rgb(255 255 255 / 12%);
   border-radius: 0.8rem;
   background: rgb(5 7 13 / 48%);
+}
+
+.assetThumb {
+  cursor: grab;
 }
 
 .assetItem > div:first-child,
@@ -369,12 +647,22 @@
 }
 
 .assetItem small,
-.assetState,
 .assetMessage,
 .assetItem > p[role="alert"] {
   margin: 0;
   color: #a8adbd;
   font-size: 0.82rem;
+}
+
+.assetState {
+  display: grid;
+  gap: 0.25rem;
+  color: #a8adbd;
+  font-size: 0.82rem;
+}
+
+.assetState strong {
+  color: #dfe4f4;
 }
 
 .assetAlt span {
@@ -463,6 +751,107 @@
 }
 
 .deliveryButtons .dangerButton {
+  color: #ffe5de;
+  background: #7b2f2f;
+}
+
+.deliveryActions {
+  margin-top: 1rem;
+}
+
+.mediaFilters {
+  display: grid;
+  grid-template-columns: minmax(12rem, 2fr) repeat(3, minmax(9rem, 1fr)) auto;
+  align-items: end;
+  gap: 0.65rem;
+}
+
+.retentionSummary {
+  margin: 1rem 0 0;
+  color: #a8adbd;
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+
+.mediaList {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mediaItem {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 0.8rem;
+  background: rgb(5 7 13 / 48%);
+}
+
+.mediaCopy {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.mediaCopy h3,
+.mediaCopy p {
+  margin: 0;
+}
+
+.mediaCopy p {
+  color: #a8adbd;
+  font-size: 0.82rem;
+}
+
+.mediaStates {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin: 0.35rem 0;
+}
+
+.mediaStates > div {
+  padding: 0.55rem;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 0.6rem;
+}
+
+.mediaStates dt {
+  color: #8f96aa;
+  font-size: 0.72rem;
+}
+
+.mediaStates dd {
+  margin: 0.2rem 0 0;
+  color: #dfe4f4;
+  font-size: 0.78rem;
+}
+
+.mediaActions {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.mediaActions a {
+  display: inline-flex;
+  min-height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.75rem;
+  border-radius: 999px;
+  color: #090b12;
+  background: #8baaff;
+  font-size: 0.82rem;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.mediaActions .dangerButton {
   color: #ffe5de;
   background: #7b2f2f;
 }
@@ -579,6 +968,13 @@
     grid-template-columns: 1fr;
   }
 
+  .previewGrid,
+  .taxonomyAdd,
+  .mediaFilters,
+  .mediaStates {
+    grid-template-columns: 1fr;
+  }
+
   .saveBar {
     align-items: flex-start;
     flex-direction: column;
@@ -588,8 +984,20 @@
     grid-template-columns: 1fr;
   }
 
+  .assetThumb {
+    width: 6rem;
+  }
+
   .postItem {
     grid-template-columns: 1fr;
+  }
+
+  .mediaItem {
+    grid-template-columns: 1fr;
+  }
+
+  .mediaItem > img {
+    width: 7rem;
   }
 
   .deliveryFacts {

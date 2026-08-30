@@ -13,22 +13,16 @@ import {
 
 import {
   draftKinds,
-  draftTopics,
   postStatuses,
   type DraftKind,
-  type DraftTopic,
   type PostStatus,
 } from "../../db/schema";
+import { validateStudioMarkdown } from "../../lib/studio-markdown";
 import { ImageUploader } from "./image-uploader";
 import { DeliveryControls } from "./delivery-controls";
+import { SurfacePreview } from "./surface-preview";
+import { TaxonomyControls } from "./taxonomy-controls";
 import styles from "./studio.module.css";
-
-const topicLabels: Record<DraftTopic, string> = {
-  character: "캐릭터",
-  world: "세계관",
-  illustration: "일러스트",
-  development: "개발",
-};
 
 type Draft = {
   postId: string | null;
@@ -72,8 +66,24 @@ function isSaveable(draft: Draft) {
     titleLength >= 1 &&
     titleLength <= 100 &&
     draft.body.trim() !== "" &&
-    bodyLength <= 2_000
+    bodyLength <= 2_000 &&
+    validateStudioMarkdown(draft.body) === null
   );
+}
+
+function saveErrorLabel(code: unknown) {
+  if (typeof code !== "string") return "저장 실패 · 다시 시도해 주세요";
+  const labels: Record<string, string> = {
+    body_control_character: "저장 실패 · 본문의 제어 문자를 제거해 주세요",
+    body_raw_html: "저장 실패 · HTML 태그는 사용할 수 없습니다",
+    body_inline_image: "저장 실패 · 본문 이미지 문법 대신 이미지 영역을 사용해 주세요",
+    body_discord_syntax: "저장 실패 · Discord mention·채널·emoji 문법을 제거해 주세요",
+    body_unsupported_markdown: "저장 실패 · 지원하지 않는 Markdown 문법입니다",
+    body_unsafe_link: "저장 실패 · 링크는 인증 정보 없는 https만 허용됩니다",
+    body_invalid_link: "저장 실패 · Markdown 링크 주소를 확인해 주세요",
+    invalid_topics: "저장 실패 · 보관되거나 바뀐 주제 선택을 확인해 주세요",
+  };
+  return labels[code] ?? `저장 실패 · ${code}`;
 }
 
 function isSavedDraft(value: unknown): value is SavedDraft {
@@ -173,8 +183,14 @@ export function DraftEditor({ postId }: { postId: string | null }) {
   const [moving, setMoving] = useState(false);
   const [navigationReason, setNavigationReason] = useState("");
   const [pendingUploadCount, setPendingUploadCount] = useState(0);
+  const [assetManifestPending, setAssetManifestPending] = useState(false);
   const [status, setStatus] = useState("초안 불러오는 중…");
+  const [taxonomyLabels, setTaxonomyLabels] = useState({
+    kind: "업데이트",
+    topics: [] as string[],
+  });
   const draftRef = useRef(draft);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
   const dirtyRef = useRef(false);
   const composingRef = useRef(false);
   const savingRef = useRef(false);
@@ -184,9 +200,58 @@ export function DraftEditor({ postId }: { postId: string | null }) {
   const changeIdRef = useRef(0);
   const movingRef = useRef(false);
   const pendingUploadCountRef = useRef(0);
+  const assetManifestPendingRef = useRef(false);
+  const assetManifestSavingRef = useRef(false);
+  const assetManifestFlushRef = useRef<(() => Promise<boolean>) | null>(null);
   const uploadReceiptCheckedRef = useRef(postId === null);
   const navigationTargetRef = useRef("/studio?filter=working");
   const navigationDialogRef = useRef<HTMLDialogElement>(null);
+
+  const updateTaxonomyLabels = useCallback(
+    (labels: { kind: string; topics: string[] }) => {
+      setTaxonomyLabels((current) =>
+        current.kind === labels.kind &&
+          current.topics.length === labels.topics.length &&
+          current.topics.every((value, index) => value === labels.topics[index])
+          ? current
+          : labels
+      );
+    },
+    [],
+  );
+
+  const getRevision = useCallback(() => draftRef.current.revision, []);
+
+  const updateAssetRevision = useCallback((revision: number, savedAt: string) => {
+    const current = draftRef.current;
+    if (revision <= current.revision) return;
+    const next = { ...current, revision };
+    draftRef.current = next;
+    setDraft(next);
+    setStatus(savedTime(savedAt));
+  }, []);
+
+  const markAssetRevisionConflict = useCallback(() => {
+    conflictRef.current = true;
+    setConflict(true);
+    setStatus("다른 창에서 이미지가 수정됨 · 현재 내용을 복사한 뒤 새로고침해 주세요");
+  }, []);
+
+  const updateAssetManifestPending = useCallback((value: boolean) => {
+    assetManifestPendingRef.current = value;
+    setAssetManifestPending(value);
+  }, []);
+
+  const registerAssetManifestFlush = useCallback(
+    (flush: (() => Promise<boolean>) | null) => {
+      assetManifestFlushRef.current = flush;
+    },
+    [],
+  );
+
+  const updateAssetManifestSaving = useCallback((value: boolean) => {
+    assetManifestSavingRef.current = value;
+  }, []);
 
   const restoreDraft = useCallback((result: SavedDraft | null) => {
     if (result === null) {
@@ -261,8 +326,11 @@ export function DraftEditor({ postId }: { postId: string | null }) {
     setDraft(next);
     setDirty(true);
     if (!conflictRef.current) {
+      const markdownIssue = validateStudioMarkdown(next.body);
       setStatus(
-        isSaveable(next)
+        markdownIssue
+          ? `${markdownIssue.message} · 아래 표시된 위치를 확인해 주세요`
+          : isSaveable(next)
           ? "변경됨 · 1.5초 후 자동 저장"
           : "제목과 본문을 입력하면 저장됩니다",
       );
@@ -280,6 +348,7 @@ export function DraftEditor({ postId }: { postId: string | null }) {
       !editable ||
       composingRef.current ||
       conflictRef.current ||
+      assetManifestSavingRef.current ||
       !isSaveable(draftRef.current)
     ) {
       return Promise.resolve(false);
@@ -327,7 +396,17 @@ export function DraftEditor({ postId }: { postId: string | null }) {
             setStatus("다른 창에서 수정됨 · 로컬 내용을 복사한 뒤 새로고침해 주세요");
             return false;
           }
-          if (!response.ok || !isSaveResult(result)) {
+          if (!response.ok) {
+            setStatus(
+              saveErrorLabel(
+                typeof result === "object" && result !== null
+                  ? (result as { error?: unknown }).error
+                  : null,
+              ),
+            );
+            return false;
+          }
+          if (!isSaveResult(result)) {
             throw new Error("Draft save failed");
           }
 
@@ -428,6 +507,7 @@ export function DraftEditor({ postId }: { postId: string | null }) {
       if (
         dirtyRef.current ||
         savingRef.current ||
+        assetManifestPendingRef.current ||
         pendingUploadCountRef.current > 0
       ) {
         event.preventDefault();
@@ -450,7 +530,11 @@ export function DraftEditor({ postId }: { postId: string | null }) {
     setMoving(true);
     navigationTargetRef.current = target;
 
-    const saved = await saveCurrent();
+    const initialDraftSaved = await saveCurrent();
+    const manifestSaved = initialDraftSaved && assetManifestFlushRef.current
+      ? await assetManifestFlushRef.current()
+      : initialDraftSaved;
+    const saved = manifestSaved && await saveCurrent();
     const remainingUploads = pendingUploadCountRef.current;
     const receiptChecked = uploadReceiptCheckedRef.current;
     if (!saved || !receiptChecked || remainingUploads > 0) {
@@ -459,6 +543,8 @@ export function DraftEditor({ postId }: { postId: string | null }) {
           ? `private 원본 접수가 끝나지 않은 이미지 ${remainingUploads}장이 남았습니다.`
           : !receiptChecked
           ? "private 원본 접수 상태를 아직 확인하지 못했습니다."
+          : !manifestSaved
+          ? "이미지 alt·순서를 저장하지 못했습니다."
           : "최신 초안 revision을 저장하지 못했습니다.",
       );
       movingRef.current = false;
@@ -503,16 +589,85 @@ export function DraftEditor({ postId }: { postId: string | null }) {
     }
   }
 
+  function replaceBody(
+    start: number,
+    end: number,
+    replacement: string,
+    selectionStart: number,
+    selectionEnd: number,
+  ) {
+    const textarea = bodyRef.current;
+    if (!textarea || !ready || !editable) return;
+    textarea.setRangeText(replacement, start, end, "end");
+    editDraft((current) => ({ ...current, body: textarea.value }));
+    window.requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(selectionStart, selectionEnd);
+    });
+  }
+
+  function formatInline(before: string, after: string, placeholder: string) {
+    const textarea = bodyRef.current;
+    if (!textarea) return;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selected = textarea.value.slice(start, end) || placeholder;
+    const replacement = `${before}${selected}${after}`;
+    replaceBody(
+      start,
+      end,
+      replacement,
+      start + before.length,
+      start + before.length + selected.length,
+    );
+  }
+
+  function formatLink() {
+    const textarea = bodyRef.current;
+    if (!textarea) return;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selected = textarea.value.slice(start, end) || "링크 텍스트";
+    const replacement = `[${selected}](https://)`;
+    const urlStart = start + selected.length + 3;
+    replaceBody(start, end, replacement, urlStart, urlStart + 8);
+  }
+
+  function prefixLines(prefix: string) {
+    const textarea = bodyRef.current;
+    if (!textarea) return;
+    const selectionStart = textarea.selectionStart;
+    const selectionEnd = textarea.selectionEnd;
+    const start = textarea.value.lastIndexOf("\n", Math.max(0, selectionStart - 1)) + 1;
+    const followingBreak = textarea.value.indexOf("\n", selectionEnd);
+    const end = followingBreak < 0 ? textarea.value.length : followingBreak;
+    const replacement = textarea.value
+      .slice(start, end)
+      .split("\n")
+      .map((line) => `${prefix}${line}`)
+      .join("\n");
+    replaceBody(start, end, replacement, start, start + replacement.length);
+  }
+
   const titleLength = characterCount(draft.title.trim());
   const bodyLength = characterCount(draft.body);
+  const markdownIssue = validateStudioMarkdown(draft.body);
+  const markdownIssuePosition = markdownIssue
+    ? characterCount(draft.body.slice(0, markdownIssue.start)) + 1
+    : null;
   const valid = isSaveable(draft);
 
   return (
     <>
       <nav className={styles.editorNavigation} aria-label="Studio 작업 이동">
-        <Link href="/studio?filter=working" onClick={handleNavigation}>
-          작업 목록
-        </Link>
+        <div>
+          <Link href="/studio?filter=working" onClick={handleNavigation}>
+            작업 목록
+          </Link>
+          <Link href="/studio/media" onClick={handleNavigation}>
+            Media
+          </Link>
+        </div>
         <span>{moving ? "저장 후 이동 중…" : "이동 전 최신 revision 확인"}</span>
       </nav>
 
@@ -526,7 +681,7 @@ export function DraftEditor({ postId }: { postId: string | null }) {
           <div className={styles.sectionHeading}>
             <div>
               <p className={styles.step}>01</p>
-              <h2 id="content-heading">Discord test fixture</h2>
+              <h2 id="content-heading">게시글 편집기</h2>
             </div>
             <p>한국어 Markdown · 최대 2,000자</p>
           </div>
@@ -563,18 +718,30 @@ export function DraftEditor({ postId }: { postId: string | null }) {
             />
           </label>
 
-          <label className={styles.field}>
-            <span>
+          <div className={styles.field}>
+            <label htmlFor="draft-body">
               본문 <small>{bodyLength}/2,000</small>
-            </span>
+            </label>
+            <div className={styles.markdownToolbar} role="toolbar" aria-label="Markdown 서식">
+              <button type="button" disabled={!ready || !editable} onMouseDown={(event) => event.preventDefault()} onClick={() => formatInline("**", "**", "굵은 텍스트")}>굵게</button>
+              <button type="button" disabled={!ready || !editable} onMouseDown={(event) => event.preventDefault()} onClick={() => formatInline("*", "*", "기울임 텍스트")}>기울임</button>
+              <button type="button" disabled={!ready || !editable} onMouseDown={(event) => event.preventDefault()} onClick={() => formatInline("~~", "~~", "취소선 텍스트")}>취소선</button>
+              <button type="button" disabled={!ready || !editable} onMouseDown={(event) => event.preventDefault()} onClick={() => formatInline("`", "`", "code")}>code</button>
+              <button type="button" disabled={!ready || !editable} onMouseDown={(event) => event.preventDefault()} onClick={formatLink}>link</button>
+              <button type="button" disabled={!ready || !editable} onMouseDown={(event) => event.preventDefault()} onClick={() => prefixLines("> ")}>인용</button>
+              <button type="button" disabled={!ready || !editable} onMouseDown={(event) => event.preventDefault()} onClick={() => prefixLines("- ")}>목록</button>
+            </div>
             <textarea
+              ref={bodyRef}
+              id="draft-body"
               key={ready ? "ready" : "loading"}
               name="body"
               defaultValue={draft.body}
               rows={12}
               required
               disabled={!ready || !editable}
-              aria-invalid={bodyLength > 2_000}
+              aria-invalid={bodyLength > 2_000 || Boolean(markdownIssue)}
+              aria-describedby={markdownIssue ? "draft-body-markdown-error" : undefined}
               onChange={(event) =>
                 editDraft((current) => ({
                   ...current,
@@ -584,63 +751,25 @@ export function DraftEditor({ postId }: { postId: string | null }) {
               onCompositionStart={handleCompositionStart}
               onCompositionEnd={handleCompositionEnd}
             />
-          </label>
-
-          <div className={styles.split}>
-            <fieldset disabled={!ready || !editable}>
-              <legend>종류</legend>
-              <label>
-                <input
-                  type="radio"
-                  name="kind"
-                  value="update"
-                  checked={draft.kind === "update"}
-                  onChange={() =>
-                    editDraft((current) => ({ ...current, kind: "update" }))
-                  }
-                />
-                업데이트
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="kind"
-                  value="work"
-                  checked={draft.kind === "work"}
-                  onChange={() =>
-                    editDraft((current) => ({ ...current, kind: "work" }))
-                  }
-                />
-                작업
-              </label>
-            </fieldset>
-
-            <fieldset disabled={!ready || !editable}>
-              <legend>주제 · 최대 4개</legend>
-              {draftTopics.map((topic) => (
-                <label key={topic}>
-                  <input
-                    type="checkbox"
-                    name="topic"
-                    value={topic}
-                    checked={draft.topics.includes(topic)}
-                    disabled={
-                      !draft.topics.includes(topic) && draft.topics.length >= 4
-                    }
-                    onChange={(event) =>
-                      editDraft((current) => ({
-                        ...current,
-                        topics: event.target.checked
-                          ? [...current.topics, topic]
-                          : current.topics.filter((value) => value !== topic),
-                      }))
-                    }
-                  />
-                  {topicLabels[topic]}
-                </label>
-              ))}
-            </fieldset>
+            {markdownIssue ? (
+              <p id="draft-body-markdown-error" className={styles.markdownError} role="alert">
+                {markdownIssuePosition}번째 글자 · {markdownIssue.message}
+              </p>
+            ) : null}
           </div>
+
+          <TaxonomyControls
+            kind={draft.kind}
+            topics={draft.topics}
+            disabled={!ready || !editable}
+            onKindChange={(kind) =>
+              editDraft((current) => ({ ...current, kind }))
+            }
+            onTopicsChange={(topics) =>
+              editDraft((current) => ({ ...current, topics }))
+            }
+            onLabelsChange={updateTaxonomyLabels}
+          />
 
           <div className={styles.saveBar}>
             <p
@@ -660,17 +789,32 @@ export function DraftEditor({ postId }: { postId: string | null }) {
             </button>
           </div>
         </section>
+        <SurfacePreview
+          postId={draft.postId}
+          title={draft.title}
+          body={draft.body}
+          kindLabel={taxonomyLabels.kind}
+          topicLabels={taxonomyLabels.topics}
+        />
         <ImageUploader
+          key={draft.postId ?? "new"}
           postId={draft.postId}
           disabled={
             !ready || !editable || dirty || pending || composing || conflict
           }
           onPendingChange={updatePendingUploadCount}
+          getRevision={getRevision}
+          onRevisionChange={updateAssetRevision}
+          onRevisionConflict={markAssetRevisionConflict}
+          onManifestPendingChange={updateAssetManifestPending}
+          onManifestSavingChange={updateAssetManifestSaving}
+          onRegisterManifestFlush={registerAssetManifestFlush}
         />
         <DeliveryControls
           postId={draft.postId}
           disabled={
-            !ready || !editable || dirty || pending || composing || conflict
+            !ready || !editable || dirty || pending || composing || conflict ||
+            assetManifestPending
           }
         />
       </form>

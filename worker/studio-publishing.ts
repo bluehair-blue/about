@@ -74,8 +74,11 @@ type StatusRow = {
   id: string;
   status: string;
   draft_version_id: string | null;
+  current_version_id: string | null;
   discord_thread_id: string | null;
+  discord_delivery_state: string | null;
   discord_remote_hash: string | null;
+  discord_checked_at: string | null;
 };
 
 type AssetSummary = {
@@ -498,7 +501,9 @@ async function readStatus(request: Request, database: StudioD1) {
     return json({ error: "invalid_post_id" }, 400);
   }
   const post = await database.prepare(`
-    SELECT id, status, draft_version_id, discord_thread_id, discord_remote_hash
+    SELECT id, status, draft_version_id, current_version_id,
+      discord_thread_id, discord_delivery_state, discord_remote_hash,
+      discord_checked_at
     FROM studio_posts
     WHERE id = ?
   `).bind(postId).first<StatusRow>();
@@ -528,6 +533,9 @@ async function readStatus(request: Request, database: StudioD1) {
     postStatus: post.status,
     mode: post.discord_thread_id ? "update" : "create",
     threadId: post.discord_thread_id,
+    hasCurrentVersion: post.current_version_id !== null,
+    discordDeliveryState: post.discord_delivery_state,
+    discordCheckedAt: post.discord_checked_at,
     remoteHash: post.discord_remote_hash,
     assets: { count: assetCount, notReadyCount, discordBytes },
     budgetBytes: MAX_DISCORD_ATTACHMENT_BYTES,
