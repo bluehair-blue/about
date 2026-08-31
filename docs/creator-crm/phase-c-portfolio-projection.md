@@ -175,9 +175,9 @@ DOM wrapper, tag order, class와 `data-*`를 바꿔야 하면 해당 CSS selecto
 - [x] 최신순·오래된순·kind·topic·pagination 결과가 D1 fixture와 일치
 - [x] pin이 filter와 page count 계약을 지키고 Hero와 독립적임
 - [x] 0/1/동일 비율/혼합 비율 이미지 fixture가 지정 layout으로 표시됨
-- [ ] slider·lightbox keyboard, swipe, Escape, focus 복귀와 reduced motion 확인 — event wiring·native dialog·focus 복귀·CSS 계약 자동 검사는 통과했으며 실제 browser 조작 증거는 staging에 남김
-- [ ] long body의 `더 보기 / 접기`와 detail 이동 확인 — SSR·ARIA·route 계약은 통과했으며 실제 browser 조작 증거는 staging에 남김
-- [ ] active mapping에만 Discord CTA가 있고 detach 뒤 cache purge로 사라짐 — local D1 detach 직후 root/community 비노출은 통과했으며 remote global cache purge는 Phase B 운영 blocker와 함께 남김
+- [ ] slider·lightbox keyboard, swipe, Escape, focus 복귀와 reduced motion 확인 — staging에서 Arrow·Escape·focus 복귀와 responsive를 실제 조작했으나 touch swipe 실제 장치 조작은 미확인
+- [x] long body의 `더 보기 / 접기`와 한글 slug detail 이동 확인
+- [ ] active mapping에만 Discord CTA가 있고 detach 뒤 cache purge로 사라짐 — staging active mapping CTA와 archive 직후 root/community 비노출은 통과했으나 detach·remote global cache purge는 미확인
 - [x] detail canonical·title·description·OG/X가 record와 일치
 - [x] private source·Discord CDN URL이 public output에 없음
 - [x] mobile `52rem` 경계와 기존 DOM·CSS 회귀 통과
@@ -186,14 +186,15 @@ DOM wrapper, tag order, class와 `data-*`를 바꿔야 하면 해당 CSS selecto
 
 ## 11. 완료 기록
 
-- commit: 미기록
+- commit: public projection `596f5ba`; 한글 slug route·명시적 Escape 복구 `a41bf3b`
 - root feed fixture: `tests/public-projection.test.mjs`가 fresh `0001`–`0007` in-memory SQLite에 일반 글 12개, filter 일치 pin 1개, rank Hero 3개, withheld row와 active/archived topic을 만들고 canonical redirect·두 page·결합 filter·sort·Hero 순서를 빌드 Worker에서 검증함
-- detail/metadata fixture: 같은 테스트가 image/no-image 승인본의 canonical·description·OG/X, safe Markdown, private/Discord media 비노출, withheld·archived 404와 purged 410, public derivative GET/HEAD/304/405를 검증함
+- detail/metadata fixture: 같은 테스트가 URL-encoded 한글 slug와 image/no-image 승인본의 canonical·description·OG/X, safe Markdown, private/Discord media 비노출, withheld·archived 404와 purged 410, public derivative GET/HEAD/304/405를 검증함
 - gallery fixture: 0장·1장·동일 비율 2장·혼합 3장·혼합 5장을 넣어 media 없음·single·slider·grid·`+1` server markup을 검증함
-- keyboard/mobile evidence: `tests/rendered-html.test.mjs`에서 native dialog, Arrow key, touch handlers, Escape cancel, opener focus 복귀, 단일 feed lightbox, `52rem`과 최종 reduced-motion override를 자동 검사함. 로컬 in-app browser에서 ko/ja/en 전환, filter URL, `/community` 왕복, 390px 무수평 overflow와 820px/900px의 `52rem` 전후 1열/2열·feed 2열/4열 전환을 확인함. 실제 staging fixture의 keyboard·swipe·focus·mobile 조작 증거는 미기록
-- browser recovery evidence: fresh `--force` dev 시작에서 `/community` 첫 진입 시 `next/link` 지연 최적화로 발생하던 React `Invalid hook call`을 public detail/community의 단순 내부 이동을 native anchor로 좁혀 제거함. 재시작 뒤 `/`·`/community`가 HTTP 200이고 같은 console error가 재발하지 않음을 확인함
-- automated verification: 2026-08-31 `npx tsc --noEmit`, `npm run lint`, `npm test` 46/46 성공. `npm run deploy:staging:dry-run`이 staging target·D1/R2/Images/Queue binding을 검증하고 업로드 없이 종료함. `dist/server/index.js`, `dist/client`, `dist/.openai/hosting.json` 생성과 deployable output의 `.dev.vars` 부재 확인
-- Go/No-Go: local implementation·자동 계약·빈 상태 browser QA는 Go. current checkout의 staging 배포, 실제 gallery/detail fixture browser 조작과 remote cache purge 증거는 No-Go이며 production 배포·승인은 이 Phase 작업에 포함하지 않음
+- keyboard/mobile evidence: `tests/rendered-html.test.mjs`에서 native dialog, Arrow·명시적 Escape, touch handlers, opener focus 복귀, 단일 feed lightbox, `52rem`과 최종 reduced-motion override를 자동 검사함. staging 혼합 3장 fixture에서 첫 이미지 `1 / 3`을 열어 ArrowRight로 두 번째 asset과 `2 / 3`을 확인하고 Escape 뒤 dialog 0개와 첫 opener button focus 복귀를 확인함. 390px은 hero·controls 1열, 820px은 hero 1열·controls 2열, 900px은 hero 2열·controls 4열이었고 세 폭 모두 수평 overflow가 없었음. 실제 touch swipe는 미확인
+- browser recovery evidence: fresh `--force` dev의 `/community` 첫 진입 `Invalid hook call`은 public detail/community 이동을 native anchor로 좁혀 제거함. staging에서는 feed가 생성한 URL-encoded 한글 slug를 Vinext route param이 그대로 전달해 detail이 404가 되는 결함을 발견했고 route 경계에서 한 번만 안전하게 decode하도록 고침. 재배포 뒤 detail `200`, record title·description·canonical·OG image·3장 gallery·active Discord CTA를 확인함
+- staging lifecycle evidence: restore된 post `e222f213-7a71-499d-ad90-588a93aaad45`에서 본문 `더 보기 / 접기`, `kind=work` 빈 결과, `sort=oldest` 1건과 active filter state, community detail·Discord CTA를 실제 조작함. restore 중 media `200`·ETag `304`·`private, no-store`, archive 뒤 detail/media `404`·`no-store`와 root/community 비노출을 확인했으며 fixture는 다시 archived로 정리함
+- automated verification: 2026-08-31 `npx tsc --noEmit`, `npm run lint`, `npm test` 46/46 성공. staging target verifier와 `0001`–`0007` no-pending migration 뒤 implementation commit `a41bf3b`를 Worker version `7e6194a9-b301-4da2-b5f7-2f611d94902b`로 배포함. `dist/server/index.js`, `dist/client`, `dist/.openai/hosting.json` 생성과 deployable output의 `.dev.vars` 부재 확인
+- Go/No-Go: current checkout implementation·자동 계약·staging 정상/archived fixture의 gallery/detail/filter/community/revocation은 Go. 실제 touch swipe, detached mapping과 remote global cache purge는 No-Go이며 production 배포·승인은 이 Phase 작업에 포함하지 않음
 
 ## 다음 Phase
 

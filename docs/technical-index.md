@@ -1,6 +1,6 @@
 # 기술 계약·의존성 인덱스
 
-> 기준 패치: `35dee61` (`fix(deps): Dependabot 취약 의존성 갱신`)
+> 기준 패치: `a41bf3b` (`fix: 공개 상세 경로와 라이트박스 키보드 경계 복구`)
 >
 > 설정 파일이 최종 진실이다. 아래 계약을 바꾸는 커밋은 이 문서도 함께 갱신한다.
 
@@ -35,7 +35,7 @@
 - 공개 route 인증: 없음
 - 공개 데이터: `published` post의 `current_version_id`가 가리키는 `published` version만 server에서 읽으며, `/media/{assetId}/portfolio-v1.webp`는 그 current 승인본이 참조한 ready public derivative만 R2에서 제공
 - Studio 인증: `worker/index.ts`가 `/studio*`의 Cloudflare Access JWT와 `/api/discord/interactions`의 Discord Ed25519 signature를 server에서 검증
-- 서버 저장소: direct Cloudflare의 production·staging D1·R2·Queue physical resource는 `wrangler.jsonc`에 분리 연결됨. staging D1에는 Phase A draft·asset·delivery migration, Worker에는 Images info/transform, private source·두 파생본 R2 저장, Queue consumer·DLQ routing과 Discord Forum delivery가 연결됨. Phase B canonical schema `0004`, taxonomy `0005`, asset manifest/retention `0006`, stable canonical slug `0007`과 `worker/studio-domain.ts`의 draft CAS·exact candidate/outbox·archive·verified current pointer 경계는 local 검증을 마쳤다. job-bound candidate snapshot·state·delete와 outbox identity는 불변이고 active delivery 중 비검증 current·Discord mapping 이동을 거부한다. 최초 publish batch는 NFC Unicode slug와 post ID suffix를 한 번만 배정하고 DB trigger가 형식과 이후 불변성을 강제한다. `/studio/api/taxonomy` 변경은 post 없는 전역 outbox 한 건으로 직렬화하고 Queue consumer가 Discord Forum 전체 tag를 fresh verify한다. asset publish payload는 public·Discord key/bytes/SHA-256을 고정하고 두 R2 object를 처리 전·finalization 전에 다시 검증한다. retention endpoint는 미게시 orphan 7일과 superseded snapshot·public/Discord derivative 30일 후보를 Queue에 넣으며 consumer가 reference·active job·현재 environment 값을 재검증하고 exact delete·strong read·prefix 검사·Cloudflare global single-file purge를 통과한 뒤에만 D1 cleanup을 완료한다. 한 번이라도 게시된 private source는 비가역 marker와 exact key manifest로 남고, version metadata 삭제 뒤 실패한 cleanup도 version 비종속 job payload로 재개한다. 코드상 purge는 exact media URL과 zone-scoped API token을 요구하며 누락·오류에서는 fail closed한다. staging에는 2026-08-31 `0004`–`0007`과 Phase B Worker를 적용하고 create/update/notification·unpublish/republish·archive/restore·stable slug 보존을 검증했다. staging의 origin·zone ID·secret token 설정과 실제 global purge는 미검증이다. production에는 `0004`–`0007`을 적용하지 않았고 production Queue에는 배포된 producer·consumer가 없음
+- 서버 저장소: direct Cloudflare의 production·staging D1·R2·Queue physical resource는 `wrangler.jsonc`에 분리 연결됨. staging D1에는 Phase A draft·asset·delivery migration, Worker에는 Images info/transform, private source·두 파생본 R2 저장, Queue consumer·DLQ routing과 Discord Forum delivery가 연결됨. Phase B canonical schema `0004`, taxonomy `0005`, asset manifest/retention `0006`, stable canonical slug `0007`과 `worker/studio-domain.ts`의 draft CAS·exact candidate/outbox·archive·verified current pointer 경계를 local·staging에서 검증했다. job-bound candidate snapshot·state·delete와 outbox identity는 불변이고 active delivery 중 비검증 current·Discord mapping 이동을 거부한다. 최초 publish batch는 NFC Unicode slug와 post ID suffix를 한 번만 배정하고 DB trigger가 형식과 이후 불변성을 강제한다. `/studio/api/taxonomy` 변경은 post 없는 전역 outbox 한 건으로 직렬화하고 Queue consumer가 Discord Forum 전체 tag를 fresh verify한다. asset publish payload는 public·Discord key/bytes/SHA-256을 고정하고 두 R2 object를 처리 전·finalization 전에 다시 검증한다. retention endpoint는 미게시 orphan 7일과 superseded snapshot·public/Discord derivative 30일 후보를 Queue에 넣으며 consumer가 reference·active job·현재 environment 값을 재검증하고 exact delete·strong read·prefix 검사·Cloudflare global single-file purge를 통과한 뒤에만 D1 cleanup을 완료한다. 한 번이라도 게시된 private source는 비가역 marker와 exact key manifest로 남고, version metadata 삭제 뒤 실패한 cleanup도 version 비종속 job payload로 재개한다. 코드상 purge는 exact media URL과 zone-scoped API token을 요구하며 누락·오류에서는 fail closed한다. staging에는 2026-08-31 `0004`–`0007`과 implementation commit `a41bf3b`를 적용하고 create/update/notification·unpublish/republish·archive/restore·stable slug·public revocation을 검증했다. staging의 origin·zone ID·secret token 설정과 실제 global purge는 미검증이다. production에는 `0004`–`0007`을 적용하지 않았고 production D1 migration count와 Queue/DLQ producer·consumer가 모두 0이다
 
 ## 직접 의존성
 
@@ -107,7 +107,7 @@ vinext()
    dist/.openai/hosting.json
 ```
 
-- [`worker/index.ts`](../worker/index.ts)는 Vinext App Router handler 앞에서 exact public media route와 `/updates/{slug}` 404/410 lifecycle guard를 처리한다. 나머지 공개 RSC render에는 request별 Cloudflare binding을 전달하고, `/studio*` Access·same-origin 경계, `/api/discord/interactions`, Queue batch dispatch는 기존 runtime handler로 보낸다.
+- [`worker/index.ts`](../worker/index.ts)는 Vinext App Router handler 앞에서 exact public media route와 `/updates/{slug}` 404/410 lifecycle guard를 처리한다. lifecycle guard와 Vinext가 보는 route param의 인코딩 경계가 다르므로 [`app/updates/[slug]/page.tsx`](../app/updates/[slug]/page.tsx)가 param을 한 번 안전하게 decode한 뒤 canonical D1 slug를 조회한다. 나머지 공개 RSC render에는 request별 Cloudflare binding을 전달하고, `/studio*` Access·same-origin 경계, `/api/discord/interactions`, Queue batch dispatch는 기존 runtime handler로 보낸다.
 - [`tooling/sites-vite-plugin.ts`](../tooling/sites-vite-plugin.ts)는 build 종료 시 `.openai/hosting.json`을 `dist/.openai/hosting.json`으로 복사한다.
 - `--mode staging` build는 Cloudflare Vite plugin이 `env.staging`을 직렬화하도록 `CLOUDFLARE_ENV=staging`을 설정한다. [`tooling/verify-deploy-target.mjs`](../tooling/verify-deploy-target.mjs)는 redirected Wrangler config의 target·Worker 이름·세 physical binding·`IMAGES` binding·staging 무경로 계약이 맞지 않으면 배포를 거부한다. Wrangler environment는 `images`를 상속하지 않으므로 production과 `env.staging`에 각각 명시한다.
 - `CODEX_SANDBOX=seatbelt`일 때만 HMR polling을 켠다.
@@ -154,7 +154,7 @@ vinext()
 ### Cloudflare 공개 서비스
 
 - Worker 이름: `about`
-- staging Worker 이름: `about-staging` (`env.staging`; Phase B Access 보호 Studio editor, canonical D1/R2/Queue publishing lifecycle과 Discord role panel·Forum action 배포됨)
+- staging Worker 이름: `about-staging` (`env.staging`; implementation commit `a41bf3b` acceptance version `7e6194a9-b301-4da2-b5f7-2f611d94902b`; Phase B Access 보호 Studio editor, canonical D1/R2/Queue publishing lifecycle과 Discord role panel·Forum action 배포됨)
 - Worker entry: `dist/server/index.js`
 - 정적 자산: `dist/client`
 - compatibility date: `2026-05-15`

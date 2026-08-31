@@ -1,6 +1,6 @@
 # Phase D — recovery and operations
 
-> 상태: 시작 조건 감사 No-Go — current checkout staging fixture acceptance·remote purge·물리 격리 증거 대기
+> 상태: 시작 조건 감사 No-Go — 정상·archived acceptance와 물리 격리는 통과, 실패·결과 불명·drift·detached fixture와 remote purge 대기
 >
 > 목적: 불명 결과·Discord drift·DLQ·retention·배포 중단을 fail closed로 복구하고, 검증된 동일 commit을 production에 승격한다.
 >
@@ -14,11 +14,11 @@ staging에서 검증된 불변 commit과 migration만 수동 승인 한 번을 �
 
 ## 2. 시작 조건
 
-- Phase A–C의 완료 기록과 Go/No-Go가 모두 통과했다.
-- staging에 정상·실패·결과 불명·drift·detached·archived fixture가 준비되어 있다.
-- production D1·R2·Queue·DLQ와 Discord target이 staging에서 물리적으로 격리되어 있다.
-- 모든 production schema change가 현재 Worker와 호환되는 additive migration이다.
-- public origin과 기존 build output 계약이 유지된다.
+- [ ] Phase A–C의 완료 기록과 Go/No-Go가 모두 통과했다. — Phase B/C의 remote purge·일부 실제 browser failure path가 남음
+- [ ] staging에 정상·실패·결과 불명·drift·detached·archived fixture가 준비되어 있다. — 정상·archived는 통과, 실패·결과 불명·drift·detached는 없음
+- [x] production D1·R2·Queue·DLQ와 Discord target이 staging에서 물리적으로 격리되어 있다. — environment별 physical name/ID가 다르고 production Discord vars는 비어 fail closed함
+- [ ] 모든 production schema change가 현재 Worker와 호환되는 additive migration이다. — production ledger는 0건이며 promotion preflight는 아직 실행하지 않음
+- [x] public origin과 기존 build output 계약이 유지된다.
 
 ## 3. 읽을 파일과 소유 범위
 
@@ -208,7 +208,7 @@ CI로 옮길 때도 `tooling/promote.mjs staging/production`과 manifest schema�
 
 ## 13. 최종 Go/No-Go
 
-- [ ] staging 작업이 production D1·R2·Queue·Discord를 바꾸지 않음
+- [x] staging 작업이 production D1·R2·Queue·Discord를 바꾸지 않음
 - [ ] daily drift가 정상 Portfolio를 내리거나 Discord를 자동 덮어쓰지 않음
 - [ ] `확인 필요` post가 제목·원인·시각으로 식별됨
 - [ ] `withheld` media 차단과 수동 fresh resume 통과
@@ -225,11 +225,12 @@ CI로 옮길 때도 `tooling/promote.mjs staging/production`과 manifest schema�
 
 ## 14. 완료 기록
 
-- commit: 미기록
-- 2026-08-31 진입 감사: Phase A–C의 local intent와 자동 계약을 재검토하고 local migration drift·Queue/notification·역할 패널·이미지 dimension/checksum·public cache·public route dev runtime 결함을 보정함. 적용된 migration은 수정하지 않았고 `npx tsc --noEmit`, `npm run lint`, `npm test` 46/46와 staging dry-run, 빈 상태 local browser QA는 통과했으나 current checkout은 staging에 배포하지 않음
-- 시작 조건 No-Go: 정상·실패·결과 불명·drift·detached·archived의 동일 revision staging fixture browser acceptance, remote cache purge, production 물리 격리, additive migration preflight 증거가 아직 없음
-- reconciliation/DLQ evidence: 미기록
-- archive/restore/purge evidence: 미기록
+- commit: Phase A–C intent 보정·Phase C projection `596f5ba`; staging 발견 결함 복구 `a41bf3b`; Phase D 구현은 시작하지 않음
+- 2026-08-31 진입 감사: Phase A–C의 intent와 자동 계약을 재검토하고 local migration drift·Queue/notification·역할 패널·이미지 dimension/checksum·public cache·public route runtime 결함을 보정함. 적용된 migration은 수정하지 않았고 `npx tsc --noEmit`, `npm run lint`, `npm test` 46/46 뒤 current implementation을 staging Worker version `7e6194a9-b301-4da2-b5f7-2f611d94902b`에 배포함
+- 시작 조건 No-Go: 정상 restore와 archived revocation acceptance는 통과했으나 실패·결과 불명·drift·detached staging fixture, remote global cache purge, additive migration promotion preflight가 없음
+- physical isolation evidence: staging/production D1 ID, R2 bucket, publish Queue와 DLQ가 모두 분리됨. staging Queue producer/consumer는 1/1, production Queue와 DLQ는 0/0이며 production D1 migration count 0, production Worker version `6ec4757e-36f6-4980-84d5-cb1812928858`은 유지됨. production Discord vars가 없어 production runtime은 fail closed함
+- reconciliation/DLQ evidence: local integration에서 outcome-unknown update fresh reconciliation, duplicate 방지, malformed payload DLQ와 missed notification enqueue 복구는 통과했으나 해당 remote staging fixture는 없음
+- archive/restore/purge evidence: post `e222f213-7a71-499d-ad90-588a93aaad45`의 restore create `31050261-7f40-484e-918a-4d714e49777b`과 archive delete `0f991cef-2936-4315-8217-fcf9bbb79156`가 각 1회 succeeded. restore 중 detail/media/CTA 공개와 archive 뒤 detail·media `404`·`no-store`, root/community 비노출을 확인하고 최종 archived로 정리함. purge는 설정 부재로 미실행
 - promotion run ID: 미기록
 - production read-only smoke: 미기록
 - Go/No-Go: 미통과

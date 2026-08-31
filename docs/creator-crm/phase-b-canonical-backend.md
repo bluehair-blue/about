@@ -155,7 +155,7 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 - [ ] 실제 두 tab 409에서 route·입력 보존은 통과; 저장 실패·PIN 만료 이동 차단은 미확인
 - [x] local 통합 검사에서 새 게시·수정 실패 중 이전 정상 current 유지
 - [x] local 통합 검사에서 create/update/notification 결과 불명 자동 재전송 없음
-- [ ] 실제 public route·media에서 archive 차단 확인; staging lifecycle과 private source manifest 보존은 통과
+- [x] staging 실제 public route·media에서 restore 중 `200`과 archive 뒤 `404`·`no-store` 차단, root/community CTA 제거와 private source manifest 보존 확인
 - [x] local 통합 검사에서 restore가 새 Discord mapping과 같은 slug를 사용하고 알림을 보내지 않음
 - [x] staging 새 post에서 NFC stable slug를 최초 publish transaction에 배정하고 제목 수정·archive·새 mapping restore·재archive 뒤에도 같은 slug와 알림 1건을 유지함
 - [x] local 통합 검사에서 purge가 exact key·prefix empty·cache purge를 검증하고 tombstone을 남김; staging purge 설정·실행은 미확인
@@ -183,10 +183,11 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 - staging publish/update fixture: post `0ab72de1-3b19-4136-b593-1705eb8c3a27`에서 1장 private source와 두 derivative, 최초 create·notification 각 1회, 같은 mapping update 1회, unpublish·republish의 Discord job 무증가를 확인함. pin·Hero 1 지정 뒤 unpublish에서 둘 다 해제됐고 모든 job attempt는 1회로 끝남
 - archive/restore/purge fixture: 첫 thread `1543786193664221237` delete, private source manifest 보존, 새 thread `1543788228216234044` restore, notification job 1건 유지, 두 번째 delete까지 모두 succeeded로 확인함. fixture는 최종 `archived`이고 외부 Discord thread는 삭제됨. remote purge는 staging `STUDIO_PUBLIC_ORIGIN`·zone-scoped cache purge 설정이 없어 실행하지 않음
 - stable slug fixture: post `77515136-6636-49e2-bfcd-75b6f7676ac1`에 최초 slug `phase-b-stable-slug-검증-2026-08-31--77515136`을 배정한 뒤 제목 수정에도 그대로 유지함. 첫 thread `1543795623239884934` create·update·delete, 새 thread `1543796674076614746` restore·delete가 모두 1회 시도에서 succeeded였고 notification job은 최초 1건뿐임. fixture는 최종 `archived`, active job 0건이며 원격 slug 변경 SQL은 `stable_slug_immutable`로 거부됨
-- 배포: staging Worker `about-staging` version `d7c236a8-52b8-4667-ad1e-d2e5171be55c`. production Worker·D1·R2·Queue에는 변경 없음
+- 배포: current implementation commit `a41bf3b`를 staging Worker `about-staging` version `7e6194a9-b301-4da2-b5f7-2f611d94902b`에 배포함. production Worker version `6ec4757e-36f6-4980-84d5-cb1812928858`, production D1 migration 0건과 production Queue·DLQ producer/consumer 0/0은 유지됨
 - 해결된 blocker: 실제 새 post의 slug가 `NULL`이던 원인은 publish candidate 생성 경계에서 slug를 배정하지 않았기 때문이었다. 최초 publish batch 안에서 배정하고 DB 형식·불변 trigger를 추가해 local fixture의 직접 주입 없이 staging create/update/archive/restore로 검증함
-- 2026-08-31 intent audit 보정: succeeded publish의 누락된 notification enqueue 재개, malformed Queue payload의 DLQ 전송, fallback 역할 패널의 비활성 상태와 unknown create 결과 `409`, 실제 WebP 출력 dimension 저장, public media의 D1 byte/SHA-256 재검증과 `private, no-store`를 local Worker fixture로 검증함. 로컬 Wrangler ledger의 비정상 trigger drift는 이미 staging에 적용된 `0006`을 수정하지 않고 로컬 상태만 복구했으며, 이 보정본은 staging에 재배포하지 않음
-- Go/No-Go: Phase B automated contract와 이전 staging `0004`–`0007`, publish/update·pin/Hero·unpublish/republish·archive/restore·stable slug는 Go. current checkout 재배포, remote purge/cache 설정, browser process 재시작·PIN 만료·실패 이동, public route/media archive 증거는 No-Go이며 production 승인은 하지 않음
+- 2026-08-31 intent audit 보정: succeeded publish의 누락된 notification enqueue 재개, malformed Queue payload의 DLQ 전송, fallback 역할 패널의 비활성 상태와 unknown create 결과 `409`, 실제 WebP 출력 dimension 저장, public media의 D1 byte/SHA-256 재검증과 `private, no-store`를 local Worker fixture로 검증함. 적용된 `0006`은 수정하지 않고 local ledger drift만 복구했으며 current checkout을 staging에 배포해 실제 lifecycle로 재검증함
+- current checkout lifecycle evidence: post `e222f213-7a71-499d-ad90-588a93aaad45`를 archived에서 새 thread `1543844455788843108`로 restore한 create job `31050261-7f40-484e-918a-4d714e49777b`과 재archive한 delete job `0f991cef-2936-4315-8217-fcf9bbb79156`가 각각 1회 시도에서 succeeded로 끝남. restore 중 public derivative는 `200`, `private, no-store`, ETag 조건 요청 `304`였고 archive 뒤 상세와 세 derivative가 `404`, `no-store`, root/community fixture·thread CTA가 비노출됨. fixture는 최종 `archived`이고 외부 thread는 삭제됨
+- Go/No-Go: Phase B current checkout의 자동 계약, staging `0004`–`0007`, 정상 publish/update·archive/restore와 public route/media revocation은 Go. remote global purge 설정·실행, browser process 재시작·PIN 만료·실패 이동은 No-Go이며 production 승인은 하지 않음
 
 ## 다음 Phase
 
