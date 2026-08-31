@@ -195,6 +195,11 @@ function OpenPublicLightbox({
     requestAnimationFrame(() => opener?.focus());
   };
   const handleKey = (event: KeyboardEvent<HTMLDialogElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.currentTarget.close();
+      return;
+    }
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     move(event.key === "ArrowLeft" ? -1 : 1);

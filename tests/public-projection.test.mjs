@@ -477,7 +477,7 @@ test("renders record metadata and safe Markdown without leaking private media", 
   try {
     const withImage = seedPost(database, media, {
       title: "기록별 메타데이터",
-      slugBase: "metadata",
+      slugBase: "기록-메타데이터",
       publishedAt: "2026-08-21T12:30:00.000Z",
       body: "**강조 본문**\n\n[안전한 링크](https://example.com/read)\n\n<script>alert(1)</script>",
       images: [{ width: 1200, height: 630, alt: "메타데이터 대표 이미지" }],
@@ -488,10 +488,11 @@ test("renders record metadata and safe Markdown without leaking private media", 
       body: "이미지 없이 공개되는 상세 설명입니다.",
     });
 
-    const response = await request(worker, env, `/updates/${withImage.slug}`);
+    const detailPath = `/updates/${encodeURIComponent(withImage.slug)}`;
+    const response = await request(worker, env, detailPath);
     assert.equal(response.status, 200);
     const html = await response.text();
-    const canonical = `https://about.bluehair.blue/updates/${withImage.slug}`;
+    const canonical = `https://about.bluehair.blue${detailPath}`;
     const mediaUrl = `https://about.bluehair.blue/media/${withImage.assets[0].assetId}/portfolio-v1.webp`;
     assert.match(html, /<title>기록별 메타데이터 — 한파란<\/title>/);
     assert.match(html, new RegExp(`rel="canonical" href="${canonical}"`));

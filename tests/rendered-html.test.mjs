@@ -137,6 +137,7 @@ test("keeps Phase C galleries and lightbox on one native interaction contract", 
   assert.match(gallery, /<dialog/);
   assert.match(gallery, /\.showModal\(\)/);
   assert.match(gallery, /onCancel=/);
+  assert.match(gallery, /event\.key === "Escape"/);
   assert.match(gallery, /ArrowLeft/);
   assert.match(gallery, /ArrowRight/);
   assert.match(gallery, /onTouchStart=/);

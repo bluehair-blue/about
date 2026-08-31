@@ -14,9 +14,17 @@ import { StandalonePublicGallery } from "../../components/public-gallery";
 
 export const dynamic = "force-dynamic";
 
-const findPost = cache(async (slug: string) => {
+function routeSlug(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+const findPost = cache(async (value: string) => {
   const env = await getRuntimeEnv();
-  return loadPublicPost(env.STUDIO_DB, slug, env.DISCORD_GUILD_ID);
+  return loadPublicPost(env.STUDIO_DB, routeSlug(value), env.DISCORD_GUILD_ID);
 });
 
 function canonicalUrl(slug: string) {
