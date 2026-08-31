@@ -152,6 +152,7 @@ test("keeps the Phase B Studio UI on canonical Markdown, taxonomy, Media, and su
   assert.match(delivery, /오래된 상태이며 action을 막았습니다/);
   assert.match(delivery, /Discord 재전송 없이 D1 반영 재시도/);
   assert.match(delivery, /<details/);
+  assert.match(editor, /<DeliveryControls[\s\S]*?disabled=\{\s*!ready \|\| dirty/);
 });
 
 class SqliteD1Statement {

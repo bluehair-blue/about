@@ -813,7 +813,7 @@ export function DraftEditor({ postId }: { postId: string | null }) {
         <DeliveryControls
           postId={draft.postId}
           disabled={
-            !ready || !editable || dirty || pending || composing || conflict ||
+            !ready || dirty || pending || composing || conflict ||
             assetManifestPending
           }
         />
