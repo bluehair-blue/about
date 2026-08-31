@@ -16,6 +16,7 @@
     "deploy:staging:dry-run": "npm run build:staging && node tooling/verify-deploy-target.mjs staging && wrangler deploy --env staging --dry-run",
     "migrate:staging:local": "wrangler d1 migrations apply STUDIO_DB --env staging --local",
     "preflight:promotion": "node tooling/verify-promotion-preflight.mjs",
+    "promote": "node tooling/promote.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {

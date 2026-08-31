@@ -1,6 +1,6 @@
 # 기술 계약·의존성 인덱스
 
-> 기준 패치: `be8c2a8` (`feat(ops): promotion migration preflight 추가`)
+> 기준 패치: `1c89630` (`feat(studio): 보존과 운영 복구 경로를 연결`)
 >
 > 설정 파일이 최종 진실이다. 아래 계약을 바꾸는 커밋은 이 문서도 함께 갱신한다.
 
@@ -94,6 +94,9 @@
 | `npm test` | 먼저 전체 build 후 Node 내장 test runner 실행 |
 | `npm run deploy` | 승인 manifest 없는 production 직접 배포를 명시적으로 거부 |
 | `npm run preflight:promotion` | clean commit에서 migration 연속성·fresh local 적용·staging/production remote ledger·migration/lockfile/Wrangler hash를 읽기 전용 검증 |
+| `npm run promote -- staging` | clean·upstream 일치 commit에서 lint·test, exact target dry-run, staging migration·배포와 공개 read-only smoke를 실행하고 `.wrangler/promotions/`에 secret 없는 `studio-promotion/v1` manifest·수동 smoke 양식을 기록 |
+| `npm run promote -- staging --smoke-file <path>` | 같은 commit·hash·활성 deployment에 대한 Access·작성·Discord·Queue 수동 smoke 증거를 검증해 `staging_verified`로 고정 |
+| `npm run promote -- production` | `staging_verified` manifest·활성 version·target을 다시 검증하고 run ID가 포함된 정확한 수동 승인 뒤에만 production을 시작. 승인 중단은 폐기하고 production 결과 불명은 자동 재시도하지 않음 |
 | `npm run deploy:staging:dry-run` | staging target·physical binding을 검증하고 업로드 없이 종료 |
 | `npm run migrate:staging:local` | staging D1 migration을 Wrangler 로컬 DB에 적용 |
 | `npm run deploy:staging` | staging target·physical binding을 검증하고 pending D1 migration을 적용한 뒤 `about-staging`에 배포 |

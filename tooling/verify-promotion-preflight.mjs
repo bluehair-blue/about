@@ -56,12 +56,13 @@ export function validateRemoteMigrationState(
   if (stagingPending.length !== 0) {
     throw new Error(`Staging has pending migrations: ${stagingPending.join(", ")}`);
   }
+  const appliedCount = migrations.length - productionPending.length;
   if (
-    productionPending.length !== migrations.length ||
-    productionPending.some((name, index) => name !== migrations[index])
+    appliedCount < 0 ||
+    productionPending.some((name, index) => name !== migrations[appliedCount + index])
   ) {
     throw new Error(
-      "Production migration ledger is not the expected untouched baseline",
+      "Production pending migrations are not a contiguous suffix of staging",
     );
   }
   return true;
