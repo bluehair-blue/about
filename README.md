@@ -26,7 +26,7 @@
 npm run dev
 npm run build
 npm test
-npm run deploy
+npm run deploy:staging:dry-run
 ```
 
-배포 주소는 `https://about.bluehair.blue`이며, Worker 미리보기는 `https://about.odeye3217.workers.dev`에서 확인할 수 있습니다.
+배포 주소는 `https://about.bluehair.blue`입니다. production 직접 배포는 Phase D promotion 승인 전까지 차단되어 있으며, staging은 `https://about-staging.bluehair.blue`와 Worker 미리보기에서 확인합니다.

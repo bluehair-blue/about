@@ -89,7 +89,7 @@
 | `npm run start` | 사전 빌드된 Vinext 서버 실행 |
 | `npm run lint` | `dist`, `.next`를 제외한 ESLint |
 | `npm test` | 먼저 전체 build 후 Node 내장 test runner 실행 |
-| `npm run deploy` | production target·physical binding을 검증한 뒤 공개 배포 |
+| `npm run deploy` | 승인 manifest 없는 production 직접 배포를 명시적으로 거부 |
 | `npm run deploy:staging:dry-run` | staging target·physical binding을 검증하고 업로드 없이 종료 |
 | `npm run migrate:staging:local` | staging D1 migration을 Wrangler 로컬 DB에 적용 |
 | `npm run deploy:staging` | staging target·physical binding을 검증하고 pending D1 migration을 적용한 뒤 `about-staging`에 배포 |
@@ -109,7 +109,7 @@ vinext()
 
 - [`worker/index.ts`](../worker/index.ts)는 Vinext App Router handler 앞에서 exact public media route와 `/updates/{slug}` 404/410 lifecycle guard를 처리한다. lifecycle guard와 Vinext가 보는 route param의 인코딩 경계가 다르므로 [`app/updates/[slug]/page.tsx`](../app/updates/[slug]/page.tsx)가 param을 한 번 안전하게 decode한 뒤 canonical D1 slug를 조회한다. 나머지 공개 RSC render에는 request별 Cloudflare binding을 전달하고, `/studio*` Access·same-origin 경계, `/api/discord/interactions`, Queue batch dispatch는 기존 runtime handler로 보낸다.
 - [`tooling/sites-vite-plugin.ts`](../tooling/sites-vite-plugin.ts)는 build 종료 시 `.openai/hosting.json`을 `dist/.openai/hosting.json`으로 복사한다.
-- `--mode staging` build는 Cloudflare Vite plugin이 `env.staging`을 직렬화하도록 `CLOUDFLARE_ENV=staging`을 설정한다. [`tooling/verify-deploy-target.mjs`](../tooling/verify-deploy-target.mjs)는 redirected Wrangler config의 target·Worker 이름·세 physical binding·`IMAGES` binding·staging 무경로 계약이 맞지 않으면 배포를 거부한다. Wrangler environment는 `images`를 상속하지 않으므로 production과 `env.staging`에 각각 명시한다.
+- `--mode staging` build는 Cloudflare Vite plugin이 `env.staging`을 직렬화하도록 `CLOUDFLARE_ENV=staging`을 설정한다. [`tooling/verify-deploy-target.mjs`](../tooling/verify-deploy-target.mjs)는 redirected Wrangler config의 target·Worker 이름·exact D1 ID/name·R2 bucket·Queue/DLQ·`IMAGES` binding·zone 소유 custom domain·retention/purge 설정이 맞지 않거나 token이 산출물에 직렬화되면 배포를 거부한다. Wrangler environment는 `images`와 `vars`를 상속하지 않으므로 production과 `env.staging`에 각각 명시한다.
 - `CODEX_SANDBOX=seatbelt`일 때만 HMR polling을 켠다.
 - [`next.config.ts`](../next.config.ts)는 현재 활성 옵션이 없는 빈 계약이다.
 - `dist`, `.vinext`, `.wrangler`, `.next`, `node_modules`, `.env*`는 Git 추적 대상이 아니다.
@@ -155,6 +155,7 @@ vinext()
 
 - Worker 이름: `about`
 - staging Worker 이름: `about-staging` (`env.staging`; implementation commit `a41bf3b` acceptance version `7e6194a9-b301-4da2-b5f7-2f611d94902b`; Phase B Access 보호 Studio editor, canonical D1/R2/Queue publishing lifecycle과 Discord role panel·Forum action 배포됨)
+- staging purge origin: `https://about-staging.bluehair.blue` custom domain. `workers.dev`는 preview 접근용이고 `bluehair.blue` zone purge URL로 사용하지 않는다.
 - Worker entry: `dist/server/index.js`
 - 정적 자산: `dist/client`
 - compatibility date: `2026-05-15`

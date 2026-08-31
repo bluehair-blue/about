@@ -9,6 +9,12 @@
   "images": {
     "binding": "IMAGES"
   },
+  "vars": {
+    "ASSET_ORPHAN_RETENTION_DAYS": "7",
+    "VERSION_ROLLBACK_RETENTION_DAYS": "30",
+    "STUDIO_PUBLIC_ORIGIN": "https://about.bluehair.blue",
+    "CLOUDFLARE_ZONE_ID": "c7a745e8466891e3fc65649de228435a"
+  },
   "d1_databases": [
     {
       "binding": "STUDIO_DB",
@@ -68,7 +74,11 @@
         "DISCORD_ROLE_PANEL_MESSAGE_ID": "1543216853948698666",
         "DISCORD_FORUM_CHANNEL_ID": "1543147628605472858",
         "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": "1543147430189465691",
-        "DISCORD_NOTIFY_ROLE_ID": "1543147861443616778"
+        "DISCORD_NOTIFY_ROLE_ID": "1543147861443616778",
+        "ASSET_ORPHAN_RETENTION_DAYS": "7",
+        "VERSION_ROLLBACK_RETENTION_DAYS": "30",
+        "STUDIO_PUBLIC_ORIGIN": "https://about-staging.bluehair.blue",
+        "CLOUDFLARE_ZONE_ID": "c7a745e8466891e3fc65649de228435a"
       },
       "d1_databases": [
         {
@@ -101,7 +111,12 @@
           }
         ]
       },
-      "routes": []
+      "routes": [
+        {
+          "pattern": "about-staging.bluehair.blue",
+          "custom_domain": true
+        }
+      ]
     }
   }
 }
