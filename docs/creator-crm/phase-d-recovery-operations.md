@@ -142,6 +142,7 @@ permanent purge:
 - asset exact-key·hash·MIME·dimension manifest export
 - private source bytes는 export manifest와 별도 명시적 작업으로 취급
 - rollback·archive·restore·retention·DLQ·promotion runbook
+- staging token·Access 재인증·touch·archive·purge 수동 검증은 [`phase-d-staging-operator-runbook.md`](./phase-d-staging-operator-runbook.md)를 따른다.
 - privacy policy와 원본 삭제 요청 경로
 - 마지막 성공 시각, 실패율, 처리 시간만 운영 상태로 표시
 - Discord profile·member list·댓글·reaction·DM·Patreon supporter data와 방문자-Discord 결합 정보는 저장하지 않음
