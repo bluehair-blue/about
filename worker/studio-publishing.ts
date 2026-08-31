@@ -36,7 +36,8 @@ type PublishAction =
   | "unpin"
   | "hero"
   | "retry"
-  | "reconcile";
+  | "reconcile"
+  | "fresh_check";
 type DiscordAction = "create" | "update" | "delete";
 type RetriableTarget = "discord" | "notification";
 
@@ -76,6 +77,28 @@ type ArchivedSnapshot = {
   title: string;
   body_markdown: string;
   kind: string;
+};
+
+type PublishedSnapshot = {
+  post_id: string;
+  post_status: "published";
+  current_version_id: string;
+  discord_thread_id: string;
+  discord_starter_message_id: string;
+  discord_delivery_state: string | null;
+  discord_remote_hash: string | null;
+  discord_checked_at: string | null;
+  title: string;
+  body_markdown: string;
+  kind: string;
+};
+
+type FreshCheckSection = "body" | "images" | "classification";
+
+type FreshCheckAttachment = {
+  filename: string;
+  size: number;
+  description: string | null;
 };
 
 type PublishAsset = {
@@ -187,6 +210,7 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
       "hero",
       "retry",
       "reconcile",
+      "fresh_check",
     ].includes(String(action)) ||
     typeof postId !== "string" ||
     !uuidPattern.test(postId) ||
@@ -336,6 +360,54 @@ async function loadArchivedSnapshot(database: StudioD1, postId: string) {
   };
 }
 
+async function loadPublishedSnapshot(database: StudioD1, postId: string) {
+  const post = await database.prepare(`
+    SELECT post.id AS post_id, post.status AS post_status,
+      post.current_version_id, post.discord_thread_id,
+      post.discord_starter_message_id, post.discord_delivery_state,
+      post.discord_remote_hash, post.discord_checked_at,
+      version.title, version.body_markdown, version.kind
+    FROM studio_posts AS post
+    JOIN studio_post_versions AS version ON version.id = post.current_version_id
+    WHERE post.id = ? AND post.status = 'published'
+      AND post.current_version_id IS NOT NULL
+      AND post.discord_thread_id IS NOT NULL
+      AND post.discord_starter_message_id IS NOT NULL
+      AND version.state = 'published'
+  `).bind(postId).first<PublishedSnapshot>();
+  if (!post) return null;
+
+  const [assetRows, topicRows, taxonomyRows] = await Promise.all([
+    database.prepare(`
+      SELECT asset.id, asset.status, selected.ordinal, selected.alt,
+        asset.public_r2_key, asset.public_bytes, asset.public_sha256,
+        asset.discord_r2_key, asset.discord_bytes, asset.discord_sha256
+      FROM studio_post_version_assets AS selected
+      JOIN studio_assets AS asset ON asset.id = selected.asset_id
+      WHERE selected.version_id = ? AND asset.post_id = ?
+      ORDER BY selected.ordinal ASC, asset.id ASC
+    `).bind(post.current_version_id, postId).all<PublishAsset>(),
+    database.prepare(`
+      SELECT taxonomy.id, taxonomy.stable_key
+      FROM studio_post_version_topics AS selected
+      JOIN studio_taxonomy AS taxonomy ON taxonomy.id = selected.taxonomy_id
+      WHERE selected.version_id = ? AND taxonomy.dimension = 'topic'
+      ORDER BY taxonomy.ordinal ASC
+    `).bind(post.current_version_id).all<PublishTopic>(),
+    database.prepare(`
+      SELECT id, dimension, stable_key, label, ordinal, discord_tag_id
+      FROM studio_taxonomy
+      ORDER BY CASE dimension WHEN 'kind' THEN 0 ELSE 1 END, ordinal ASC
+    `).all<TaxonomyRow>(),
+  ]);
+  return {
+    post,
+    assets: assetRows.results ?? [],
+    topics: topicRows.results ?? [],
+    taxonomy: taxonomyRows.results ?? [],
+  };
+}
+
 async function forumTagIds(
   env: PhaseAEnv,
   taxonomy: TaxonomyRow[],
@@ -391,6 +463,251 @@ async function forumTagIds(
   return {
     tagIds: selected.map((item) => item.discord_tag_id as string),
   } as const;
+}
+
+async function publishSnapshotHash(
+  title: string,
+  body: string,
+  kind: string,
+  topics: string[],
+  tagIds: string[],
+  assets: PublishAsset[],
+) {
+  return sha256({
+    title,
+    body,
+    kind,
+    topics,
+    tagIds,
+    assets: assets.map((asset) => ({
+      assetId: asset.id,
+      ordinal: asset.ordinal,
+      alt: asset.alt,
+      r2Key: asset.discord_r2_key,
+      bytes: asset.discord_bytes,
+      sha256: asset.discord_sha256,
+    })),
+  });
+}
+
+async function readDiscordForFreshCheck(url: string, env: PhaseAEnv) {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: discordHeaders(env),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    return { error: "discord_check_unavailable" } as const;
+  }
+  if (response.status === 404) return { missing: true } as const;
+  if (response.status === 429) {
+    return { error: "discord_check_rate_limited" } as const;
+  }
+  if (!response.ok) return { error: "discord_check_unavailable" } as const;
+  try {
+    return { value: await response.json() as unknown } as const;
+  } catch {
+    return { error: "discord_check_invalid_response" } as const;
+  }
+}
+
+function freshCheckAttachments(value: unknown): FreshCheckAttachment[] | null {
+  const attachments = responseAttachments(value);
+  if (!attachments) return null;
+  return attachments.map((item) => ({
+    filename: item.filename as string,
+    size: item.size as number,
+    description: typeof item.description === "string" ? item.description : null,
+  }));
+}
+
+function sameFreshCheckAttachments(
+  remote: FreshCheckAttachment[],
+  expected: FreshCheckAttachment[],
+) {
+  if (remote.length !== expected.length) return false;
+  const byName = new Map(remote.map((item) => [item.filename, item]));
+  return expected.every((asset) => {
+    const item = byName.get(asset.filename);
+    return item?.size === asset.size && item.description === asset.description;
+  });
+}
+
+async function freshCheckPublishedPost(
+  postId: string,
+  env: PhaseAEnv,
+  database: StudioD1,
+) {
+  const snapshot = await loadPublishedSnapshot(database, postId);
+  if (!snapshot) return json({ error: "published_mapping_not_found" }, 409);
+  if (snapshot.assets.some((asset) =>
+    asset.status !== "ready" ||
+    !asset.public_r2_key ||
+    !Number.isSafeInteger(asset.public_bytes) ||
+    (asset.public_bytes ?? 0) < 1 ||
+    !/^[0-9a-f]{64}$/u.test(asset.public_sha256 ?? "") ||
+    !asset.discord_r2_key ||
+    !Number.isSafeInteger(asset.discord_bytes) ||
+    (asset.discord_bytes ?? 0) < 1 ||
+    !/^[0-9a-f]{64}$/u.test(asset.discord_sha256 ?? "")
+  )) {
+    return json({ error: "published_snapshot_invalid" }, 409);
+  }
+
+  const topics = snapshot.topics.map(({ stable_key }) => stable_key);
+  const tags = await forumTagIds(
+    env,
+    snapshot.taxonomy,
+    snapshot.post.kind,
+    topics,
+  );
+  if ("error" in tags) {
+    return json(tags, tags.error === "discord_tags_missing" ? 409 : 502);
+  }
+
+  const expectedHash = await publishSnapshotHash(
+    snapshot.post.title,
+    snapshot.post.body_markdown,
+    snapshot.post.kind,
+    topics,
+    tags.tagIds,
+    snapshot.assets,
+  );
+  const expectedAttachments = snapshot.assets.map((asset) => ({
+    filename: `asset-${String(asset.ordinal + 1).padStart(2, "0")}.webp`,
+    size: asset.discord_bytes as number,
+    description: asset.alt || null,
+  }));
+  const expected = {
+    title: snapshot.post.title,
+    body: snapshot.post.body_markdown,
+    tagIds: tags.tagIds,
+    attachments: expectedAttachments,
+  };
+
+  const threadResult = await readDiscordForFreshCheck(
+    `${DISCORD_API}/channels/${snapshot.post.discord_thread_id}`,
+    env,
+  );
+  if ("error" in threadResult) return json({ error: threadResult.error }, 503);
+
+  const threadFound = !threadResult.missing;
+  let starterFound = false;
+  let remoteTitle: string | null = null;
+  let remoteBody: string | null = null;
+  let remoteTagIds: string[] = [];
+  let remoteAttachments: FreshCheckAttachment[] = [];
+  let parentMatches = false;
+
+  if (threadFound) {
+    const thread = threadResult.value;
+    if (
+      !isRecord(thread) ||
+      thread.id !== snapshot.post.discord_thread_id ||
+      typeof thread.parent_id !== "string" ||
+      typeof thread.name !== "string" ||
+      !Array.isArray(thread.applied_tags) ||
+      !thread.applied_tags.every((tagId) => typeof tagId === "string")
+    ) {
+      return json({ error: "discord_check_invalid_response" }, 503);
+    }
+    remoteTitle = thread.name;
+    remoteTagIds = thread.applied_tags as string[];
+    parentMatches = thread.parent_id === env.DISCORD_FORUM_CHANNEL_ID;
+
+    const messageResult = await readDiscordForFreshCheck(
+      `${DISCORD_API}/channels/${snapshot.post.discord_thread_id}/messages/${snapshot.post.discord_starter_message_id}`,
+      env,
+    );
+    if ("error" in messageResult) return json({ error: messageResult.error }, 503);
+    starterFound = !messageResult.missing;
+    if (starterFound) {
+      const message = messageResult.value;
+      const attachments = freshCheckAttachments(message);
+      if (
+        !isRecord(message) ||
+        message.id !== snapshot.post.discord_starter_message_id ||
+        message.channel_id !== snapshot.post.discord_thread_id ||
+        typeof message.content !== "string" ||
+        !attachments
+      ) {
+        return json({ error: "discord_check_invalid_response" }, 503);
+      }
+      remoteBody = message.content;
+      remoteAttachments = attachments;
+    }
+  }
+
+  const changed: FreshCheckSection[] = [];
+  if (
+    !threadFound ||
+    !starterFound ||
+    remoteTitle !== expected.title ||
+    remoteBody !== expected.body
+  ) changed.push("body");
+  if (
+    !threadFound ||
+    !starterFound ||
+    !sameFreshCheckAttachments(remoteAttachments, expected.attachments)
+  ) changed.push("images");
+  if (
+    !threadFound ||
+    !parentMatches ||
+    !sameStrings(remoteTagIds, expected.tagIds)
+  ) changed.push("classification");
+
+  const remote = {
+    threadFound,
+    starterFound,
+    title: remoteTitle,
+    body: remoteBody,
+    tagIds: remoteTagIds,
+    attachments: remoteAttachments,
+  };
+  const remoteHash = await sha256(remote);
+  const checkedAt = new Date().toISOString();
+  const outcome = changed.length === 0 ? "matched" : "drift";
+  const storedHash = outcome === "matched" ? expectedHash : remoteHash;
+  const updated = await database.prepare(`
+    UPDATE studio_posts
+    SET discord_delivery_state = ?, discord_remote_hash = ?,
+      discord_checked_at = ?
+    WHERE id = ? AND status = 'published' AND current_version_id = ?
+      AND discord_thread_id = ? AND discord_starter_message_id = ?
+      AND discord_delivery_state IS ? AND discord_remote_hash IS ?
+      AND discord_checked_at IS ?
+  `).bind(
+    outcome === "matched" ? "delivered" : "drift",
+    storedHash,
+    checkedAt,
+    snapshot.post.post_id,
+    snapshot.post.current_version_id,
+    snapshot.post.discord_thread_id,
+    snapshot.post.discord_starter_message_id,
+    snapshot.post.discord_delivery_state,
+    snapshot.post.discord_remote_hash,
+    snapshot.post.discord_checked_at,
+  ).run();
+  if (updated.meta?.changes !== 1) {
+    return json({ error: "fresh_check_conflict" }, 409);
+  }
+
+  return json({
+    postId,
+    action: "fresh_check",
+    outcome,
+    checkedAt,
+    changed,
+    expected,
+    remote,
+    technical: {
+      threadId: snapshot.post.discord_thread_id,
+      starterMessageId: snapshot.post.discord_starter_message_id,
+      expectedHash,
+      remoteHash,
+    },
+  });
 }
 
 async function markQueueFailed(database: StudioD1, jobId: string) {
@@ -462,21 +779,14 @@ async function preparePublish(
     return json(tags, tags.error === "discord_tags_missing" ? 409 : 502);
   }
 
-  const expectedHash = await sha256({
-    title: snapshot.draft.title,
-    body: snapshot.draft.body_markdown,
-    kind: snapshot.draft.kind,
-    topics: snapshot.topics.map(({ stable_key }) => stable_key),
-    tagIds: tags.tagIds,
-    assets: snapshot.assets.map((asset) => ({
-      assetId: asset.id,
-      ordinal: asset.ordinal,
-      alt: asset.alt,
-      r2Key: asset.discord_r2_key,
-      bytes: asset.discord_bytes,
-      sha256: asset.discord_sha256,
-    })),
-  });
+  const expectedHash = await publishSnapshotHash(
+    snapshot.draft.title,
+    snapshot.draft.body_markdown,
+    snapshot.draft.kind,
+    snapshot.topics.map(({ stable_key }) => stable_key),
+    tags.tagIds,
+    snapshot.assets,
+  );
   const action = snapshot.draft.discord_thread_id
     ? "update"
     : "create";
@@ -1055,6 +1365,9 @@ export async function handleStudioPublishRequest(
     }
     if (input.action === "publish") {
       return await preparePublish(input.postId, env, database, queue);
+    }
+    if (input.action === "fresh_check") {
+      return await freshCheckPublishedPost(input.postId, env, database);
     }
     if (["pin", "unpin", "hero"].includes(input.action)) {
       return await changeCuration(input, database);

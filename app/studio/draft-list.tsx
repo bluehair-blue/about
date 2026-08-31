@@ -141,6 +141,9 @@ function attentionLabel(reason: string | null) {
   }
   if (reason === "delivery_queue_failed") return "Queue 등록에 실패했습니다.";
   if (reason === "asset_failed") return "이미지 처리가 실패했습니다.";
+  if (reason === "discord_drift") {
+    return "Discord 내용이 승인 원본과 다릅니다.";
+  }
   return reason ? `처리 실패 · ${reason}` : "";
 }
 
@@ -190,6 +193,13 @@ function discordSurface(item: DraftListItem) {
       label: "Discord 확인 필요",
       reason: job.error ?? job.status,
       checkedAt: job.updatedAt ?? item.discordCheckedAt,
+    };
+  }
+  if (item.discordDeliveryState === "drift") {
+    return {
+      label: "Discord 차이 있음",
+      reason: "승인 원본과 원격 내용이 다름",
+      checkedAt: item.discordCheckedAt,
     };
   }
   if (item.hasDiscordThread) {
@@ -326,8 +336,16 @@ export function DraftList({ filter }: { filter: DraftFilter }) {
                 ) : null}
               </div>
               {item.hasDraft ? (
-                <Link href={`/studio/posts/${encodeURIComponent(item.postId)}`}>
-                  {item.editable ? "작업 재개" : "초안 보기"}
+                <Link
+                  href={`/studio/posts/${encodeURIComponent(item.postId)}${
+                    item.attentionReason === "discord_drift" ? "#delivery-heading" : ""
+                  }`}
+                >
+                  {item.attentionReason === "discord_drift"
+                    ? "차이 검토"
+                    : item.editable
+                    ? "작업 재개"
+                    : "초안 보기"}
                 </Link>
               ) : (
                 <span className={styles.unavailable}>저장된 초안 없음</span>

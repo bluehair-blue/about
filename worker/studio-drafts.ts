@@ -233,6 +233,7 @@ function attentionReason(row: DraftListRow) {
     return row.failed_job_error || "delivery_failed";
   }
   if (row.failed_asset_count > 0) return "asset_failed";
+  if (row.discord_delivery_state === "drift") return "discord_drift";
   return null;
 }
 
@@ -304,6 +305,7 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
       AND (draft.id IS NOT NULL OR current.id IS NOT NULL)
     ORDER BY
       CASE WHEN post.status = 'withheld'
+        OR post.discord_delivery_state = 'drift'
         OR EXISTS (
           SELECT 1 FROM delivery_jobs AS job
           WHERE job.post_id = post.id
@@ -336,7 +338,8 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
       attentionReason: reason,
       attentionAt: row.post_status === "withheld"
         ? row.saved_at
-        : row.failed_job_at ?? row.failed_asset_at,
+        : row.failed_job_at ?? row.failed_asset_at ??
+          (row.discord_delivery_state === "drift" ? row.discord_checked_at : null),
       assetCount: row.asset_count,
       pendingAssetCount: row.pending_asset_count,
       failedAssetCount: row.failed_asset_count,

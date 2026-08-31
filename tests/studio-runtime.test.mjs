@@ -157,8 +157,14 @@ test("keeps the Phase B Studio UI on canonical Markdown, taxonomy, Media, and su
   assert.match(list, /Portfolio/);
   assert.match(list, /Discord/);
   assert.match(list, /href="\/studio\/media"/);
+  assert.match(list, /Discord 차이 있음/);
+  assert.match(list, /\? "차이 검토"/);
   assert.match(delivery, /오래된 상태이며 action을 막았습니다/);
   assert.match(delivery, /Discord 재전송 없이 D1 반영 재시도/);
+  assert.match(delivery, /action: "fresh_check"/);
+  assert.match(delivery, /Portfolio 공개본과 기존 연결은 그대로 유지했습니다/);
+  assert.match(delivery, /<dialog/);
+  assert.match(delivery, /기술 정보/);
   assert.match(delivery, /<details/);
   assert.match(editor, /<DeliveryControls[\s\S]*?disabled=\{\s*!ready \|\| dirty/);
 });
@@ -2704,6 +2710,167 @@ test("atomically manages one pin and nullable Hero ranks with stale-action CAS",
   } finally {
     globalThis.fetch = originalFetch;
     globalThis.Date = originalDate;
+    database.close();
+  }
+});
+
+test("checks published Discord state without mutating either public surface", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: new MemoryR2(),
+    IMAGES: new FakeImages(),
+    PUBLISH_QUEUE: queue,
+  });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const discord = new FakeDiscordForum(env);
+  const originalFetch = globalThis.fetch;
+  let failFreshRead = false;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === `${teamDomain}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [keys.publicJwk] });
+    }
+    if (
+      failFreshRead &&
+      url === `https://discord.com/api/v10/channels/${discord.threadId}` &&
+      (!init.method || init.method === "GET")
+    ) {
+      throw new Error("fresh Discord read unavailable");
+    }
+    return discord.fetch(input, init);
+  };
+  const request = async (pathname, init = {}) => worker.fetch(
+    new Request(`https://staging.example${pathname}`, {
+      ...init,
+      headers: {
+        "cf-access-jwt-assertion": token,
+        ...(init.headers ?? {}),
+      },
+    }),
+    env,
+    executionContext(),
+  );
+
+  try {
+    const draft = await createDraftFixture(request, "fresh check fixture");
+    const prepared = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "publish", postId: draft.postId }),
+    );
+    assert.equal(prepared.status, 202);
+    const publish = await prepared.json();
+    const deliveryMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [deliveryMessage] }, env);
+    assert.equal(deliveryMessage.acked, true);
+    const notificationMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [notificationMessage] }, env);
+    assert.equal(notificationMessage.acked, true);
+    assert.equal(queue.messages.length, 0);
+
+    const invariantBefore = database.database.prepare(`
+      SELECT status, current_version_id, draft_version_id, pinned_at, hero_rank,
+        updated_at
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    const remoteMutationsBefore = discord.createCalls + discord.updateCalls +
+      discord.deleteCalls;
+    const matchedResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "fresh_check", postId: draft.postId }),
+    );
+    assert.equal(matchedResponse.status, 200);
+    const matched = await matchedResponse.json();
+    assert.equal(matched.outcome, "matched");
+    assert.deepEqual(matched.changed, []);
+    assert.equal(matched.technical.expectedHash, publish.expectedHash);
+    assert.equal(matched.expected.body, discord.message.content);
+    assert.equal(matched.remote.body, discord.message.content);
+    assert.equal(
+      discord.createCalls + discord.updateCalls + discord.deleteCalls,
+      remoteMutationsBefore,
+    );
+    assert.deepEqual(
+      database.database.prepare(`
+        SELECT status, current_version_id, draft_version_id, pinned_at, hero_rank,
+          updated_at
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId),
+      invariantBefore,
+    );
+
+    discord.message.content = "Discord에서만 바꾼 본문";
+    const driftResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "fresh_check", postId: draft.postId }),
+    );
+    assert.equal(driftResponse.status, 200);
+    const drift = await driftResponse.json();
+    assert.equal(drift.outcome, "drift");
+    assert.deepEqual(drift.changed, ["body"]);
+    assert.notEqual(drift.technical.remoteHash, drift.technical.expectedHash);
+    const driftState = database.database.prepare(`
+      SELECT discord_delivery_state, discord_remote_hash, discord_checked_at
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    assert.equal(driftState.discord_delivery_state, "drift");
+    assert.equal(driftState.discord_remote_hash, drift.technical.remoteHash);
+    assert.match(driftState.discord_checked_at, /^\d{4}-\d{2}-\d{2}T/u);
+    assert.deepEqual(
+      database.database.prepare(`
+        SELECT status, current_version_id, draft_version_id, pinned_at, hero_rank,
+          updated_at
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId),
+      invariantBefore,
+    );
+    const attentionResponse = await request("/studio/api/drafts?filter=attention");
+    assert.equal(attentionResponse.status, 200);
+    const attention = await attentionResponse.json();
+    const driftItem = attention.items.find(({ postId }) => postId === draft.postId);
+    assert.equal(driftItem.attentionReason, "discord_drift");
+    assert.equal(driftItem.attentionAt, driftState.discord_checked_at);
+
+    failFreshRead = true;
+    const failedResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "fresh_check", postId: draft.postId }),
+    );
+    assert.equal(failedResponse.status, 503);
+    assert.deepEqual(
+      database.database.prepare(`
+        SELECT discord_delivery_state, discord_remote_hash, discord_checked_at
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId),
+      driftState,
+    );
+
+    failFreshRead = false;
+    discord.message.content = matched.expected.body;
+    const clearedResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "fresh_check", postId: draft.postId }),
+    );
+    assert.equal(clearedResponse.status, 200);
+    assert.equal((await clearedResponse.json()).outcome, "matched");
+    const cleared = database.database.prepare(`
+      SELECT discord_delivery_state, discord_remote_hash
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    assert.deepEqual({ ...cleared }, {
+      discord_delivery_state: "delivered",
+      discord_remote_hash: publish.expectedHash,
+    });
+    const clearedAttention = await request("/studio/api/drafts?filter=attention");
+    assert.equal(
+      (await clearedAttention.json()).items.some(({ postId }) => postId === draft.postId),
+      false,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
     database.close();
   }
 });

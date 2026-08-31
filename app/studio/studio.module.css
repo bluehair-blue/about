@@ -255,6 +255,22 @@
   line-height: 1.6;
 }
 
+.navigationDialog section,
+.navigationDialog details {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgb(255 255 255 / 10%);
+}
+
+.navigationDialog section h3 {
+  margin: 0;
+}
+
+.differenceText {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .navigationDialog > div {
   display: flex;
   flex-wrap: wrap;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import styles from "./studio.module.css";
 
@@ -48,6 +48,40 @@ type DeliveryStatus = {
     attempts: number;
     error: string | null;
     updatedAt: string;
+  };
+};
+
+type FreshCheckAttachment = {
+  filename: string;
+  size: number;
+  description: string | null;
+};
+
+type FreshCheckResult = {
+  postId: string;
+  action: "fresh_check";
+  outcome: "matched" | "drift";
+  checkedAt: string;
+  changed: Array<"body" | "images" | "classification">;
+  expected: {
+    title: string;
+    body: string;
+    tagIds: string[];
+    attachments: FreshCheckAttachment[];
+  };
+  remote: {
+    threadFound: boolean;
+    starterFound: boolean;
+    title: string | null;
+    body: string | null;
+    tagIds: string[];
+    attachments: FreshCheckAttachment[];
+  };
+  technical: {
+    threadId: string;
+    starterMessageId: string;
+    expectedHash: string;
+    remoteHash: string;
   };
 };
 
@@ -112,6 +146,52 @@ function isDeliveryStatus(value: unknown): value is DeliveryStatus {
     ));
 }
 
+function isFreshCheckAttachment(value: unknown): value is FreshCheckAttachment {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const attachment = value as Record<string, unknown>;
+  return typeof attachment.filename === "string" &&
+    typeof attachment.size === "number" &&
+    Number.isSafeInteger(attachment.size) &&
+    attachment.size >= 0 &&
+    (attachment.description === null || typeof attachment.description === "string");
+}
+
+function isFreshCheckResult(value: unknown): value is FreshCheckResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  const expected = result.expected as Record<string, unknown> | undefined;
+  const remote = result.remote as Record<string, unknown> | undefined;
+  const technical = result.technical as Record<string, unknown> | undefined;
+  const validSections = ["body", "images", "classification"];
+  return typeof result.postId === "string" &&
+    result.action === "fresh_check" &&
+    (result.outcome === "matched" || result.outcome === "drift") &&
+    typeof result.checkedAt === "string" &&
+    Array.isArray(result.changed) &&
+    result.changed.every((section) => validSections.includes(String(section))) &&
+    typeof expected === "object" && expected !== null &&
+    typeof expected.title === "string" &&
+    typeof expected.body === "string" &&
+    Array.isArray(expected.tagIds) &&
+    expected.tagIds.every((tagId) => typeof tagId === "string") &&
+    Array.isArray(expected.attachments) &&
+    expected.attachments.every(isFreshCheckAttachment) &&
+    typeof remote === "object" && remote !== null &&
+    typeof remote.threadFound === "boolean" &&
+    typeof remote.starterFound === "boolean" &&
+    (remote.title === null || typeof remote.title === "string") &&
+    (remote.body === null || typeof remote.body === "string") &&
+    Array.isArray(remote.tagIds) &&
+    remote.tagIds.every((tagId) => typeof tagId === "string") &&
+    Array.isArray(remote.attachments) &&
+    remote.attachments.every(isFreshCheckAttachment) &&
+    typeof technical === "object" && technical !== null &&
+    typeof technical.threadId === "string" &&
+    typeof technical.starterMessageId === "string" &&
+    typeof technical.expectedHash === "string" &&
+    typeof technical.remoteHash === "string";
+}
+
 function active(status: DeliveryStatus | null) {
   return status?.latestJob &&
     ["queued", "processing", "retrying", "verifying", "finalizing"].includes(
@@ -142,6 +222,13 @@ function errorLabel(value: string | null | undefined) {
     discord_create_failed: "Discord 생성 실패",
     discord_update_failed: "Discord 수정 실패",
     discord_delete_failed: "Discord 삭제 실패",
+    discord_check_unavailable: "Discord 확인 실패",
+    discord_check_rate_limited: "Discord 확인 요청 제한",
+    discord_check_invalid_response: "Discord 확인 응답 오류",
+    discord_tags_missing: "Discord 분류 연결 누락",
+    published_snapshot_invalid: "승인 원본 확인 실패",
+    published_mapping_not_found: "공개 mapping 없음",
+    fresh_check_conflict: "확인 중 상태 변경",
     notification_network_unknown: "알림 전송 결과 불명",
     notification_server_unknown: "알림 서버 결과 불명",
     notification_rate_limited: "알림 요청 제한",
@@ -165,6 +252,8 @@ export function DeliveryControls({
   const [freshPostId, setFreshPostId] = useState("");
   const [purgeTitle, setPurgeTitle] = useState("");
   const [heroRankInput, setHeroRankInput] = useState("");
+  const [review, setReview] = useState<FreshCheckResult | null>(null);
+  const reviewDialogRef = useRef<HTMLDialogElement>(null);
   const shownDelivery = delivery?.postId === postId ? delivery : null;
   const currentDelivery = freshPostId === postId ? shownDelivery : null;
 
@@ -216,6 +305,52 @@ export function DeliveryControls({
       window.removeEventListener("studio-state-changed", handleStateChanged);
     };
   }, [load, postId]);
+
+  useEffect(() => {
+    const dialog = reviewDialogRef.current;
+    if (review && dialog && !dialog.open) dialog.showModal();
+  }, [review]);
+
+  async function reviewDiscord() {
+    if (!postId || busy || !currentDelivery) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await fetch("/studio/api/publish", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-studio-request": "1",
+        },
+        body: JSON.stringify({ action: "fresh_check", postId }),
+      });
+      const result: unknown = await response.json();
+      if (!response.ok || !isFreshCheckResult(result) || result.postId !== postId) {
+        const error = typeof result === "object" && result !== null &&
+            typeof (result as Record<string, unknown>).error === "string"
+          ? (result as Record<string, string>).error
+          : null;
+        setMessage(
+          `Discord 확인을 마치지 못했습니다. Portfolio 공개본과 기존 연결은 그대로 유지했습니다. 잠시 뒤 다시 확인해 주세요. · ${errorLabel(error)}`,
+        );
+        return;
+      }
+      setReview(result);
+      setMessage(
+        result.outcome === "matched"
+          ? "Discord와 승인 원본이 일치합니다. Portfolio 공개본과 연결은 그대로 유지했습니다."
+          : "Discord에서 차이를 확인했습니다. Portfolio 공개본과 연결은 그대로 유지했습니다. 검토 창에서 달라진 부분을 확인해 주세요.",
+      );
+      await load(postId);
+      window.dispatchEvent(new Event("studio-state-changed"));
+    } catch {
+      setMessage(
+        "Discord 확인 응답을 받지 못했습니다. Portfolio 공개본과 기존 연결은 그대로 유지했습니다. 잠시 뒤 다시 확인해 주세요.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function submit(
     action:
@@ -399,6 +534,11 @@ export function DeliveryControls({
       {message ? <p className={styles.assetMessage} role="status">{message}</p> : null}
 
       <div className={styles.deliveryButtons}>
+        {currentDelivery?.postStatus === "published" && currentDelivery.threadId ? (
+          <button type="button" disabled={busy} onClick={() => void reviewDiscord()}>
+            {busy ? "확인 중…" : "차이 검토"}
+          </button>
+        ) : null}
         {canReconcile ? (
           <button
             type="button"
@@ -547,6 +687,85 @@ export function DeliveryControls({
           </button>
         </div>
       </details>
+      <dialog
+        ref={reviewDialogRef}
+        className={styles.navigationDialog}
+        onClose={() => setReview(null)}
+      >
+        {review ? (
+          <>
+            <h2>
+              {review.outcome === "matched"
+                ? "Discord와 승인 원본이 일치합니다"
+                : "Discord에서 차이를 확인했습니다"}
+            </h2>
+            <p>
+              {review.outcome === "matched"
+                ? "확인 시각만 갱신했습니다. Portfolio 공개본과 Discord 연결은 그대로입니다."
+                : "자동으로 수정하지 않았습니다. Portfolio 공개본과 Discord 연결은 그대로입니다. 달라진 부분만 아래에 표시합니다."}
+            </p>
+            {review.changed.includes("body") ? (
+              <section>
+                <h3>본문</h3>
+                <p><strong>승인 원본 제목</strong> · {review.expected.title}</p>
+                <p><strong>Discord 제목</strong> · {review.remote.title ?? "thread 없음"}</p>
+                <p className={styles.differenceText}>
+                  <strong>승인 원본 본문</strong><br />{review.expected.body}
+                </p>
+                <p className={styles.differenceText}>
+                  <strong>Discord 본문</strong><br />{review.remote.body ?? "starter message 없음"}
+                </p>
+              </section>
+            ) : null}
+            {review.changed.includes("images") ? (
+              <section>
+                <h3>이미지</h3>
+                <p>
+                  승인 원본 {review.expected.attachments.length}장 · Discord {review.remote.attachments.length}장
+                </p>
+                <p>
+                  승인 원본: {review.expected.attachments.map(({ filename }) => filename).join(", ") || "없음"}
+                </p>
+                <p>
+                  Discord: {review.remote.attachments.map(({ filename }) => filename).join(", ") || "없음"}
+                </p>
+              </section>
+            ) : null}
+            {review.changed.includes("classification") ? (
+              <section>
+                <h3>분류</h3>
+                <p>
+                  Forum 위치나 적용 tag가 승인 원본과 다릅니다. 기술 정보에서 ID를 확인하세요.
+                </p>
+              </section>
+            ) : null}
+            {!review.remote.threadFound ? (
+              <p role="alert">
+                연결된 Discord thread를 찾지 못했습니다. 자동으로 새 글을 만들지 않았습니다.
+              </p>
+            ) : !review.remote.starterFound ? (
+              <p role="alert">
+                연결된 starter message를 찾지 못했습니다. 자동으로 새 글을 만들지 않았습니다.
+              </p>
+            ) : null}
+            <details>
+              <summary>기술 정보</summary>
+              <p>확인 시각 · {timeLabel(review.checkedAt)}</p>
+              <p>thread ID · {review.technical.threadId}</p>
+              <p>starter ID · {review.technical.starterMessageId}</p>
+              <p className={styles.differenceText}>expected hash · {review.technical.expectedHash}</p>
+              <p className={styles.differenceText}>remote hash · {review.technical.remoteHash}</p>
+              <p>expected tag IDs · {review.expected.tagIds.join(", ") || "없음"}</p>
+              <p>remote tag IDs · {review.remote.tagIds.join(", ") || "없음"}</p>
+            </details>
+            <div>
+              <button type="button" onClick={() => reviewDialogRef.current?.close()}>
+                현재 상태 유지
+              </button>
+            </div>
+          </>
+        ) : null}
+      </dialog>
     </section>
   );
 }
