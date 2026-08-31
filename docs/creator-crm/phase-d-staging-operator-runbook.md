@@ -97,6 +97,14 @@ public/og.png
 7. BOT TEST `#start-here` 역할 패널에서 `알림 받기`를 눌러 ephemeral `알림을 켰어요.`와 test role 추가를 확인한다.
 8. 바로 `알림 끄기`를 눌러 ephemeral `알림을 껐어요.`와 test role 제거를 확인한다. role을 켠 채 fixture를 끝내지 않는다.
 
+`queued`가 1분 넘게 바뀌지 않으면 게시 버튼을 다시 누르지 않는다. Studio에 표시되는 `같은 Queue job 다시 등록`을 한 번 누르고, 최근 job ID가 그대로인지 확인한다. 이 동작은 같은 outbox job만 다시 Queue에 넣으며 새 Discord thread나 새 delivery job을 만들지 않는다. 그래도 consumer 호출이 없다면 아래 순서로 staging Queue 연결을 확인하고 idempotent resume 뒤 같은 버튼을 한 번만 다시 사용한다.
+
+```powershell
+npx wrangler queues info about-studio-publish-staging
+npx wrangler queues consumer list about-studio-publish-staging
+npx wrangler queues resume-delivery about-studio-publish-staging
+```
+
 `postId`는 editor URL에서 복사한다. 아래 조회로 slug, thread, asset exact key와 job을 기록한다.
 
 ```powershell

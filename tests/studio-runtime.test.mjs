@@ -169,6 +169,9 @@ test("keeps the Phase B Studio UI on canonical Markdown, taxonomy, Media, and su
   assert.match(list, /\? "차이 검토"/);
   assert.match(delivery, /오래된 상태이며 action을 막았습니다/);
   assert.match(delivery, /Discord 재전송 없이 D1 반영 재시도/);
+  assert.match(delivery, /STALLED_QUEUE_MS = 60_000/);
+  assert.match(delivery, /같은 Queue job 다시 등록/);
+  assert.match(delivery, /새 작업을 만들지 않고 같은 job만 다시 등록합니다/);
   assert.match(delivery, /action: "fresh_check"/);
   assert.match(delivery, /Portfolio 공개본과 기존 연결은 그대로 유지했습니다/);
   assert.match(delivery, /Discord를 원본에 맞추기/);

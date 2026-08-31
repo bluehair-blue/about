@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import styles from "./studio.module.css";
 
+const STALLED_QUEUE_MS = 60_000;
+
 type DeliveryStatus = {
   postId: string;
   postStatus: string;
@@ -286,6 +288,7 @@ export function DeliveryControls({
   const [purgeTitle, setPurgeTitle] = useState("");
   const [heroRankInput, setHeroRankInput] = useState("");
   const [review, setReview] = useState<FreshCheckResult | null>(null);
+  const [observedAt, setObservedAt] = useState(0);
   const reviewDialogRef = useRef<HTMLDialogElement>(null);
   const shownDelivery = delivery?.postId === postId ? delivery : null;
   const currentDelivery = freshPostId === postId ? shownDelivery : null;
@@ -301,6 +304,7 @@ export function DeliveryControls({
     }
     setDelivery(result);
     setFreshPostId(targetPostId);
+    setObservedAt(Date.now());
     return result;
   }, []);
 
@@ -519,6 +523,8 @@ export function DeliveryControls({
 
   const retryable = currentDelivery?.latestJob &&
     ["queue_failed", "retrying", "failed", "finalizing"].includes(currentDelivery.latestJob.status);
+  const stalledQueuedJob = currentDelivery?.latestJob?.status === "queued" &&
+    observedAt - Date.parse(currentDelivery.latestJob.updatedAt) >= STALLED_QUEUE_MS;
   const notificationRetryable = currentDelivery?.notificationJob &&
     ["queue_failed", "retrying", "failed"].includes(
       currentDelivery.notificationJob.status,
@@ -619,6 +625,11 @@ export function DeliveryControls({
           알림 전송 결과가 불명확해 자동 재전송을 멈췄습니다. announcements channel을 먼저 대조해야 합니다.
         </p>
       ) : null}
+      {stalledQueuedJob ? (
+        <p className={styles.deliveryWarning} role="status">
+          Queue 확인이 1분 넘게 멈췄습니다. 아래 버튼은 새 작업을 만들지 않고 같은 job만 다시 등록합니다.
+        </p>
+      ) : null}
       {message ? <p className={styles.assetMessage} role="status">{message}</p> : null}
 
       <div className={styles.deliveryButtons}>
@@ -655,13 +666,15 @@ export function DeliveryControls({
             기존 Discord 글 재연결
           </button>
         ) : null}
-        {retryable ? (
+        {retryable || stalledQueuedJob ? (
           <button
             type="button"
             disabled={busy}
             onClick={() => void submit("retry", currentDelivery.latestJob?.jobId)}
           >
-            {currentDelivery.latestJob?.status === "finalizing"
+            {stalledQueuedJob
+              ? "같은 Queue job 다시 등록"
+              : currentDelivery.latestJob?.status === "finalizing"
               ? "Discord 재전송 없이 D1 반영 재시도"
               : "같은 job 재시도"}
           </button>
