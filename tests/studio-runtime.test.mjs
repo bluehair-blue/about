@@ -178,6 +178,11 @@ test("keeps the Phase B Studio UI on canonical Markdown, taxonomy, Media, and su
   assert.match(delivery, /공개 재개/);
   assert.match(delivery, /Discord 연결만 해제/);
   assert.match(delivery, /기존 Discord 글 재연결/);
+  assert.doesNotMatch(delivery, /window\.confirm/);
+  assert.match(delivery, /양쪽 공개를 보관할까요/);
+  assert.match(delivery, /Discord 연결만 해제할까요/);
+  assert.match(delivery, /원본을 영구 삭제할까요/);
+  assert.match(delivery, /actionDialogRef\.current\?\.close\(\)/);
   assert.match(editor, /저장본 JSON/);
   const operations = readFileSync(
     new URL("../app/studio/operations-summary.tsx", import.meta.url),

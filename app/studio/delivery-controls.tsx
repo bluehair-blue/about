@@ -98,6 +98,30 @@ type FreshCheckResult = {
   };
 };
 
+type ConfirmedAction = "archive" | "detach" | "purge";
+
+const ACTION_CONFIRMATION: Record<ConfirmedAction, {
+  title: string;
+  description: string;
+  confirmLabel: string;
+}> = {
+  archive: {
+    title: "양쪽 공개를 보관할까요?",
+    description: "Portfolio를 숨기고 BOT TEST Forum thread를 삭제해 보관합니다.",
+    confirmLabel: "양쪽 공개 보관 실행",
+  },
+  detach: {
+    title: "Discord 연결만 해제할까요?",
+    description: "Discord thread와 대화는 그대로 두고 Studio mapping과 공개 CTA만 해제합니다.",
+    confirmLabel: "연결만 해제 실행",
+  },
+  purge: {
+    title: "원본을 영구 삭제할까요?",
+    description: "private source와 모든 파생본을 영구 삭제하고 tombstone만 남깁니다. 되돌릴 수 없습니다.",
+    confirmLabel: "원본 영구 삭제 실행",
+  },
+};
+
 function byteLabel(value: number) {
   return value < 1024 * 1024
     ? `${Math.ceil(value / 1024)} KB`
@@ -288,8 +312,10 @@ export function DeliveryControls({
   const [purgeTitle, setPurgeTitle] = useState("");
   const [heroRankInput, setHeroRankInput] = useState("");
   const [review, setReview] = useState<FreshCheckResult | null>(null);
+  const [pendingAction, setPendingAction] = useState<ConfirmedAction | null>(null);
   const [observedAt, setObservedAt] = useState(0);
   const reviewDialogRef = useRef<HTMLDialogElement>(null);
+  const actionDialogRef = useRef<HTMLDialogElement>(null);
   const shownDelivery = delivery?.postId === postId ? delivery : null;
   const currentDelivery = freshPostId === postId ? shownDelivery : null;
 
@@ -347,6 +373,11 @@ export function DeliveryControls({
     const dialog = reviewDialogRef.current;
     if (review && dialog && !dialog.open) dialog.showModal();
   }, [review]);
+
+  useEffect(() => {
+    const dialog = actionDialogRef.current;
+    if (pendingAction && dialog && !dialog.open) dialog.showModal();
+  }, [pendingAction]);
 
   async function reviewDiscord() {
     if (!postId || busy || !currentDelivery) return;
@@ -449,20 +480,6 @@ export function DeliveryControls({
     heroRank?: number | null,
   ) {
     if (!postId || busy) return;
-    if (
-      action === "archive" &&
-      !window.confirm("Portfolio를 숨기고 BOT TEST Forum thread를 삭제해 보관합니다. 계속할까요?")
-    ) return;
-    if (
-      action === "purge" &&
-      !window.confirm("private source와 모든 파생본을 영구 삭제하고 tombstone만 남깁니다. 되돌릴 수 없습니다.")
-    ) return;
-    if (
-      action === "detach" &&
-      !window.confirm(
-        "Discord thread와 대화는 그대로 두고 Studio mapping과 공개 CTA만 해제합니다. 계속할까요?",
-      )
-    ) return;
     setBusy(true);
     setMessage("");
     try {
@@ -533,6 +550,7 @@ export function DeliveryControls({
   const canReconcile = currentDelivery?.latestJob?.status === "outcome_unknown" &&
     currentDelivery.latestJob.action === "update";
   const notificationUnknown = shownDelivery?.notificationJob?.status === "outcome_unknown";
+  const confirmation = pendingAction ? ACTION_CONFIRMATION[pendingAction] : null;
 
   return (
     <section className={styles.card} aria-labelledby="delivery-heading">
@@ -728,7 +746,7 @@ export function DeliveryControls({
             type="button"
             className={styles.dangerButton}
             disabled={disabled || busy || !currentDelivery?.canArchive || Boolean(active(currentDelivery))}
-            onClick={() => void submit("archive")}
+            onClick={() => setPendingAction("archive")}
           >
             양쪽 공개 보관
           </button>
@@ -739,7 +757,7 @@ export function DeliveryControls({
               disabled || busy || !currentDelivery?.canDetach ||
               Boolean(active(currentDelivery))
             }
-            onClick={() => void submit("detach")}
+            onClick={() => setPendingAction("detach")}
           >
             Discord 연결만 해제
           </button>
@@ -812,7 +830,7 @@ export function DeliveryControls({
               purgeTitle.length === 0 ||
               Boolean(active(currentDelivery))
             }
-            onClick={() => void submit("purge")}
+            onClick={() => setPendingAction("purge")}
           >
             원본까지 영구 삭제
           </button>
@@ -914,6 +932,37 @@ export function DeliveryControls({
               ) : null}
               <button type="button" onClick={() => reviewDialogRef.current?.close()}>
                 현재 상태 유지
+              </button>
+            </div>
+          </>
+        ) : null}
+      </dialog>
+      <dialog
+        ref={actionDialogRef}
+        className={styles.navigationDialog}
+        aria-labelledby="delivery-confirm-heading"
+        onClose={() => setPendingAction(null)}
+      >
+        {confirmation && pendingAction ? (
+          <>
+            <h2 id="delivery-confirm-heading">{confirmation.title}</h2>
+            <p>{confirmation.description}</p>
+            <div>
+              <button
+                type="button"
+                className={styles.dangerButton}
+                disabled={busy}
+                onClick={() => {
+                  const action = pendingAction;
+                  actionDialogRef.current?.close();
+                  setPendingAction(null);
+                  void submit(action);
+                }}
+              >
+                {confirmation.confirmLabel}
+              </button>
+              <button type="button" disabled={busy} onClick={() => actionDialogRef.current?.close()}>
+                취소
               </button>
             </div>
           </>
