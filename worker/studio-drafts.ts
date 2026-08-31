@@ -288,6 +288,18 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
             AND post.discord_checked_at IS NOT NULL
             AND post.discord_checked_at >= job.updated_at
           )
+          AND NOT (
+            job.target = 'discord' AND job.action = 'create'
+            AND job.error_code = 'restore_compensated'
+            AND EXISTS (
+              SELECT 1 FROM delivery_jobs AS compensation
+              WHERE compensation.post_id = job.post_id
+                AND compensation.action = 'delete'
+                AND compensation.status = 'succeeded'
+                AND json_extract(compensation.payload_json,
+                  '$.compensateRestoreJobId') = job.id
+            )
+          )
         ORDER BY job.updated_at DESC, job.id DESC LIMIT 1) AS failed_job_status,
       (SELECT job.error_code FROM delivery_jobs AS job
         WHERE job.post_id = post.id
@@ -303,6 +315,18 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
             AND post.discord_checked_at IS NOT NULL
             AND post.discord_checked_at >= job.updated_at
           )
+          AND NOT (
+            job.target = 'discord' AND job.action = 'create'
+            AND job.error_code = 'restore_compensated'
+            AND EXISTS (
+              SELECT 1 FROM delivery_jobs AS compensation
+              WHERE compensation.post_id = job.post_id
+                AND compensation.action = 'delete'
+                AND compensation.status = 'succeeded'
+                AND json_extract(compensation.payload_json,
+                  '$.compensateRestoreJobId') = job.id
+            )
+          )
         ORDER BY job.updated_at DESC, job.id DESC LIMIT 1) AS failed_job_error,
       (SELECT job.updated_at FROM delivery_jobs AS job
         WHERE job.post_id = post.id
@@ -317,6 +341,18 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
             AND post.discord_delivery_state = 'delivered'
             AND post.discord_checked_at IS NOT NULL
             AND post.discord_checked_at >= job.updated_at
+          )
+          AND NOT (
+            job.target = 'discord' AND job.action = 'create'
+            AND job.error_code = 'restore_compensated'
+            AND EXISTS (
+              SELECT 1 FROM delivery_jobs AS compensation
+              WHERE compensation.post_id = job.post_id
+                AND compensation.action = 'delete'
+                AND compensation.status = 'succeeded'
+                AND json_extract(compensation.payload_json,
+                  '$.compensateRestoreJobId') = job.id
+            )
           )
         ORDER BY job.updated_at DESC, job.id DESC LIMIT 1) AS failed_job_at,
       (SELECT asset.updated_at FROM studio_assets AS asset
@@ -353,6 +389,18 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
               AND post.discord_delivery_state = 'delivered'
               AND post.discord_checked_at IS NOT NULL
               AND post.discord_checked_at >= job.updated_at
+            )
+            AND NOT (
+              job.target = 'discord' AND job.action = 'create'
+              AND job.error_code = 'restore_compensated'
+              AND EXISTS (
+                SELECT 1 FROM delivery_jobs AS compensation
+                WHERE compensation.post_id = job.post_id
+                  AND compensation.action = 'delete'
+                  AND compensation.status = 'succeeded'
+                  AND json_extract(compensation.payload_json,
+                    '$.compensateRestoreJobId') = job.id
+              )
             )
         )
         OR EXISTS (

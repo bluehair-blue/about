@@ -2145,6 +2145,31 @@ async function queueExpiredRetentionCleanup(
   );
 }
 
+export async function enqueueScheduledRetentionCleanup(env: PhaseAEnv) {
+  const database = env.STUDIO_DB;
+  const queue = env.PUBLISH_QUEUE;
+  if (!database || !queue) throw new Error("asset_cleanup_unavailable");
+  const response = await queueExpiredRetentionCleanup(
+    new Request("https://studio.invalid/studio/api/assets/cleanup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    }),
+    env,
+    database,
+    queue,
+  );
+  const result = await response.json() as unknown;
+  if (!response.ok) {
+    const error = typeof result === "object" && result !== null &&
+        !Array.isArray(result) && typeof (result as { error?: unknown }).error === "string"
+      ? (result as { error: string }).error
+      : "asset_cleanup_unavailable";
+    throw new Error(error);
+  }
+  return result;
+}
+
 function cleanupErrorCode(error: unknown) {
   const code = error instanceof Error ? error.message : "asset_cleanup_failed";
   return [

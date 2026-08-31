@@ -9,8 +9,12 @@ import {
 } from "./discord-interactions";
 import { phaseAEnvironmentErrors, type PhaseAEnv } from "./phase-a-env";
 import { handlePublicMedia, publicMediaAssetId } from "./public-media";
-import { handleStudioAssetRequest } from "./studio-assets";
+import {
+  enqueueScheduledRetentionCleanup,
+  handleStudioAssetRequest,
+} from "./studio-assets";
 import { handleStudioDraftRequest } from "./studio-drafts";
+import { handleStudioOperationsRequest } from "./studio-operations";
 import {
   enqueueDailyDiscordChecks,
   handleStudioPublishRequest,
@@ -23,6 +27,8 @@ const DRAFTS_PATH = "/studio/api/drafts";
 const ASSETS_PATH = "/studio/api/assets";
 const PUBLISH_PATH = "/studio/api/publish";
 const TAXONOMY_PATH = "/studio/api/taxonomy";
+const EXPORT_PATH = "/studio/api/export";
+const OPERATIONS_PATH = "/studio/api/operations";
 const STUDIO_WRITE_HEADER = "x-studio-request";
 type VinextContext = Parameters<typeof handler.fetch>[2];
 type StudioScheduledController = { scheduledTime?: number };
@@ -177,6 +183,10 @@ const worker = {
         return privateResponse(await handleStudioTaxonomyRequest(request, env));
       }
 
+      if (url.pathname === EXPORT_PATH || url.pathname === OPERATIONS_PATH) {
+        return privateResponse(await handleStudioOperationsRequest(request, env));
+      }
+
       return privateResponse(
         await withRuntimeEnv(env, () => handler.fetch(request, env, context)),
       );
@@ -194,7 +204,10 @@ const worker = {
     if (phaseAEnvironmentErrors(env).length > 0) {
       throw new Error("studio_scheduled_unavailable");
     }
-    await enqueueDailyDiscordChecks(env, controller.scheduledTime);
+    await Promise.all([
+      enqueueDailyDiscordChecks(env, controller.scheduledTime),
+      enqueueScheduledRetentionCleanup(env),
+    ]);
   },
 };
 

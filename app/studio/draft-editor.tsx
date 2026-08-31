@@ -667,6 +667,11 @@ export function DraftEditor({ postId }: { postId: string | null }) {
           <Link href="/studio/media" onClick={handleNavigation}>
             Media
           </Link>
+          {postId ? (
+            <a href={`/studio/api/export?postId=${encodeURIComponent(postId)}`} download>
+              저장본 JSON
+            </a>
+          ) : null}
         </div>
         <span>{moving ? "저장 후 이동 중…" : "이동 전 최신 revision 확인"}</span>
       </nav>

@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { DraftList, type DraftFilter } from "./draft-list";
+import { OperationsSummary } from "./operations-summary";
 
 const filters = new Set<DraftFilter>(["all", "working", "attention"]);
 
@@ -13,5 +14,10 @@ export default async function StudioPage({
   if (typeof value !== "string" || !filters.has(value as DraftFilter)) {
     redirect("/studio?filter=all");
   }
-  return <DraftList key={value} filter={value as DraftFilter} />;
+  return (
+    <>
+      <OperationsSummary />
+      <DraftList key={value} filter={value as DraftFilter} />
+    </>
+  );
 }

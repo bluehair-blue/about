@@ -1765,12 +1765,22 @@ async function retryDelivery(
     const changedAt = new Date().toISOString();
     const statements = [];
     let restore = false;
+    let restoreCompensation = false;
     if (job.target === "discord" && job.action === "create") {
       try {
         const payload = JSON.parse(job.payload_json) as unknown;
         restore = isRecord(payload) && payload.restore === true;
       } catch {
         restore = false;
+      }
+    }
+    if (job.target === "discord" && job.action === "delete") {
+      try {
+        const payload = JSON.parse(job.payload_json) as unknown;
+        restoreCompensation = isRecord(payload) &&
+          typeof payload.compensateRestoreJobId === "string";
+      } catch {
+        restoreCompensation = false;
       }
     }
     if (
@@ -1803,6 +1813,8 @@ async function retryDelivery(
     }
     const retryPostStatus = job.action === "check"
       ? "published"
+      : job.action === "delete"
+      ? restoreCompensation ? "restoring" : "archiving"
       : restore
       ? "restoring"
       : "publishing";
@@ -2266,10 +2278,15 @@ function parseDeliveryPayload(job: DeliveryJob) {
     const payload = JSON.parse(job.payload_json) as unknown;
     if (!isRecord(payload)) return null;
     if (job.action === "delete") {
-      return typeof payload.threadId === "string" &&
-          /^\d{17,20}$/.test(payload.threadId) &&
-          typeof payload.starterMessageId === "string" &&
-          /^\d{17,20}$/.test(payload.starterMessageId)
+      const compensation = Object.hasOwn(payload, "compensateRestoreJobId");
+      return validDiscordId(payload.threadId) &&
+          validDiscordId(payload.starterMessageId) &&
+          (!compensation || (
+            typeof payload.compensateRestoreJobId === "string" &&
+            uuidPattern.test(payload.compensateRestoreJobId) &&
+            validDiscordId(payload.archivedThreadId) &&
+            validDiscordId(payload.archivedStarterMessageId)
+          ))
           ? {
             threadId: payload.threadId,
             starterMessageId: payload.starterMessageId,
@@ -2277,8 +2294,13 @@ function parseDeliveryPayload(job: DeliveryJob) {
             assets: [] as PublishCandidateAsset[],
             previousVersionId: null,
             restore: false,
-            archivedThreadId: null,
-            archivedStarterMessageId: null,
+            archivedThreadId: compensation ? payload.archivedThreadId as string : null,
+            archivedStarterMessageId: compensation
+              ? payload.archivedStarterMessageId as string
+              : null,
+            compensateRestoreJobId: compensation
+              ? payload.compensateRestoreJobId as string
+              : null,
           }
         : null;
     }
@@ -3157,6 +3179,108 @@ async function finalizeDiscordDelivery(
       await setJobState(database, job.id, "outcome_unknown", "discord_mapping_missing");
       return { action: "ack" };
     }
+    if (
+      "compensateRestoreJobId" in payload &&
+      typeof payload.compensateRestoreJobId === "string"
+    ) {
+      if (!payload.archivedThreadId || !payload.archivedStarterMessageId) {
+        await setJobState(database, job.id, "outcome_unknown", "delivery_payload_invalid");
+        return { action: "ack" };
+      }
+      const compensated = await database.batch([
+        database.prepare(`
+          UPDATE studio_posts
+          SET status = 'archived', discord_delivery_state = 'deleted',
+            discord_remote_hash = NULL, discord_checked_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'restoring' AND current_version_id = ?
+            AND discord_thread_id = ? AND discord_starter_message_id = ?
+            AND archived_at IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM delivery_jobs AS restore_job
+              WHERE restore_job.id = ? AND restore_job.post_id = studio_posts.id
+                AND restore_job.version_id = ? AND restore_job.target = 'discord'
+                AND restore_job.action = 'create' AND restore_job.status = 'failed'
+                AND restore_job.error_code = 'restore_compensation_queued'
+                AND restore_job.remote_id = ? AND restore_job.remote_aux_id = ?
+            )
+            AND EXISTS (
+              SELECT 1 FROM delivery_jobs AS compensation
+              WHERE compensation.id = ? AND compensation.post_id = studio_posts.id
+                AND compensation.version_id = ? AND compensation.target = 'discord'
+                AND compensation.action = 'delete'
+                AND compensation.status = 'finalizing'
+                AND compensation.remote_id = ? AND compensation.remote_aux_id = ?
+            )
+        `).bind(
+          completedAt,
+          completedAt,
+          job.post_id,
+          job.version_id,
+          payload.archivedThreadId,
+          payload.archivedStarterMessageId,
+          payload.compensateRestoreJobId,
+          job.version_id,
+          job.remote_id,
+          job.remote_aux_id,
+          job.id,
+          job.version_id,
+          job.remote_id,
+          job.remote_aux_id,
+        ),
+        database.prepare(`
+          UPDATE delivery_jobs
+          SET error_code = 'restore_compensated', last_error = 'restore_compensated',
+            updated_at = ?, completed_at = ?
+          WHERE id = ? AND post_id = ? AND version_id = ?
+            AND target = 'discord' AND action = 'create' AND status = 'failed'
+            AND error_code = 'restore_compensation_queued'
+            AND remote_id = ? AND remote_aux_id = ?
+            AND EXISTS (
+              SELECT 1 FROM studio_posts
+              WHERE id = ? AND status = 'archived' AND current_version_id = ?
+                AND discord_thread_id = ? AND discord_starter_message_id = ?
+            )
+        `).bind(
+          completedAt,
+          completedAt,
+          payload.compensateRestoreJobId,
+          job.post_id,
+          job.version_id,
+          job.remote_id,
+          job.remote_aux_id,
+          job.post_id,
+          job.version_id,
+          payload.archivedThreadId,
+          payload.archivedStarterMessageId,
+        ),
+        database.prepare(`
+          UPDATE delivery_jobs
+          SET status = 'succeeded', error_code = NULL, last_error = NULL,
+            updated_at = ?, completed_at = ?
+          WHERE id = ? AND post_id = ? AND version_id = ?
+            AND target = 'discord' AND action = 'delete' AND status = 'finalizing'
+            AND remote_id = ? AND remote_aux_id = ?
+            AND EXISTS (
+              SELECT 1 FROM delivery_jobs
+              WHERE id = ? AND status = 'failed'
+                AND error_code = 'restore_compensated'
+            )
+        `).bind(
+          completedAt,
+          completedAt,
+          job.id,
+          job.post_id,
+          job.version_id,
+          job.remote_id,
+          job.remote_aux_id,
+          payload.compensateRestoreJobId,
+        ),
+      ]);
+      if (compensated[2]?.meta?.changes !== 1) {
+        throw new Error("restore_compensation_finalization_failed");
+      }
+      return { action: "ack" };
+    }
     const finalized = await finalizeVerifiedDelivery(database, {
       kind: "archive",
       jobId: job.id,
@@ -3846,6 +3970,93 @@ export async function recoverStudioNotificationQueueFailure(
   return { action: "retry", delaySeconds: 5 };
 }
 
+async function queueRestoreCompensation(
+  job: DeliveryJob,
+  payload: NonNullable<ReturnType<typeof parseDeliveryPayload>>,
+  env: PhaseAEnv,
+  database: StudioD1,
+) {
+  if (
+    job.action !== "create" || payload.restore !== true ||
+    !job.version_id || !job.remote_id || !job.remote_aux_id ||
+    !payload.archivedThreadId || !payload.archivedStarterMessageId ||
+    !env.PUBLISH_QUEUE
+  ) return false;
+  const compensationJobId = crypto.randomUUID();
+  const queuedAt = new Date().toISOString();
+  const dedupeKey = `restore-compensation:${job.id}`;
+  const compensationPayload = JSON.stringify({
+    threadId: job.remote_id,
+    starterMessageId: job.remote_aux_id,
+    compensateRestoreJobId: job.id,
+    archivedThreadId: payload.archivedThreadId,
+    archivedStarterMessageId: payload.archivedStarterMessageId,
+  });
+  const prepared = await database.batch([
+    database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, version_id, target, action, payload_json,
+        status, attempts, created_at, updated_at
+      )
+      SELECT ?, ?, restore_job.post_id, restore_job.version_id,
+        'discord', 'delete', ?, 'queued', 0, ?, ?
+      FROM delivery_jobs AS restore_job
+      JOIN studio_posts AS post ON post.id = restore_job.post_id
+      WHERE restore_job.id = ? AND restore_job.action = 'create'
+        AND restore_job.status = 'finalizing' AND restore_job.version_id = ?
+        AND restore_job.remote_id = ? AND restore_job.remote_aux_id = ?
+        AND post.status = 'restoring' AND post.current_version_id = ?
+        AND post.discord_thread_id = ? AND post.discord_starter_message_id = ?
+        AND post.archived_at IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_jobs WHERE dedupe_key = ?
+        )
+    `).bind(
+      compensationJobId,
+      dedupeKey,
+      compensationPayload,
+      queuedAt,
+      queuedAt,
+      job.id,
+      job.version_id,
+      job.remote_id,
+      job.remote_aux_id,
+      job.version_id,
+      payload.archivedThreadId,
+      payload.archivedStarterMessageId,
+      dedupeKey,
+    ),
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'failed', error_code = 'restore_compensation_queued',
+        last_error = 'restore_compensation_queued', updated_at = ?,
+        completed_at = ?
+      WHERE id = ? AND action = 'create' AND status = 'finalizing'
+        AND version_id = ? AND remote_id = ? AND remote_aux_id = ?
+        AND EXISTS (
+          SELECT 1 FROM delivery_jobs
+          WHERE id = ? AND dedupe_key = ? AND action = 'delete'
+            AND status = 'queued'
+        )
+    `).bind(
+      queuedAt,
+      queuedAt,
+      job.id,
+      job.version_id,
+      job.remote_id,
+      job.remote_aux_id,
+      compensationJobId,
+      dedupeKey,
+    ),
+  ]);
+  if (
+    prepared[0]?.meta?.changes !== 1 ||
+    prepared[1]?.meta?.changes !== 1
+  ) return false;
+  await enqueue(database, env.PUBLISH_QUEUE, compensationJobId);
+  return true;
+}
+
 export async function recoverStudioDiscordQueueFailure(
   jobId: string,
   env: PhaseAEnv,
@@ -3876,6 +4087,10 @@ export async function recoverStudioDiscordQueueFailure(
   }
   if (terminal) {
     if (job.status === "finalizing") {
+      const payload = parseDeliveryPayload(job);
+      if (payload && await queueRestoreCompensation(job, payload, env, database)) {
+        return { action: "retry" };
+      }
       await setJobState(
         database,
         job.id,

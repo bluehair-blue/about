@@ -175,10 +175,121 @@ test("keeps the Phase B Studio UI on canonical Markdown, taxonomy, Media, and su
   assert.match(delivery, /공개 재개/);
   assert.match(delivery, /Discord 연결만 해제/);
   assert.match(delivery, /기존 Discord 글 재연결/);
+  assert.match(editor, /저장본 JSON/);
+  const operations = readFileSync(
+    new URL("../app/studio/operations-summary.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(operations, /최근 24시간 운영 상태/);
+  assert.match(operations, /마지막 성공/);
+  assert.match(operations, /실패율/);
+  assert.match(operations, /평균 처리 시간/);
   assert.match(delivery, /<dialog/);
   assert.match(delivery, /기술 정보/);
   assert.match(delivery, /<details/);
   assert.match(editor, /<DeliveryControls[\s\S]*?disabled=\{\s*!ready \|\| dirty/);
+});
+
+test("exports one post manifest and shows only aggregate operations health", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const media = new MemoryR2();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: media,
+    IMAGES: new FakeImages(),
+    PUBLISH_QUEUE: queue,
+  });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const discord = new FakeDiscordForum(env);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [keys.publicJwk] });
+    }
+    return discord.fetch(input, init);
+  };
+  const request = async (pathname, init = {}) => worker.fetch(
+    new Request(`https://staging.example${pathname}`, {
+      ...init,
+      headers: {
+        "cf-access-jwt-assertion": token,
+        ...(init.headers ?? {}),
+      },
+    }),
+    env,
+    executionContext(),
+  );
+
+  try {
+    const draft = await createDraftFixture(request, "운영 export fixture");
+    const uploadResponse = await request(
+      "/studio/api/assets",
+      sourceUpload(draft.postId, 0, staticPng, { alt: "export 이미지" }),
+    );
+    const upload = await uploadResponse.json();
+    const assetMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [assetMessage] }, env);
+    assert.equal(assetMessage.acked, true);
+
+    const publishResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "publish", postId: draft.postId }),
+    );
+    const publish = await publishResponse.json();
+    const deliveryMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [deliveryMessage] }, env);
+    assert.equal(deliveryMessage.acked, true);
+    const notificationMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [notificationMessage] }, env);
+    assert.equal(notificationMessage.acked, true);
+
+    const exportResponse = await request(
+      `/studio/api/export?postId=${draft.postId}`,
+    );
+    assert.equal(exportResponse.status, 200);
+    assert.equal(
+      exportResponse.headers.get("content-disposition"),
+      `attachment; filename="studio-${draft.postId}.json"`,
+    );
+    const exported = await exportResponse.json();
+    assert.equal(exported.schema, "studio-export/v1");
+    assert.equal(exported.privateSourceBytesIncluded, false);
+    assert.equal(exported.post.id, draft.postId);
+    assert.equal(exported.post.current_version_id, publish.candidateId);
+    assert.equal(exported.assets.length, 1);
+    assert.equal(exported.assets[0].id, upload.assetId);
+    assert.match(exported.assets[0].private_source_key, /\/private\//u);
+    assert.match(exported.assets[0].source_sha256, /^[0-9a-f]{64}$/u);
+    assert.equal(exported.versionAssets[0].alt, "export 이미지");
+    assert.equal(exported.deliveryJobs.some(({ action }) => action === "create"), true);
+    assert.equal(
+      exported.deliveryJobs.some((job) => Object.hasOwn(job, "payload_json")),
+      false,
+    );
+    const serialized = JSON.stringify(exported);
+    assert.equal(serialized.includes(env.DISCORD_BOT_TOKEN), false);
+    assert.equal(serialized.includes(env.CLOUDFLARE_CACHE_PURGE_TOKEN), false);
+    assert.equal(serialized.includes(adminEmail), false);
+
+    const operationsResponse = await request("/studio/api/operations");
+    assert.equal(operationsResponse.status, 200);
+    const operations = await operationsResponse.json();
+    assert.equal(operations.schema, "studio-operations/v1");
+    assert.equal(operations.windowHours, 24);
+    assert.ok(operations.total >= 3);
+    assert.equal(operations.failures, 0);
+    assert.equal(operations.failureRate, 0);
+    assert.match(operations.lastSucceededAt, /^\d{4}-\d{2}-\d{2}T/u);
+    assert.ok(operations.averageProcessingMs >= 0);
+    assert.equal("token" in operations, false);
+    assert.equal("url" in operations, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
 });
 
 class SqliteD1Statement {
@@ -245,6 +356,7 @@ class SqliteD1 {
       `).run(tagId, stableKey);
     }
     this.failQueueFailureWrite = false;
+    this.failNextBatchMatching = null;
     this.beforeTaxonomyLeaseExpire = null;
   }
 
@@ -261,6 +373,13 @@ class SqliteD1 {
   }
 
   async batch(statements) {
+    if (
+      this.failNextBatchMatching &&
+      statements.some((statement) => statement.query.includes(this.failNextBatchMatching))
+    ) {
+      this.failNextBatchMatching = null;
+      throw new Error("D1 batch failed");
+    }
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const results = [];
@@ -2124,6 +2243,10 @@ test("retains orphan sources, then verifies exact cleanup and cache purge", asyn
     assert.deepEqual(await invalidCleanupConfiguration.json(), {
       error: "asset_cleanup_configuration_invalid",
     });
+    await assert.rejects(
+      worker.scheduled({ scheduledTime: Date.now() }, env),
+      /asset_cleanup_configuration_invalid/,
+    );
     assert.equal(queue.messages.length, 0);
     env.ASSET_ORPHAN_RETENTION_DAYS = "7";
 
@@ -2152,12 +2275,8 @@ test("retains orphan sources, then verifies exact cleanup and cache purge", asyn
     `).run(new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000).toISOString(), first.assetId);
     const residualKey = `${row.created_prefix}/private/${first.assetId}/residual.bin`;
     media.objects.set(residualKey, { bytes: new Uint8Array([1]), options: {} });
-    const queuedCleanup = await request(
-      "/studio/api/assets/cleanup",
-      studioJsonWrite({}),
-    );
-    assert.equal(queuedCleanup.status, 202);
-    assert.equal((await queuedCleanup.json()).queued, 1);
+    await worker.scheduled({ scheduledTime: Date.now() }, env);
+    assert.equal(queue.messages.length, 1);
     const cleanupBody = queue.messages.shift();
     assert.deepEqual(cleanupBody, {
       type: "asset_cleanup",
@@ -4307,6 +4426,159 @@ test("retries a finalizing job without sending the Discord mutation again", asyn
     `).get(draft.postId);
     assert.equal(post.status, "published");
     assert.equal(post.current_version_id, publish.candidateId);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test("compensates an exhausted restore finalization before returning to archive", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: new MemoryR2(),
+    IMAGES: new FakeImages(),
+    PUBLISH_QUEUE: queue,
+  });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const discord = new FakeDiscordForum(env);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [keys.publicJwk] });
+    }
+    return discord.fetch(input, init);
+  };
+  const request = async (pathname, init = {}) => worker.fetch(
+    new Request(`https://staging.example${pathname}`, {
+      ...init,
+      headers: {
+        "cf-access-jwt-assertion": token,
+        ...(init.headers ?? {}),
+      },
+    }),
+    env,
+    executionContext(),
+  );
+
+  try {
+    const draft = await createDraftFixture(request, "restore compensation fixture");
+    const publishResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "publish", postId: draft.postId }),
+    );
+    assert.equal(publishResponse.status, 202);
+    const publishMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [publishMessage] }, env);
+    assert.equal(publishMessage.acked, true);
+    const notificationMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [notificationMessage] }, env);
+    assert.equal(notificationMessage.acked, true);
+
+    const archiveResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "archive", postId: draft.postId }),
+    );
+    assert.equal(archiveResponse.status, 202);
+    const archiveMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [archiveMessage] }, env);
+    assert.equal(archiveMessage.acked, true);
+    const archived = database.database.prepare(`
+      SELECT current_version_id, discord_thread_id, discord_starter_message_id,
+        archived_at
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    assert.match(archived.archived_at, /^\d{4}-\d{2}-\d{2}T/u);
+
+    const restoreResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "restore", postId: draft.postId }),
+    );
+    assert.equal(restoreResponse.status, 202);
+    const restore = await restoreResponse.json();
+    const restoreBody = queue.messages.shift();
+    database.failNextBatchMatching = "SET status = 'published', discord_thread_id = ?";
+    const restoreMessage = queueMessage(restoreBody, 1);
+    await worker.queue({ messages: [restoreMessage] }, env);
+    assert.equal(restoreMessage.acked, false);
+    assert.deepEqual(restoreMessage.retryOptions, { delaySeconds: 5 });
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(restore.jobId).status,
+      "finalizing",
+    );
+    assert.equal(
+      database.database.prepare("SELECT status FROM studio_posts WHERE id = ?")
+        .get(draft.postId).status,
+      "restoring",
+    );
+
+    const newThreadId = discord.threadId;
+    const newStarterMessageId = discord.starterMessageId;
+    database.failNextBatchMatching = "SET status = 'published', discord_thread_id = ?";
+    const exhausted = queueMessage(restoreBody, 4);
+    await worker.queue({ messages: [exhausted] }, env);
+    assert.equal(exhausted.acked, false);
+    assert.deepEqual(exhausted.retryOptions, {});
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, error_code FROM delivery_jobs WHERE id = ?
+      `).get(restore.jobId) },
+      { status: "failed", error_code: "restore_compensation_queued" },
+    );
+    const compensationBody = queue.messages.shift();
+    assert.deepEqual(compensationBody, {
+      type: "discord_delivery",
+      jobId: compensationBody.jobId,
+    });
+    const compensationMessage = queueMessage(compensationBody);
+    await worker.queue({ messages: [compensationMessage] }, env);
+    assert.equal(compensationMessage.acked, true);
+    assert.equal(discord.deleted, true);
+    assert.equal(discord.createCalls, 2);
+    assert.equal(discord.deleteCalls, 2);
+    assert.equal(discord.notificationCalls, 1);
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, current_version_id, discord_thread_id,
+          discord_starter_message_id, archived_at, discord_delivery_state
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId) },
+      {
+        status: "archived",
+        current_version_id: archived.current_version_id,
+        discord_thread_id: archived.discord_thread_id,
+        discord_starter_message_id: archived.discord_starter_message_id,
+        archived_at: archived.archived_at,
+        discord_delivery_state: "deleted",
+      },
+    );
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, error_code, remote_id, remote_aux_id
+        FROM delivery_jobs WHERE id = ?
+      `).get(restore.jobId) },
+      {
+        status: "failed",
+        error_code: "restore_compensated",
+        remote_id: newThreadId,
+        remote_aux_id: newStarterMessageId,
+      },
+    );
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(compensationBody.jobId).status,
+      "succeeded",
+    );
+    const attentionResponse = await request("/studio/api/drafts?filter=attention");
+    assert.equal(
+      (await attentionResponse.json()).items.some(({ postId }) => postId === draft.postId),
+      false,
+    );
+    assert.equal(queue.messages.length, 0);
   } finally {
     globalThis.fetch = originalFetch;
     database.close();
