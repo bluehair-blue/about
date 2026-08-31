@@ -37,7 +37,7 @@ export const taxonomyDimensions = ["kind", "topic"] as const;
 export const taxonomyStatuses = ["active", "archived"] as const;
 export const deliveryOperations = {
   asset: ["process", "delete"],
-  discord: ["create", "update", "delete", "taxonomy"],
+  discord: ["create", "update", "delete", "taxonomy", "check"],
   notification: ["send"],
   cache: ["purge"],
 } as const;

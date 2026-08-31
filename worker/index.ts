@@ -11,7 +11,10 @@ import { phaseAEnvironmentErrors, type PhaseAEnv } from "./phase-a-env";
 import { handlePublicMedia, publicMediaAssetId } from "./public-media";
 import { handleStudioAssetRequest } from "./studio-assets";
 import { handleStudioDraftRequest } from "./studio-drafts";
-import { handleStudioPublishRequest } from "./studio-publishing";
+import {
+  enqueueDailyDiscordChecks,
+  handleStudioPublishRequest,
+} from "./studio-publishing";
 import { handleStudioQueue } from "./studio-queue";
 import { handleStudioTaxonomyRequest } from "./studio-taxonomy";
 
@@ -22,6 +25,7 @@ const PUBLISH_PATH = "/studio/api/publish";
 const TAXONOMY_PATH = "/studio/api/taxonomy";
 const STUDIO_WRITE_HEADER = "x-studio-request";
 type VinextContext = Parameters<typeof handler.fetch>[2];
+type StudioScheduledController = { scheduledTime?: number };
 
 function isStudioPath(pathname: string) {
   return pathname === "/studio" || pathname.startsWith("/studio/");
@@ -182,6 +186,15 @@ const worker = {
   },
   async queue(batch: Parameters<typeof handleStudioQueue>[0], env: PhaseAEnv = {}) {
     await handleStudioQueue(batch, env);
+  },
+  async scheduled(
+    controller: StudioScheduledController,
+    env: PhaseAEnv = {},
+  ) {
+    if (phaseAEnvironmentErrors(env).length > 0) {
+      throw new Error("studio_scheduled_unavailable");
+    }
+    await enqueueDailyDiscordChecks(env, controller.scheduledTime);
   },
 };
 

@@ -22,6 +22,7 @@ import {
 
 const DISCORD_API = "https://discord.com/api/v10";
 const MAX_REQUEST_BYTES = 4_096;
+export const DAILY_DISCORD_CHECK_BATCH_SIZE = 25;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type PublishAction =
@@ -38,7 +39,7 @@ type PublishAction =
   | "retry"
   | "reconcile"
   | "fresh_check";
-type DiscordAction = "create" | "update" | "delete";
+type DiscordAction = "create" | "update" | "delete" | "check";
 type RetriableTarget = "discord" | "notification";
 
 type PublishInput = {
@@ -99,6 +100,12 @@ type FreshCheckAttachment = {
   filename: string;
   size: number;
   description: string | null;
+};
+
+type FreshCheckExpectedSnapshot = {
+  versionId: string;
+  threadId: string;
+  starterMessageId: string;
 };
 
 type PublishAsset = {
@@ -534,13 +541,23 @@ function sameFreshCheckAttachments(
   });
 }
 
-async function freshCheckPublishedPost(
+export async function freshCheckPublishedPost(
   postId: string,
   env: PhaseAEnv,
   database: StudioD1,
+  expectedSnapshot?: FreshCheckExpectedSnapshot,
 ) {
   const snapshot = await loadPublishedSnapshot(database, postId);
   if (!snapshot) return json({ error: "published_mapping_not_found" }, 409);
+  if (
+    expectedSnapshot && (
+      snapshot.post.current_version_id !== expectedSnapshot.versionId ||
+      snapshot.post.discord_thread_id !== expectedSnapshot.threadId ||
+      snapshot.post.discord_starter_message_id !== expectedSnapshot.starterMessageId
+    )
+  ) {
+    return json({ error: "fresh_check_conflict" }, 409);
+  }
   if (snapshot.assets.some((asset) =>
     asset.status !== "ready" ||
     !asset.public_r2_key ||
@@ -669,7 +686,7 @@ async function freshCheckPublishedPost(
   const checkedAt = new Date().toISOString();
   const outcome = changed.length === 0 ? "matched" : "drift";
   const storedHash = outcome === "matched" ? expectedHash : remoteHash;
-  const updated = await database.prepare(`
+  const updatePost = database.prepare(`
     UPDATE studio_posts
     SET discord_delivery_state = ?, discord_remote_hash = ?,
       discord_checked_at = ?
@@ -688,8 +705,43 @@ async function freshCheckPublishedPost(
     snapshot.post.discord_delivery_state,
     snapshot.post.discord_remote_hash,
     snapshot.post.discord_checked_at,
-  ).run();
-  if (updated.meta?.changes !== 1) {
+  );
+  const updates = expectedSnapshot
+    ? [updatePost]
+    : [
+        updatePost,
+        database.prepare(`
+          UPDATE delivery_jobs
+          SET status = 'succeeded', delivered_hash = ?, error_code = NULL,
+            last_error = NULL, updated_at = ?, completed_at = ?
+          WHERE post_id = ? AND version_id = ?
+            AND target = 'discord' AND action = 'check'
+            AND remote_id = ? AND remote_aux_id = ?
+            AND status IN ('queue_failed', 'retrying', 'failed', 'outcome_unknown')
+            AND EXISTS (
+              SELECT 1 FROM studio_posts
+              WHERE id = ? AND status = 'published'
+                AND current_version_id = ?
+                AND discord_thread_id = ? AND discord_starter_message_id = ?
+                AND discord_checked_at = ?
+            )
+        `).bind(
+          remoteHash,
+          checkedAt,
+          checkedAt,
+          snapshot.post.post_id,
+          snapshot.post.current_version_id,
+          snapshot.post.discord_thread_id,
+          snapshot.post.discord_starter_message_id,
+          snapshot.post.post_id,
+          snapshot.post.current_version_id,
+          snapshot.post.discord_thread_id,
+          snapshot.post.discord_starter_message_id,
+          checkedAt,
+        ),
+      ];
+  const updated = await database.batch(updates);
+  if (updated[0]?.meta?.changes !== 1) {
     return json({ error: "fresh_check_conflict" }, 409);
   }
 
@@ -708,6 +760,91 @@ async function freshCheckPublishedPost(
       remoteHash,
     },
   });
+}
+
+type DailyCheckCandidate = {
+  id: string;
+  current_version_id: string;
+  discord_thread_id: string;
+  discord_starter_message_id: string;
+};
+
+export async function enqueueDailyDiscordChecks(
+  env: PhaseAEnv,
+  scheduledTime = Date.now(),
+) {
+  const database = env.STUDIO_DB;
+  const queue = env.PUBLISH_QUEUE;
+  if (!database || !queue) throw new Error("daily_check_unavailable");
+  const date = new Date(scheduledTime);
+  if (Number.isNaN(date.valueOf())) throw new Error("daily_check_time_invalid");
+  const day = date.toISOString().slice(0, 10);
+  const candidates = await database.prepare(`
+    SELECT post.id, post.current_version_id, post.discord_thread_id,
+      post.discord_starter_message_id
+    FROM studio_posts AS post
+    WHERE post.status = 'published'
+      AND post.current_version_id IS NOT NULL
+      AND post.discord_thread_id IS NOT NULL
+      AND post.discord_starter_message_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM delivery_jobs AS job
+        WHERE job.dedupe_key = 'discord:check:' || post.id || ':' || ?
+      )
+    ORDER BY post.id ASC
+    LIMIT ?
+  `).bind(day, DAILY_DISCORD_CHECK_BATCH_SIZE).all<DailyCheckCandidate>();
+
+  let queued = 0;
+  let queueFailed = 0;
+  for (const post of candidates.results ?? []) {
+    const jobId = crypto.randomUUID();
+    const dedupeKey = `discord:check:${post.id}:${day}`;
+    const createdAt = date.toISOString();
+    const payload = JSON.stringify({
+      source: "daily",
+      versionId: post.current_version_id,
+      threadId: post.discord_thread_id,
+      starterMessageId: post.discord_starter_message_id,
+    });
+    const inserted = await database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, version_id, target, action, payload_json,
+        remote_id, remote_aux_id, status, attempts, created_at, updated_at
+      )
+      SELECT ?, ?, post.id, post.current_version_id, 'discord', 'check', ?,
+        post.discord_thread_id, post.discord_starter_message_id,
+        'queued', 0, ?, ?
+      FROM studio_posts AS post
+      WHERE post.id = ? AND post.status = 'published'
+        AND post.current_version_id = ?
+        AND post.discord_thread_id = ?
+        AND post.discord_starter_message_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_jobs WHERE dedupe_key = ?
+        )
+    `).bind(
+      jobId,
+      dedupeKey,
+      payload,
+      createdAt,
+      createdAt,
+      post.id,
+      post.current_version_id,
+      post.discord_thread_id,
+      post.discord_starter_message_id,
+      dedupeKey,
+    ).run();
+    if (inserted.meta?.changes !== 1) continue;
+    if (await enqueue(database, queue, jobId)) queued += 1;
+    else queueFailed += 1;
+  }
+  return {
+    day,
+    scanned: candidates.results?.length ?? 0,
+    queued,
+    queueFailed,
+  };
 }
 
 async function markQueueFailed(database: StudioD1, jobId: string) {
@@ -1104,6 +1241,11 @@ async function retryDelivery(
         job.action,
       ));
     }
+    const retryPostStatus = job.action === "check"
+      ? "published"
+      : restore
+      ? "restoring"
+      : "publishing";
     const jobIndex = statements.length;
     statements.push(database.prepare(`
       UPDATE delivery_jobs
@@ -1121,7 +1263,7 @@ async function retryDelivery(
       jobId,
       postId,
       job.target,
-      restore ? "restoring" : "publishing",
+      retryPostStatus,
     ));
     const updated = await database.batch(statements);
     if (
@@ -2177,6 +2319,7 @@ async function finalizeDiscordDelivery(
 ): Promise<StudioQueueOutcome> {
   const job = await loadDeliveryJob(database, jobId);
   if (!job || job.status !== "finalizing") return { action: "ack" };
+  if (job.action === "check") return { action: "ack" };
   const payload = parseDeliveryPayload(job);
   if (!payload) {
     await setJobState(database, job.id, "outcome_unknown", "delivery_payload_invalid");
@@ -2289,6 +2432,111 @@ async function enqueuePendingNotification(
   await enqueue(database, env.PUBLISH_QUEUE, notification.id, "notification_send");
 }
 
+async function setCheckJobState(
+  database: StudioD1,
+  jobId: string,
+  status: "retrying" | "failed" | "succeeded",
+  errorCode: string | null,
+  deliveredHash: string | null = null,
+) {
+  const changedAt = new Date().toISOString();
+  return database.prepare(`
+    UPDATE delivery_jobs
+    SET status = ?, delivered_hash = ?, error_code = ?, last_error = ?,
+      updated_at = ?, completed_at = CASE WHEN ? IN ('failed', 'succeeded')
+        THEN ? ELSE NULL END
+    WHERE id = ? AND target = 'discord' AND action = 'check'
+      AND status = 'processing'
+  `).bind(
+    status,
+    deliveredHash,
+    errorCode,
+    errorCode,
+    changedAt,
+    status,
+    changedAt,
+    jobId,
+  ).run();
+}
+
+async function processDiscordCheckJob(
+  job: DeliveryJob,
+  env: PhaseAEnv,
+  database: StudioD1,
+): Promise<StudioQueueOutcome> {
+  if (job.status === "processing") {
+    return { action: "retry", delaySeconds: 5 };
+  }
+  const claimed = await database.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'processing', attempts = attempts + 1,
+      error_code = NULL, last_error = NULL, updated_at = ?
+    WHERE id = ? AND target = 'discord' AND action = 'check'
+      AND status IN ('queued', 'retrying')
+  `).bind(new Date().toISOString(), job.id).run();
+  if (claimed.meta?.changes !== 1) return { action: "ack" };
+
+  if (
+    !job.version_id ||
+    !job.remote_id ||
+    !job.remote_aux_id ||
+    job.post_status !== "published" ||
+    job.current_version_id !== job.version_id ||
+    job.discord_thread_id !== job.remote_id ||
+    job.discord_starter_message_id !== job.remote_aux_id
+  ) {
+    await setCheckJobState(database, job.id, "succeeded", null);
+    return { action: "ack" };
+  }
+
+  const response = await freshCheckPublishedPost(job.post_id, env, database, {
+    versionId: job.version_id,
+    threadId: job.remote_id,
+    starterMessageId: job.remote_aux_id,
+  });
+  let result: unknown;
+  try {
+    result = await response.json();
+  } catch {
+    result = null;
+  }
+  const errorCode = isRecord(result) && typeof result.error === "string"
+    ? result.error
+    : "discord_check_invalid_response";
+  if (
+    response.ok &&
+    isRecord(result) &&
+    result.action === "fresh_check" &&
+    (result.outcome === "matched" || result.outcome === "drift") &&
+    isRecord(result.technical) &&
+    typeof result.technical.remoteHash === "string" &&
+    /^[0-9a-f]{64}$/u.test(result.technical.remoteHash)
+  ) {
+    const completed = await setCheckJobState(
+      database,
+      job.id,
+      "succeeded",
+      null,
+      result.technical.remoteHash,
+    );
+    if (completed.meta?.changes !== 1) throw new Error("fresh_check_completion_failed");
+    return { action: "ack" };
+  }
+  if (
+    response.status === 409 &&
+    ["published_mapping_not_found", "fresh_check_conflict"].includes(errorCode)
+  ) {
+    await setCheckJobState(database, job.id, "succeeded", null);
+    return { action: "ack" };
+  }
+  if (response.status === 502 || response.status === 503) {
+    await setCheckJobState(database, job.id, "retrying", errorCode);
+    return { action: "retry", delaySeconds: 5 };
+  }
+  await setCheckJobState(database, job.id, "failed", errorCode);
+  return { action: "ack" };
+}
+
 export async function processStudioDiscordJob(
   jobId: string,
   env: PhaseAEnv,
@@ -2296,7 +2544,7 @@ export async function processStudioDiscordJob(
   if (!uuidPattern.test(jobId)) return { action: "ack" };
   const database = env.STUDIO_DB;
   const media = env.STUDIO_MEDIA;
-  if (!database || !media) throw new Error("publish_unavailable");
+  if (!database) throw new Error("publish_unavailable");
   let job = await loadDeliveryJob(database, jobId);
   if (!job) return { action: "ack" };
   if (job.status === "succeeded") {
@@ -2306,6 +2554,10 @@ export async function processStudioDiscordJob(
   if (["failed", "outcome_unknown"].includes(job.status)) {
     return { action: "ack" };
   }
+  if (job.action === "check") {
+    return processDiscordCheckJob(job, env, database);
+  }
+  if (!media) throw new Error("asset_storage_unavailable");
   if (job.status === "finalizing") {
     await database.prepare(`
       UPDATE delivery_jobs SET attempts = attempts + 1, updated_at = ?
@@ -2620,6 +2872,14 @@ export async function recoverStudioDiscordQueueFailure(
   }
   if (["failed", "outcome_unknown"].includes(job.status)) {
     return { action: "ack" };
+  }
+  if (job.action === "check" && terminal) {
+    await setJobState(database, job.id, "failed", "delivery_retry_exhausted");
+    return { action: "retry" };
+  }
+  if (job.action === "check" && job.status === "processing") {
+    await setJobState(database, job.id, "retrying", "discord_check_interrupted");
+    return { action: "retry", delaySeconds: 5 };
   }
   if (terminal) {
     if (job.status === "finalizing") {

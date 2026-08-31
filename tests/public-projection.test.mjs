@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-const migrations = Array.from({ length: 8 }, (_, index) => {
+const migrations = Array.from({ length: 9 }, (_, index) => {
   const number = String(index + 1).padStart(4, "0");
   const names = [
     "phase_a_drafts",
@@ -15,6 +15,7 @@ const migrations = Array.from({ length: 8 }, (_, index) => {
     "phase_b_asset_manifest_cleanup",
     "phase_b_stable_slug",
     "phase_d_curation_revision",
+    "phase_d_discord_checks",
   ];
   return readFileSync(
     new URL(`../migrations/${number}_${names[index]}.sql`, import.meta.url),

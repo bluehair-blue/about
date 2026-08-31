@@ -60,6 +60,9 @@
   "env": {
     "staging": {
       "name": "about-staging",
+      "triggers": {
+        "crons": ["0 18 * * *"]
+      },
       "images": {
         "binding": "IMAGES"
       },

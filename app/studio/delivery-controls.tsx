@@ -34,7 +34,7 @@ type DeliveryStatus = {
   latestJob: null | {
     jobId: string;
     target: "discord";
-    action: "create" | "update" | "delete";
+    action: "create" | "update" | "delete" | "check";
     status: string;
     attempts: number;
     error: string | null;
@@ -229,6 +229,8 @@ function errorLabel(value: string | null | undefined) {
     published_snapshot_invalid: "승인 원본 확인 실패",
     published_mapping_not_found: "공개 mapping 없음",
     fresh_check_conflict: "확인 중 상태 변경",
+    discord_check_interrupted: "Discord 확인 중단",
+    delivery_retry_exhausted: "자동 재시도 소진",
     notification_network_unknown: "알림 전송 결과 불명",
     notification_server_unknown: "알림 서버 결과 불명",
     notification_rate_limited: "알림 요청 제한",

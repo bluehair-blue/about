@@ -12,6 +12,7 @@ const migrationUrls = [
   "../migrations/0006_phase_b_asset_manifest_cleanup.sql",
   "../migrations/0007_phase_b_stable_slug.sql",
   "../migrations/0008_phase_d_curation_revision.sql",
+  "../migrations/0009_phase_d_discord_checks.sql",
 ];
 const migrations = migrationUrls.map((path) =>
   readFileSync(new URL(path, import.meta.url), "utf8")
@@ -83,6 +84,84 @@ test("advances one monotonic curation revision for every relevant state change",
         .run(postId),
       /CHECK constraint failed/,
     );
+  } finally {
+    database.close();
+  }
+});
+
+test("adds read-only Discord check jobs without losing the existing outbox", () => {
+  const database = databaseThrough(8);
+  const postId = "10000000-0000-4000-8000-000000000091";
+  const versionId = "20000000-0000-4000-8000-000000000091";
+  const existingJobId = "40000000-0000-4000-8000-000000000091";
+  const checkJobId = "40000000-0000-4000-8000-000000000092";
+  try {
+    insertPost(database, postId, null);
+    insertVersion(database, { id: versionId, postId });
+    database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, version_id, target, action, payload_json,
+        status, expected_hash, created_at, updated_at
+      ) VALUES (?, 'pre-check-outbox', ?, ?, 'discord', 'create', '{}',
+        'failed', ?, ?, ?)
+    `).run(existingJobId, postId, versionId, "a".repeat(64), now, now);
+
+    database.exec(migrations[8]);
+    assert.deepEqual(
+      { ...database.prepare(`
+        SELECT id, post_id, version_id, target, action, status, expected_hash
+        FROM delivery_jobs WHERE id = ?
+      `).get(existingJobId) },
+      {
+        id: existingJobId,
+        post_id: postId,
+        version_id: versionId,
+        target: "discord",
+        action: "create",
+        status: "failed",
+        expected_hash: "a".repeat(64),
+      },
+    );
+    database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, version_id, target, action, payload_json,
+        remote_id, remote_aux_id, status, created_at, updated_at
+      ) VALUES (?, 'daily-check', ?, ?, 'discord', 'check', '{}',
+        '100000000000000001', '100000000000000002', 'queued', ?, ?)
+    `).run(checkJobId, postId, versionId, now, now);
+    database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'succeeded', delivered_hash = ?, completed_at = ?
+      WHERE id = ?
+    `).run("b".repeat(64), now, checkJobId);
+    assert.deepEqual(
+      { ...database.prepare(`
+        SELECT action, status, expected_hash, delivered_hash
+        FROM delivery_jobs WHERE id = ?
+      `).get(checkJobId) },
+      {
+        action: "check",
+        status: "succeeded",
+        expected_hash: null,
+        delivered_hash: "b".repeat(64),
+      },
+    );
+    assert.throws(
+      () => database.prepare(`
+        INSERT INTO delivery_jobs (
+          id, dedupe_key, post_id, version_id, target, action,
+          status, created_at, updated_at
+        ) VALUES (?, 'invalid-check', ?, ?, 'discord', 'check', 'queued', ?, ?)
+      `).run(
+        "40000000-0000-4000-8000-000000000093",
+        postId,
+        versionId,
+        now,
+        now,
+      ),
+      /CHECK constraint failed/,
+    );
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   } finally {
     database.close();
   }

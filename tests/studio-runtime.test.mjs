@@ -40,6 +40,10 @@ const curationRevisionMigration = readFileSync(
   new URL("../migrations/0008_phase_d_curation_revision.sql", import.meta.url),
   "utf8",
 );
+const discordChecksMigration = readFileSync(
+  new URL("../migrations/0009_phase_d_discord_checks.sql", import.meta.url),
+  "utf8",
+);
 
 test("keeps Studio autosave single-flight, IME-aware, and native", () => {
   const editor = readFileSync(
@@ -217,6 +221,7 @@ class SqliteD1 {
     this.database.exec(assetCleanupMigration);
     this.database.exec(stableSlugMigration);
     this.database.exec(curationRevisionMigration);
+    this.database.exec(discordChecksMigration);
     const tagIds = {
       update: "300000000000000001",
       work: "300000000000000002",
@@ -403,6 +408,8 @@ class FakeDiscordForum {
     this.createCalls = 0;
     this.successfulCreates = 0;
     this.updateCalls = 0;
+    this.threadReadCalls = 0;
+    this.messageReadCalls = 0;
     this.notificationCalls = 0;
     this.notificationPayloads = [];
     this.taxonomyPatchCalls = 0;
@@ -559,11 +566,13 @@ class FakeDiscordForum {
       return Response.json(this.thread);
     }
     if (url.pathname === threadPath && (!init.method || init.method === "GET")) {
+      this.threadReadCalls += 1;
       return this.deleted
         ? Response.json({ message: "Unknown Channel" }, { status: 404 })
         : Response.json(this.thread);
     }
     if (url.pathname === messagePath && (!init.method || init.method === "GET")) {
+      this.messageReadCalls += 1;
       return this.deleted
         ? Response.json({ message: "Unknown Channel" }, { status: 404 })
         : Response.json(this.message);
@@ -2802,6 +2811,107 @@ test("checks published Discord state without mutating either public surface", as
       invariantBefore,
     );
 
+    await createDraftFixture(request, "daily excluded draft");
+    const scheduledTime = Date.parse("2026-08-31T18:00:00.000Z");
+    await worker.scheduled({ scheduledTime }, env);
+    assert.equal(queue.messages.length, 1);
+    await worker.scheduled({ scheduledTime }, env);
+    assert.equal(queue.messages.length, 1);
+    const checkBody = queue.messages.shift();
+    const checkJob = database.database.prepare(`
+      SELECT action, status, version_id, remote_id, remote_aux_id, dedupe_key
+      FROM delivery_jobs WHERE id = ?
+    `).get(checkBody.jobId);
+    assert.equal(checkJob.action, "check");
+    assert.equal(checkJob.status, "queued");
+    assert.equal(checkJob.version_id, invariantBefore.current_version_id);
+    assert.equal(checkJob.remote_id, discord.threadId);
+    assert.equal(checkJob.remote_aux_id, discord.starterMessageId);
+    assert.equal(
+      checkJob.dedupe_key,
+      `discord:check:${draft.postId}:2026-08-31`,
+    );
+    const readsBeforeQueue = {
+      thread: discord.threadReadCalls,
+      message: discord.messageReadCalls,
+    };
+    const firstCheckMessage = queueMessage(checkBody);
+    const duplicateCheckMessage = queueMessage(checkBody);
+    await worker.queue({ messages: [firstCheckMessage, duplicateCheckMessage] }, env);
+    assert.equal(firstCheckMessage.acked, true);
+    assert.equal(duplicateCheckMessage.acked, true);
+    assert.equal(discord.threadReadCalls - readsBeforeQueue.thread, 1);
+    assert.equal(discord.messageReadCalls - readsBeforeQueue.message, 1);
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, attempts, delivered_hash, error_code
+        FROM delivery_jobs WHERE id = ?
+      `).get(checkBody.jobId) },
+      {
+        status: "succeeded",
+        attempts: 1,
+        delivered_hash: matched.technical.remoteHash,
+        error_code: null,
+      },
+    );
+
+    await worker.scheduled({
+      scheduledTime: Date.parse("2026-09-01T18:00:00.000Z"),
+    }, env);
+    const failedCheckBody = queue.messages.shift();
+    assert.ok(failedCheckBody);
+    const postBeforeFailedCheck = database.database.prepare(`
+      SELECT status, current_version_id, discord_delivery_state,
+        discord_remote_hash, discord_checked_at
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    failFreshRead = true;
+    const retryingCheck = queueMessage(failedCheckBody, 1);
+    await worker.queue({ messages: [retryingCheck] }, env);
+    assert.equal(retryingCheck.acked, false);
+    assert.deepEqual(retryingCheck.retryOptions, { delaySeconds: 5 });
+    assert.equal(
+      database.database.prepare(`
+        SELECT status FROM delivery_jobs WHERE id = ?
+      `).get(failedCheckBody.jobId).status,
+      "retrying",
+    );
+    const exhaustedCheck = queueMessage(failedCheckBody, 4);
+    await worker.queue({ messages: [exhaustedCheck] }, env);
+    assert.equal(exhaustedCheck.acked, false);
+    assert.equal(
+      database.database.prepare(`
+        SELECT status FROM delivery_jobs WHERE id = ?
+      `).get(failedCheckBody.jobId).status,
+      "failed",
+    );
+    assert.deepEqual(
+      database.database.prepare(`
+        SELECT status, current_version_id, discord_delivery_state,
+          discord_remote_hash, discord_checked_at
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId),
+      postBeforeFailedCheck,
+    );
+    failFreshRead = false;
+    const recoveredCheck = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "fresh_check", postId: draft.postId }),
+    );
+    assert.equal(recoveredCheck.status, 200);
+    assert.equal((await recoveredCheck.json()).outcome, "matched");
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, delivered_hash, error_code
+        FROM delivery_jobs WHERE id = ?
+      `).get(failedCheckBody.jobId) },
+      {
+        status: "succeeded",
+        delivered_hash: matched.technical.remoteHash,
+        error_code: null,
+      },
+    );
+
     discord.message.content = "Discord에서만 바꾼 본문";
     const driftResponse = await request(
       "/studio/api/publish",
@@ -2869,6 +2979,15 @@ test("checks published Discord state without mutating either public surface", as
       (await clearedAttention.json()).items.some(({ postId }) => postId === draft.postId),
       false,
     );
+    const unpublished = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "unpublish", postId: draft.postId }),
+    );
+    assert.equal(unpublished.status, 200);
+    await worker.scheduled({
+      scheduledTime: Date.parse("2026-09-02T18:00:00.000Z"),
+    }, env);
+    assert.equal(queue.messages.length, 0);
   } finally {
     globalThis.fetch = originalFetch;
     database.close();
