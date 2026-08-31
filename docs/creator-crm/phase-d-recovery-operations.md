@@ -226,7 +226,7 @@ CI로 옮길 때도 `tooling/promote.mjs staging/production`과 manifest schema�
 
 ## 14. 완료 기록
 
-- commit: Phase A–C intent 보정·Phase C projection `596f5ba`; staging 발견 결함 복구 `a41bf3b`; production 직접 배포·target 경계 차단 `85e1ecb`; promotion migration preflight `be8c2a8`; fresh check `5e49f37`; daily check `e0a9f77`; 수동 복구 `83a942c`; 보존·운영 복구 `1c89630`; promotion runner `bba8d93`
+- commit: Phase A–C intent 보정·Phase C projection `596f5ba`; staging 발견 결함 복구 `a41bf3b`; production 직접 배포·target 경계 차단 `85e1ecb`; promotion migration preflight `be8c2a8`; fresh check `5e49f37`; daily check `e0a9f77`; 수동 복구 `83a942c`; 보존·운영 복구 `1c89630`; promotion runner `bba8d93`; Windows npm CLI 호출 복구 `6058648`
 - 2026-08-31 진입 감사: Phase A–C의 intent와 자동 계약을 재검토하고 local migration drift·Queue/notification·역할 패널·이미지 dimension/checksum·public cache·public route runtime 결함을 보정함. 적용된 migration은 수정하지 않았고 `npx tsc --noEmit`, `npm run lint`, `npm test` 52/52 뒤 exact staging target과 custom purge origin을 Worker version `eac4da09-8f0d-4b1a-b5da-6f67af9613f0`에 배포함
 - 시작 조건 No-Go: 정상 restore와 archived revocation acceptance, exact target guard, additive migration promotion preflight는 통과했으나 실패·결과 불명·drift·detached staging fixture와 remote global cache purge가 없음
 - promotion preflight evidence: clean commit `be8c2a879f996e3f228eb5e004a275c219a9749b`에서 migration `0001`–`0007`을 fresh local D1에 적용한 뒤 pending 0을 재확인했다. staging pending 0, production applied 0/pending 7이며 mutation은 없었다. SHA-256은 migrations `f2ccc301289d91890792a1b9bf6adbb24ce2d326a0ebb4a1d0f3e5a62f8a06a3`, lockfile `c53e98a74b7a5b2b9249161b4162f5b5c40c1e4b5f41079362be2db7f209fa2d`, Wrangler `964789bb1f1f3cf791f6b6fba1b963cb217c2b830a7acdb150c3c3e44928a982`다
@@ -236,6 +236,7 @@ CI로 옮길 때도 `tooling/promote.mjs staging/production`과 manifest schema�
 - archive/restore/purge evidence: post `e222f213-7a71-499d-ad90-588a93aaad45`의 restore create `31050261-7f40-484e-918a-4d714e49777b`과 archive delete `0f991cef-2936-4315-8217-fcf9bbb79156`가 각 1회 succeeded. restore 중 detail/media/CTA 공개와 archive 뒤 detail·media `404`·`no-store`, root/community 비노출을 확인하고 최종 archived로 정리함. purge는 staging token·실제 호출 증거 부재로 미실행
 - Phase D local evidence: `npm run lint -- --no-cache`, `npx tsc --noEmit`, production exact-target build와 `npm test` 60/60. fresh drift/align, daily dedupe·제외 상태, withheld fresh resume, detach/reconnect, outcome-unknown·DLQ, scheduled retention·invalid config, restore compensation, secret-free export·운영 지표, approval revocation·production unknown 차단 fixture가 통과함
 - 운영자 실행 경계: cache purge token 생성·staging 등록·global purge는 사용자가 직접 수행하며, 정확한 순서와 확인 명령은 [`phase-d-staging-operator-runbook.md`](./phase-d-staging-operator-runbook.md)에 기록함. production 승인과 mutation은 없음
+- Windows runner evidence: 첫 `npm run promote -- staging`은 `npm.cmd` spawn `EINVAL`로 lint 전에 중단되어 remote mutation과 manifest가 없었다. 공통 호출을 `npm-cli.js`로 교체한 뒤 Node 설치 경로의 npm `11.8.0` 실행과 runner argument 경계를 확인했다. 이전 복구 commit 본문의 `11.11.0` 표기는 이 기록으로 바로잡는다
 - promotion run ID: 미기록
 - production read-only smoke: 미기록
 - Go/No-Go: 미통과
