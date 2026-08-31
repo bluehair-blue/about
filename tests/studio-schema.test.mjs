@@ -11,6 +11,7 @@ const migrationUrls = [
   "../migrations/0005_phase_b_taxonomy.sql",
   "../migrations/0006_phase_b_asset_manifest_cleanup.sql",
   "../migrations/0007_phase_b_stable_slug.sql",
+  "../migrations/0008_phase_d_curation_revision.sql",
 ];
 const migrations = migrationUrls.map((path) =>
   readFileSync(new URL(path, import.meta.url), "utf8")
@@ -31,6 +32,61 @@ function insertPost(database, id, slug) {
     VALUES (?, ?, 'draft', ?, ?)
   `).run(id, slug === null ? null : `${slug}--${id.slice(0, 8)}`, now, now);
 }
+
+test("advances one monotonic curation revision for every relevant state change", () => {
+  const database = databaseThrough();
+  const postId = "10000000-0000-4000-8000-000000000041";
+  try {
+    insertPost(database, postId, "curation-revision");
+    assert.equal(
+      database.prepare("SELECT curation_revision FROM studio_posts WHERE id = ?")
+        .get(postId).curation_revision,
+      0,
+    );
+
+    database.prepare("UPDATE studio_posts SET pinned_at = ? WHERE id = ?")
+      .run(now, postId);
+    assert.equal(
+      database.prepare("SELECT curation_revision FROM studio_posts WHERE id = ?")
+        .get(postId).curation_revision,
+      1,
+    );
+
+    database.prepare(`
+      UPDATE studio_posts
+      SET hero_rank = 0, curation_revision = curation_revision + 1
+      WHERE id = ?
+    `).run(postId);
+    assert.equal(
+      database.prepare("SELECT curation_revision FROM studio_posts WHERE id = ?")
+        .get(postId).curation_revision,
+      2,
+    );
+
+    database.prepare("UPDATE studio_posts SET updated_at = ? WHERE id = ?")
+      .run("2026-08-30T00:00:00.001Z", postId);
+    assert.equal(
+      database.prepare("SELECT curation_revision FROM studio_posts WHERE id = ?")
+        .get(postId).curation_revision,
+      2,
+    );
+
+    database.prepare("UPDATE studio_posts SET status = 'withheld' WHERE id = ?")
+      .run(postId);
+    assert.equal(
+      database.prepare("SELECT curation_revision FROM studio_posts WHERE id = ?")
+        .get(postId).curation_revision,
+      3,
+    );
+    assert.throws(
+      () => database.prepare("UPDATE studio_posts SET curation_revision = -1 WHERE id = ?")
+        .run(postId),
+      /CHECK constraint failed/,
+    );
+  } finally {
+    database.close();
+  }
+});
 
 function insertVersion(
   database,

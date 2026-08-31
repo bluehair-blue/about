@@ -15,6 +15,7 @@ type DeliveryStatus = {
   remoteHash: string | null;
   pinnedAt: string | null;
   heroRank: number | null;
+  curationRevision: number;
   updatedAt: string;
   assets: {
     count: number;
@@ -69,6 +70,9 @@ function isDeliveryStatus(value: unknown): value is DeliveryStatus {
     (status.discordCheckedAt === null || typeof status.discordCheckedAt === "string") &&
     (status.pinnedAt === null || typeof status.pinnedAt === "string") &&
     (status.heroRank === null || typeof status.heroRank === "number") &&
+    typeof status.curationRevision === "number" &&
+    Number.isSafeInteger(status.curationRevision) &&
+    status.curationRevision >= 0 &&
     typeof status.updatedAt === "string" &&
     typeof assets === "object" && assets !== null &&
     typeof (assets as Record<string, unknown>).count === "number" &&
@@ -255,7 +259,7 @@ export function DeliveryControls({
             : {}),
           ...(action === "purge" ? { title: purgeTitle } : {}),
           ...(["pin", "unpin", "hero"].includes(action)
-            ? { updatedAt: currentDelivery?.updatedAt }
+            ? { curationRevision: currentDelivery?.curationRevision }
             : {}),
           ...(action === "hero" ? { heroRank: heroRank ?? null } : {}),
         }),

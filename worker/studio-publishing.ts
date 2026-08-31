@@ -45,7 +45,7 @@ type PublishInput = {
   postId: string;
   jobId: string | null;
   title: string | null;
-  updatedAt: string | null;
+  curationRevision: number | null;
   heroRank: number | null | undefined;
 };
 
@@ -116,6 +116,7 @@ type StatusRow = {
   discord_checked_at: string | null;
   pinned_at: string | null;
   hero_rank: number | null;
+  curation_revision: number;
   updated_at: string;
 };
 
@@ -169,7 +170,7 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
   const postId = value.postId;
   const jobId = value.jobId ?? null;
   const title = value.title ?? null;
-  const updatedAt = value.updatedAt ?? null;
+  const curationRevision = value.curationRevision ?? null;
   const heroRank = Object.hasOwn(value, "heroRank") ? value.heroRank : undefined;
   const curationAction = action === "pin" || action === "unpin" || action === "hero";
   if (
@@ -199,12 +200,12 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
       title.normalize("NFC") !== title
     )) ||
     (action !== "purge" && title !== null) ||
-    (curationAction && (
-      typeof updatedAt !== "string" ||
-      Number.isNaN(Date.parse(updatedAt)) ||
-      new Date(updatedAt).toISOString() !== updatedAt
+    (curationAction && !(
+      typeof curationRevision === "number" &&
+      Number.isSafeInteger(curationRevision) &&
+      curationRevision >= 0
     )) ||
-    (!curationAction && updatedAt !== null) ||
+    (!curationAction && curationRevision !== null) ||
     (action === "hero" && !(
       heroRank === null ||
       (typeof heroRank === "number" && Number.isSafeInteger(heroRank) && heroRank >= 0)
@@ -216,7 +217,7 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
         "postId",
         "jobId",
         "title",
-        "updatedAt",
+        "curationRevision",
         "heroRank",
       ].includes(key)
     )
@@ -228,7 +229,7 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
     postId,
     jobId,
     title: title as string | null,
-    updatedAt: updatedAt as string | null,
+    curationRevision: curationRevision as number | null,
     heroRank: heroRank as number | null | undefined,
   };
 }
@@ -569,13 +570,13 @@ async function changeCuration(
     ? await setHeroRank(database, {
         postId: input.postId,
         heroRank: input.heroRank as number | null,
-        expectedUpdatedAt: input.updatedAt as string,
+        expectedCurationRevision: input.curationRevision as number,
         changedAt,
       })
     : await setPinnedPost(database, {
         postId: input.postId,
         pinned: input.action === "pin",
-        expectedUpdatedAt: input.updatedAt as string,
+        expectedCurationRevision: input.curationRevision as number,
         changedAt,
       });
   if (!changed) return json({ error: "curation_conflict" }, 409);
@@ -584,6 +585,7 @@ async function changeCuration(
     action: input.action,
     pinnedAt: input.action === "pin" ? changedAt : undefined,
     heroRank: input.action === "hero" ? input.heroRank : undefined,
+    curationRevision: (input.curationRevision as number) + 1,
     updatedAt: changedAt,
   });
 }
@@ -948,7 +950,7 @@ async function readStatus(request: Request, database: StudioD1) {
   const post = await database.prepare(`
     SELECT id, status, draft_version_id, current_version_id,
       discord_thread_id, discord_delivery_state, discord_remote_hash,
-      discord_checked_at, pinned_at, hero_rank, updated_at
+      discord_checked_at, pinned_at, hero_rank, curation_revision, updated_at
     FROM studio_posts
     WHERE id = ?
   `).bind(postId).first<StatusRow>();
@@ -991,6 +993,7 @@ async function readStatus(request: Request, database: StudioD1) {
     remoteHash: post.discord_remote_hash,
     pinnedAt: post.pinned_at,
     heroRank: post.hero_rank,
+    curationRevision: post.curation_revision,
     updatedAt: post.updated_at,
     assets: { count: assetCount, notReadyCount, discordBytes },
     budgetBytes: MAX_DISCORD_ATTACHMENT_BYTES,

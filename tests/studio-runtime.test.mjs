@@ -36,6 +36,10 @@ const stableSlugMigration = readFileSync(
   new URL("../migrations/0007_phase_b_stable_slug.sql", import.meta.url),
   "utf8",
 );
+const curationRevisionMigration = readFileSync(
+  new URL("../migrations/0008_phase_d_curation_revision.sql", import.meta.url),
+  "utf8",
+);
 
 test("keeps Studio autosave single-flight, IME-aware, and native", () => {
   const editor = readFileSync(
@@ -206,6 +210,7 @@ class SqliteD1 {
     this.database.exec(taxonomyMigration);
     this.database.exec(assetCleanupMigration);
     this.database.exec(stableSlugMigration);
+    this.database.exec(curationRevisionMigration);
     const tagIds = {
       update: "300000000000000001",
       work: "300000000000000002",
@@ -2512,6 +2517,17 @@ test("atomically manages one pin and nullable Hero ranks with stale-action CAS",
   const keys = await accessKeys();
   const token = await keys.token();
   const originalFetch = globalThis.fetch;
+  const originalDate = globalThis.Date;
+  const fixedNow = Date.now();
+  globalThis.Date = class FixedDate extends originalDate {
+    constructor(...args) {
+      super(...(args.length === 0 ? [fixedNow] : args));
+    }
+
+    static now() {
+      return fixedNow;
+    }
+  };
   globalThis.fetch = async (input) => {
     if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
       return Response.json({ keys: [keys.publicJwk] });
@@ -2587,17 +2603,18 @@ test("atomically manages one pin and nullable Hero ranks with stale-action CAS",
       studioJsonWrite({
         action: "pin",
         postId: firstId,
-        updatedAt: firstInitial.updatedAt,
+        curationRevision: firstInitial.curationRevision,
       }),
     );
     assert.equal(firstPin.status, 200);
     const firstAfterPin = await status(firstId);
+    assert.equal(firstAfterPin.curationRevision, firstInitial.curationRevision + 1);
     const secondPin = await request(
       "/studio/api/publish",
       studioJsonWrite({
         action: "pin",
         postId: secondId,
-        updatedAt: secondInitial.updatedAt,
+        curationRevision: secondInitial.curationRevision,
       }),
     );
     assert.equal(secondPin.status, 200);
@@ -2612,12 +2629,18 @@ test("atomically manages one pin and nullable Hero ranks with stale-action CAS",
         .get(secondId).pinned_at,
       null,
     );
+    const firstAfterDisplacement = await status(firstId);
+    assert.equal(firstAfterDisplacement.updatedAt, firstAfterPin.updatedAt);
+    assert.equal(
+      firstAfterDisplacement.curationRevision,
+      firstAfterPin.curationRevision + 1,
+    );
     const stalePin = await request(
       "/studio/api/publish",
       studioJsonWrite({
         action: "pin",
         postId: firstId,
-        updatedAt: firstAfterPin.updatedAt,
+        curationRevision: firstAfterPin.curationRevision,
       }),
     );
     assert.equal(stalePin.status, 409);
@@ -2628,7 +2651,7 @@ test("atomically manages one pin and nullable Hero ranks with stale-action CAS",
       studioJsonWrite({
         action: "hero",
         postId: firstId,
-        updatedAt: firstFresh.updatedAt,
+        curationRevision: firstFresh.curationRevision,
         heroRank: 0,
       }),
     );
@@ -2639,7 +2662,7 @@ test("atomically manages one pin and nullable Hero ranks with stale-action CAS",
       studioJsonWrite({
         action: "hero",
         postId: secondId,
-        updatedAt: secondFresh.updatedAt,
+        curationRevision: secondFresh.curationRevision,
         heroRank: 0,
       }),
     );
@@ -2656,7 +2679,7 @@ test("atomically manages one pin and nullable Hero ranks with stale-action CAS",
       studioJsonWrite({
         action: "hero",
         postId: secondId,
-        updatedAt: secondRanked.updatedAt,
+        curationRevision: secondRanked.curationRevision,
         heroRank: 2,
       }),
     );
@@ -2674,12 +2697,13 @@ test("atomically manages one pin and nullable Hero ranks with stale-action CAS",
       studioJsonWrite({
         action: "pin",
         postId: secondId,
-        updatedAt: hidden.updatedAt,
+        curationRevision: hidden.curationRevision,
       }),
     );
     assert.equal(invalidPin.status, 409);
   } finally {
     globalThis.fetch = originalFetch;
+    globalThis.Date = originalDate;
     database.close();
   }
 });

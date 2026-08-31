@@ -762,49 +762,53 @@ export async function setPinnedPost(
   input: {
     postId: string;
     pinned: boolean;
-    expectedUpdatedAt: string;
+    expectedCurationRevision: number;
     changedAt: string;
   },
 ) {
   if (!input.pinned) {
     const updated = await database.prepare(`
       UPDATE studio_posts
-      SET pinned_at = NULL, updated_at = ?
+      SET pinned_at = NULL, updated_at = ?,
+        curation_revision = curation_revision + 1
       WHERE id = ? AND status = 'published' AND current_version_id IS NOT NULL
-        AND updated_at = ? AND pinned_at IS NOT NULL
+        AND curation_revision = ? AND pinned_at IS NOT NULL
     `).bind(
       input.changedAt,
       input.postId,
-      input.expectedUpdatedAt,
+      input.expectedCurationRevision,
     ).run();
     return updated.meta?.changes === 1;
   }
   const results = await database.batch([
     database.prepare(`
       UPDATE studio_posts
-      SET pinned_at = NULL, updated_at = ?
+      SET pinned_at = NULL, updated_at = ?,
+        curation_revision = curation_revision + 1
       WHERE id != ? AND pinned_at IS NOT NULL AND status != 'purged'
         AND EXISTS (
           SELECT 1 FROM studio_posts AS target
           WHERE target.id = ? AND target.status = 'published'
-            AND target.current_version_id IS NOT NULL AND target.updated_at = ?
+            AND target.current_version_id IS NOT NULL
+            AND target.curation_revision = ?
         )
     `).bind(
       input.changedAt,
       input.postId,
       input.postId,
-      input.expectedUpdatedAt,
+      input.expectedCurationRevision,
     ),
     database.prepare(`
       UPDATE studio_posts
-      SET pinned_at = ?, updated_at = ?
+      SET pinned_at = ?, updated_at = ?,
+        curation_revision = curation_revision + 1
       WHERE id = ? AND status = 'published' AND current_version_id IS NOT NULL
-        AND updated_at = ?
+        AND curation_revision = ?
     `).bind(
       input.changedAt,
       input.changedAt,
       input.postId,
-      input.expectedUpdatedAt,
+      input.expectedCurationRevision,
     ),
   ]);
   return results[1]?.meta?.changes === 1;
@@ -815,7 +819,7 @@ export async function setHeroRank(
   input: {
     postId: string;
     heroRank: number | null;
-    expectedUpdatedAt: string;
+    expectedCurationRevision: number;
     changedAt: string;
   },
 ) {
@@ -823,33 +827,36 @@ export async function setHeroRank(
   if (input.heroRank !== null) {
     statements.push(database.prepare(`
       UPDATE studio_posts
-      SET hero_rank = NULL, updated_at = ?
+      SET hero_rank = NULL, updated_at = ?,
+        curation_revision = curation_revision + 1
       WHERE id != ? AND hero_rank = ? AND status != 'purged'
         AND EXISTS (
           SELECT 1 FROM studio_posts AS target
           WHERE target.id = ? AND target.status = 'published'
-            AND target.current_version_id IS NOT NULL AND target.updated_at = ?
+            AND target.current_version_id IS NOT NULL
+            AND target.curation_revision = ?
         )
     `).bind(
       input.changedAt,
       input.postId,
       input.heroRank,
       input.postId,
-      input.expectedUpdatedAt,
+      input.expectedCurationRevision,
     ));
   }
   const targetIndex = statements.length;
   statements.push(database.prepare(`
     UPDATE studio_posts
-    SET hero_rank = ?, updated_at = ?
+    SET hero_rank = ?, updated_at = ?,
+      curation_revision = curation_revision + 1
     WHERE id = ? AND status = 'published' AND current_version_id IS NOT NULL
-      AND updated_at = ?
+      AND curation_revision = ?
       AND (? IS NOT NULL OR hero_rank IS NOT NULL)
   `).bind(
     input.heroRank,
     input.changedAt,
     input.postId,
-    input.expectedUpdatedAt,
+    input.expectedCurationRevision,
     input.heroRank,
   ));
   const results = await database.batch(statements);
