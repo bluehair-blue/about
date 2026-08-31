@@ -1,6 +1,6 @@
 # 기술 계약·의존성 인덱스
 
-> 기준 패치: `1c89630` (`feat(studio): 보존과 운영 복구 경로를 연결`)
+> 기준 패치: `bba8d93` (`feat(ops): 검증된 staging 승격 상태를 고정`)
 >
 > 설정 파일이 최종 진실이다. 아래 계약을 바꾸는 커밋은 이 문서도 함께 갱신한다.
 
@@ -36,9 +36,9 @@
 - 공개 route 인증: 없음
 - 공개 데이터: `published` post의 `current_version_id`가 가리키는 `published` version만 server에서 읽으며, `/media/{assetId}/portfolio-v1.webp`는 그 current 승인본이 참조한 ready public derivative만 R2에서 제공
 - Studio 인증: `worker/index.ts`가 `/studio*`의 Cloudflare Access JWT와 `/api/discord/interactions`의 Discord Ed25519 signature를 server에서 검증
-- 서버 저장소: direct Cloudflare의 production·staging D1·R2·Queue physical resource는 `wrangler.jsonc`에 분리 연결됨. staging D1에는 Phase A draft·asset·delivery migration, Worker에는 Images info/transform, private source·두 파생본 R2 저장, Queue consumer·DLQ routing과 Discord Forum delivery가 연결됨. Phase B canonical schema `0004`, taxonomy `0005`, asset manifest/retention `0006`, stable canonical slug `0007`과 `worker/studio-domain.ts`의 draft CAS·exact candidate/outbox·archive·verified current pointer 경계를 local·staging에서 검증했다. job-bound candidate snapshot·state·delete와 outbox identity는 불변이고 active delivery 중 비검증 current·Discord mapping 이동을 거부한다. 최초 publish batch는 NFC Unicode slug와 post ID suffix를 한 번만 배정하고 DB trigger가 형식과 이후 불변성을 강제한다. `/studio/api/taxonomy` 변경은 post 없는 전역 outbox 한 건으로 직렬화하고 Queue consumer가 Discord Forum 전체 tag를 fresh verify한다. asset publish payload는 public·Discord key/bytes/SHA-256을 고정하고 두 R2 object를 처리 전·finalization 전에 다시 검증한다. retention endpoint는 미게시 orphan 7일과 superseded snapshot·public/Discord derivative 30일 후보를 Queue에 넣으며 consumer가 reference·active job·현재 environment 값을 재검증하고 exact delete·strong read·prefix 검사·Cloudflare global single-file purge를 통과한 뒤에만 D1 cleanup을 완료한다. 한 번이라도 게시된 private source는 비가역 marker와 exact key manifest로 남고, version metadata 삭제 뒤 실패한 cleanup도 version 비종속 job payload로 재개한다. 코드상 purge는 exact media URL과 zone-scoped API token을 요구하며 누락·오류에서는 fail closed한다. staging에는 2026-08-31 `0004`–`0007`과 implementation commit `be8c2a8`까지 배포했고 create/update/notification·unpublish/republish·archive/restore·stable slug·public revocation을 검증했다. zone 소유 purge origin과 zone ID는 staging에 배포됐으며 secret token과 실제 global purge만 미검증이다. production에는 `0004`–`0007`을 적용하지 않았고 production D1 migration count와 Queue/DLQ producer·consumer가 모두 0이다
+- 서버 저장소: direct Cloudflare의 production·staging D1·R2·Queue physical resource는 `wrangler.jsonc`에 분리 연결됨. staging D1에는 Phase A draft·asset·delivery migration, Worker에는 Images info/transform, private source·두 파생본 R2 저장, Queue consumer·DLQ routing과 Discord Forum delivery가 연결됨. Phase B canonical schema `0004`, taxonomy `0005`, asset manifest/retention `0006`, stable canonical slug `0007`과 `worker/studio-domain.ts`의 draft CAS·exact candidate/outbox·archive·verified current pointer 경계를 local·staging에서 검증했다. job-bound candidate snapshot·state·delete와 outbox identity는 불변이고 active delivery 중 비검증 current·Discord mapping 이동을 거부한다. 최초 publish batch는 NFC Unicode slug와 post ID suffix를 한 번만 배정하고 DB trigger가 형식과 이후 불변성을 강제한다. `/studio/api/taxonomy` 변경은 post 없는 전역 outbox 한 건으로 직렬화하고 Queue consumer가 Discord Forum 전체 tag를 fresh verify한다. asset publish payload는 public·Discord key/bytes/SHA-256을 고정하고 두 R2 object를 처리 전·finalization 전에 다시 검증한다. retention endpoint와 daily cron은 미게시 orphan 7일·superseded snapshot 30일 candidate와 active Discord mapping의 read-only check만 Queue에 넣고 consumer가 reference·active job·현재 environment·remote snapshot을 다시 검증한다. exact delete·strong read·prefix 검사·Cloudflare global single-file purge 전에는 D1 cleanup을 완료하지 않는다. 한 번이라도 게시된 private source는 비가역 marker와 exact key manifest로 남고, version metadata 삭제 뒤 실패한 cleanup도 version 비종속 job payload로 재개한다. 코드상 purge는 exact media URL과 zone-scoped API token을 요구하며 누락·오류에서는 fail closed한다. staging의 실제 applied ledger와 Worker version은 실행 시점의 `wrangler` 조회와 Git 제외된 `studio-promotion/v1` manifest를 최종 증거로 사용한다. production은 명시적 승격 승인 전 migration·Queue·DLQ·Discord가 계속 fail closed여야 한다.
 
-- Phase D `0008_phase_d_curation_revision.sql`은 같은 밀리초의 연속 pin·Hero 변경에서도 stale action을 구분하도록 additive 정수 revision과 lifecycle trigger를 추가한다. API는 표시용 `updated_at` 대신 이 revision만 curation CAS 토큰으로 사용한다.
+- Phase D `0008_phase_d_curation_revision.sql`은 같은 밀리초의 연속 pin·Hero 변경에서도 stale action을 구분하도록 additive 정수 revision과 lifecycle trigger를 추가한다. `0009_phase_d_discord_checks.sql`은 read-only check·align job을, `0010_phase_d_manual_recovery.sql`은 resume·detach·reconnect job을 기존 delivery action allowlist에 더한다. API는 표시용 `updated_at` 대신 정수 revision과 exact version·mapping snapshot을 CAS 토큰으로 사용한다.
 
 ## 직접 의존성
 
@@ -161,7 +161,7 @@ vinext()
 ### Cloudflare 공개 서비스
 
 - Worker 이름: `about`
-- staging Worker 이름: `about-staging` (`env.staging`; implementation commit `be8c2a8` acceptance version `eac4da09-8f0d-4b1a-b5da-6f67af9613f0`; Phase B Access 보호 Studio editor, canonical D1/R2/Queue publishing lifecycle과 Discord role panel·Forum action, exact target guard와 promotion preflight가 배포됨)
+- staging Worker 이름: `about-staging` (`env.staging`; active commit·deployment ID는 `.wrangler/promotions/state.json`과 live deployment list에서 확인)
 - staging purge origin: `https://about-staging.bluehair.blue` custom domain. `workers.dev`는 preview 접근용이고 `bluehair.blue` zone purge URL로 사용하지 않는다.
 - Worker entry: `dist/server/index.js`
 - 정적 자산: `dist/client`
@@ -185,7 +185,7 @@ vinext()
 
 ## 테스트·완료 계약
 
-`tests/rendered-html.test.mjs`, `tests/public-projection.test.mjs`, `tests/studio-runtime.test.mjs`는 빌드된 Worker를 직접 import한다. 렌더 테스트는 빈 공개 DB에서도 기존 root DOM·locale·motion 계약이 유지되는지 확인한다. 공개 projection 테스트는 실제 SQLite migration adapter와 in-memory R2로 query 정규화, feed/pin/Hero, gallery, detail metadata, public media, lifecycle와 Discord mapping을 검증한다. Studio runtime 테스트는 mock binding·서명 key와 같은 SQLite 경로로 보안·draft revision CAS·taxonomy outbox·exact publish snapshot·current pointer·image pipeline·asset retention·Queue/Discord delivery 경계를 검증한다. `tests/studio-schema.test.mjs`는 Phase A row를 보존한 `0004`–`0008` upgrade, 일곱 table·foreign key·unique/check/trigger invariant와 representative query plan을 전담한다.
+`tests/rendered-html.test.mjs`, `tests/public-projection.test.mjs`, `tests/studio-runtime.test.mjs`는 빌드된 Worker를 직접 import한다. 렌더 테스트는 빈 공개 DB에서도 기존 root DOM·locale·motion 계약이 유지되는지 확인한다. 공개 projection 테스트는 실제 SQLite migration adapter와 in-memory R2로 query 정규화, feed/pin/Hero, gallery, detail metadata, public media, lifecycle와 Discord mapping을 검증한다. Studio runtime 테스트는 mock binding·서명 key와 같은 SQLite 경로로 보안·draft revision CAS·taxonomy outbox·exact publish snapshot·current pointer·image pipeline·asset retention·Queue/Discord delivery 경계를 검증한다. `tests/studio-schema.test.mjs`는 Phase A row를 보존한 `0004`–`0010` upgrade, 일곱 table·foreign key·unique/check/trigger invariant와 representative query plan을 전담한다.
 
 - HTTP 200과 HTML content type
 - 기본 `<html lang="ko">`와 ko/ja/en copy

@@ -4,7 +4,7 @@
 >
 > 실행 위치: 이 저장소 루트의 PowerShell과 Cloudflare Dashboard, Access로 보호된 Studio UI.
 
-이 절차는 한 개의 disposable post로 Access 재인증, 3장 touch gallery, Discord 게시·보관, R2 exact-key 삭제와 global cache purge를 순서대로 검증한다. 실패·결과 불명 상태를 만들려고 D1·R2·Discord를 직접 수정하지 않는다.
+이 절차는 한 개의 disposable post로 Access 재인증, 운영 상태, JSON export, Discord drift 복구, 연결 해제·재연결, 3장 touch gallery, 보관·복원, R2 exact-key 삭제와 global cache purge를 순서대로 검증한다. 실패·결과 불명 상태를 만들려고 D1·R2를 직접 수정하지 않는다. Discord 수동 변경은 아래 drift fixture의 Forum tag 변경 한 번으로 제한한다.
 
 ## 0. 중단 조건
 
@@ -29,9 +29,11 @@ npx wrangler secret list --env staging
 npx wrangler secret list
 ```
 
-2026-08-31 기준 시작점은 staging version `eac4da09-8f0d-4b1a-b5da-6f67af9613f0`, production version `6ec4757e-36f6-4980-84d5-cb1812928858`, staging pending migration 0, production applied migration 0이다. secret 등록 뒤 staging version은 바뀌므로 새 ID를 기록한다.
+문서에 적힌 과거 version ID를 기준으로 삼지 않는다. 실행 직전에 조회한 staging·production deployment ID, migration ledger와 secret 이름을 시작 증거로 기록한다. 이후 어느 값이 달라져도 원인을 설명할 수 없으면 중단한다.
 
-## 2. 최소 권한 cache purge token
+## 2. 사용자 직접 수행 — 최소 권한 cache purge token
+
+이 절차만 사용자가 직접 수행한다. 구현·배포 작업을 맡은 에이전트는 token을 생성·열람·등록하거나 global purge를 대신 실행하지 않는다. token 등록 전에도 작성·Discord·archive·restore 검증은 가능하지만 scheduled retention과 permanent purge 완료 판정은 보류한다.
 
 Cloudflare Dashboard의 `내 프로필 → API 토큰 → 토큰 생성 → 사용자 설정 토큰`에서 다음 값만 선택한다.
 
@@ -92,6 +94,8 @@ public/og.png
 4. `게시·Forum 작업 → BOT TEST에 게시`를 한 번 누른다.
 5. Studio의 post 상태가 `published`, Discord delivery가 `succeeded`인지 확인한다.
 6. BOT TEST Forum에서 제목·본문·tag·첨부 3장 순서가 Studio와 같은지 확인한다.
+7. BOT TEST `#start-here` 역할 패널에서 `알림 받기`를 눌러 ephemeral `알림을 켰어요.`와 test role 추가를 확인한다.
+8. 바로 `알림 끄기`를 눌러 ephemeral `알림을 껐어요.`와 test role 제거를 확인한다. role을 켠 채 fixture를 끝내지 않는다.
 
 `postId`는 editor URL에서 복사한다. 아래 조회로 slug, thread, asset exact key와 job을 기록한다.
 
@@ -116,7 +120,63 @@ curl.exe -sS -D - -o NUL $phaseDMediaUrl
 
 두 경로 모두 `200`이어야 한다. media에는 `cache-control: private, no-store`와 ETag가 있어야 한다.
 
-## 5. 실제 touch swipe
+## 5. 운영 상태와 저장본 JSON
+
+1. `/studio?filter=all` 상단의 `최근 24시간 운영 상태` 카드에서 `마지막 성공`, `실패율`, `평균 처리 시간`만 보이는지 확인한다.
+2. 값이 없으면 `기록 없음`, 조회 실패 시에는 게시 데이터가 변경되지 않았다는 안내가 보여야 한다.
+3. editor 상단의 `저장본 JSON`을 눌러 다운로드한다.
+4. 다운로드 파일을 비공개 작업 폴더에서 확인한다.
+
+```powershell
+$phaseDExportPath = "<다운로드한 studio-UUID.json 절대 경로>"
+$phaseDExport = Get-Content -LiteralPath $phaseDExportPath -Raw | ConvertFrom-Json
+$phaseDExport.schema
+$phaseDExport.privateSourceBytesIncluded
+$phaseDExport.post.id
+$phaseDExport.assets | Select-Object id,private_source_key,public_r2_key,public_sha256,public_width,public_height
+```
+
+- `schema=studio-export/v1`, `privateSourceBytesIncluded=False`여야 한다.
+- post·version·taxonomy·version link·delivery 상태와 asset exact key·hash·MIME·dimension이 있어야 한다.
+- private source 원본 bytes, Access JWT, Bot·purge token, delivery `payload_json`, Discord attachment URL은 없어야 한다.
+- 제목·본문·remote ID·exact key는 운영 데이터이므로 공개 저장소나 채팅에 올리지 않는다.
+
+## 6. Discord drift 검토와 원본 정렬
+
+이 fixture만 BOT TEST의 원격 상태를 의도적으로 바꿀 수 있다. starter 본문·첨부·thread를 삭제하지 말고, disposable thread의 applied Forum tag 하나만 Discord UI에서 다른 BOT TEST tag로 바꾼다.
+
+1. Studio에서 `차이 검토`를 누른다.
+2. dialog 제목이 `Discord에서 차이를 확인했습니다`이고 `분류` section만 표시되는지 확인한다.
+3. 이때 post는 계속 `published`이고 detail·media는 `200`, pin·Hero가 있다면 그대로여야 한다.
+4. `Discord를 원본에 맞추기`를 한 번 누른다.
+5. Queue job이 `succeeded`가 된 뒤 다시 `차이 검토`를 눌러 `Discord와 승인 원본이 일치합니다`를 확인한다.
+6. 최초 게시 알림이나 새 thread가 생기지 않았는지 확인한다.
+
+```powershell
+npx wrangler d1 execute STUDIO_DB --env staging --remote --command "SELECT id,action,status,attempts,error_code,expected_hash,delivered_hash,updated_at FROM delivery_jobs WHERE post_id='$phaseDPostId' AND action IN ('check','align') ORDER BY created_at,id"
+```
+
+stale snapshot, Discord 5xx·timeout, thread·starter 누락에서는 정렬을 다시 보내지 않는다. 상태와 job ID를 기록하고 중단한다.
+
+## 7. Discord 연결 해제와 기존 글 재연결
+
+1. Discord thread URL, starter ID, 댓글 수와 현재 post의 pin·Hero 값을 기록한다.
+2. `게시·Forum 작업 → Discord 연결만 해제`를 한 번 누른다.
+3. post와 Portfolio detail·media는 계속 공개되고 Discord thread·댓글은 그대로인지 확인한다.
+4. root detail과 `/community`에서 이 post의 Discord CTA만 사라졌는지 확인한다. 공개 HTML과 media 응답은 `no-store`이므로 이전 CTA가 남아 있으면 재연결하지 말고 응답 헤더를 먼저 기록한다.
+5. D1에서 mapping은 `NULL`, delivery state는 `detached`, `detach` job에는 이전 thread·starter ID와 hash가 남아 있어야 한다.
+6. `기존 Discord 글 재연결`을 한 번 누른다.
+7. Queue job이 `succeeded`가 된 뒤 같은 thread·starter ID가 복원되고 CTA가 돌아오는지 확인한다.
+8. 새 thread와 role ping·최초 게시 알림이 생기지 않았는지 확인한다.
+
+```powershell
+npx wrangler d1 execute STUDIO_DB --env staging --remote --command "SELECT id,status,current_version_id,discord_thread_id,discord_starter_message_id,discord_delivery_state,pinned_at,hero_rank,discord_checked_at FROM studio_posts WHERE id='$phaseDPostId'"
+npx wrangler d1 execute STUDIO_DB --env staging --remote --command "SELECT id,action,status,remote_id,remote_aux_id,error_code,updated_at FROM delivery_jobs WHERE post_id='$phaseDPostId' AND action IN ('detach','reconnect') ORDER BY created_at,id"
+```
+
+재연결 실패를 만들려고 thread를 삭제하거나 ID를 바꾸지 않는다. 자연스럽게 target 검증이 실패하면 `detached` 유지와 새 thread 미생성만 확인하고 중단한다.
+
+## 8. 실제 touch swipe
 
 이 단계는 mouse drag나 개발자 도구의 viewport 변경으로 대체하지 않는다.
 
@@ -128,9 +188,9 @@ curl.exe -sS -D - -o NUL $phaseDMediaUrl
 
 실제 touch event를 사용하지 못했다면 이 항목은 통과로 표시하지 않는다.
 
-## 6. archive와 permanent purge
+## 9. archive·restore와 permanent purge
 
-### 6.1 archive
+### 9.1 archive와 restore
 
 1. editor의 `게시·Forum 작업`을 펼친다.
 2. `양쪽 공개 보관`을 한 번 누르고 확인 dialog를 승인한다.
@@ -146,7 +206,12 @@ npx wrangler d1 execute STUDIO_DB --env staging --remote --command "SELECT id,sl
 npx wrangler d1 execute STUDIO_DB --env staging --remote --command "SELECT id,target,action,status,attempts,error_code,updated_at FROM delivery_jobs WHERE post_id='$phaseDPostId' ORDER BY created_at,id"
 ```
 
-### 6.2 permanent purge
+7. `새 Forum thread로 복원`을 한 번 누르고 create job이 `succeeded`인지 확인한다.
+8. 새 thread·starter mapping과 동일한 승인본·첨부·tag, detail·media·CTA의 재공개를 확인한다.
+9. 복원 finalization 실패를 의도적으로 만들지 않는다. 자연스럽게 재시도 소진이 발생하면 새 thread 삭제 compensation이 `succeeded`, 원래 archive mapping과 `archived` 상태가 복원될 때까지 같은 버튼을 누르지 않는다.
+10. permanent purge로 이어갈 때는 다시 `양쪽 공개 보관`을 실행해 `archived`로 돌린다.
+
+### 9.2 permanent purge — token 등록 뒤 사용자 실행
 
 1. archive 전 기록한 정확한 제목을 `permanent purge 제목 재입력`에 붙여넣는다.
 2. `원본까지 영구 삭제`를 한 번 누르고 비가역 삭제 확인 dialog를 승인한다.
@@ -177,7 +242,38 @@ curl.exe -sS -D - -o NUL $phaseDDetailUrl
 curl.exe -sS -D - -o NUL $phaseDMediaUrl
 ```
 
-## 7. 종료 상태와 production 불변 확인
+## 10. daily check·scheduled retention·DLQ 확인
+
+staging cron `0 18 * * *`는 매일 한국 시간 03:00에 daily Discord check와 retention candidate scan을 함께 시작한다. 원격 retention 값을 고의로 잘못 바꾸지 않는다. 잘못된 값의 fail-closed 계약은 local test가 담당한다.
+
+다음 실행일 이후 읽기 전용으로 확인한다.
+
+```powershell
+npx wrangler d1 execute STUDIO_DB --env staging --remote --command "SELECT target,action,status,count(*) AS count,min(created_at) AS first_at,max(updated_at) AS last_at FROM delivery_jobs WHERE created_at >= datetime('now','-2 days') AND (action='check' OR action='cleanup') GROUP BY target,action,status ORDER BY target,action,status"
+npx wrangler d1 execute STUDIO_DB --env staging --remote --command "SELECT id,post_id,target,action,status,attempts,error_code,updated_at FROM delivery_jobs WHERE status IN ('queue_failed','failed','outcome_unknown') ORDER BY updated_at DESC LIMIT 25"
+npx wrangler queues list
+```
+
+- daily `check`는 active mapping이 있는 `published` post만 하루 한 job이며 remote mutation이 없어야 한다.
+- `detached`, `withheld`, `draft`, `archived`, `purged` post에는 daily check가 생기지 않아야 한다.
+- retention은 token·zone·1–3,650일 설정이 모두 유효할 때만 candidate를 Queue에 넣는다.
+- published private source와 private archive source는 scheduled cleanup 대상이 아니다.
+- DLQ나 `outcome_unknown`을 만들기 위해 Queue·D1·Discord를 훼손하지 않는다. 자연 발생 항목은 job ID·마지막 성공 phase를 확인한 뒤 runbook의 정확한 재시도 버튼만 한 번 사용한다.
+
+## 11. staging 배포와 promotion manifest
+
+production 승격 승인은 이 runbook 수행 승인과 별개다. 현재 범위에서는 아래 staging 두 명령까지만 실행한다.
+
+1. 모든 변경을 커밋·push하고 `git rev-list --left-right --count HEAD...@{upstream}`이 `0 0`인지 확인한다.
+2. `npm run promote -- staging`을 실행한다. runner가 lint·test, exact target dry-run, staging migration·deploy와 public read-only smoke를 끝내면 `.wrangler/promotions/<runId>-smoke.json`을 만든다.
+3. 이 runbook의 Access·draft·publish·update·archive·restore·role panel·Queue·public projection 검증을 마친다.
+4. smoke JSON의 `verifiedAt`을 UTC ISO 시각으로, 실제 통과한 9개 check만 `true`로 바꾼다. token, email, post·Discord ID와 메모는 넣지 않는다.
+5. runner가 출력한 정확한 경로로 `npm run promote -- staging --smoke-file <path>`를 실행한다.
+6. `.wrangler/promotions/state.json`이 `staging_verified`이고 commit·hash·active staging version이 일치하는지 확인한다.
+
+별도의 production 승인 전에는 `npm run promote -- production`을 실행하지 않는다. 해당 명령은 정확한 `PROMOTE <runId> <commit>` 입력 전에는 production migration·deploy를 시작하지 않는다. 승인 대기 중 거부·중단은 `approval_revoked`, production 명령 시작 뒤 결과가 불명확해지면 `production_unknown`이 되며 자동 재시도하지 않는다.
+
+## 12. 종료 상태와 production 불변 확인
 
 아래 명령은 읽기 전용이다.
 
@@ -192,11 +288,11 @@ git status --short --branch
 ```
 
 - production deployment ID, migration ledger와 secret 목록이 시작 상태와 같아야 한다.
-- staging에는 cache purge secret 이름과 새 deployment ID가 있어야 한다.
-- disposable post는 tombstone만 남고 Discord thread와 R2 object는 없어야 한다.
+- 2절을 사용자가 완료했다면 staging secret 목록에 cache purge token 이름과 새 deployment ID가 있어야 한다. 아직이면 미완료로 기록한다.
+- 9.2절을 완료했다면 disposable post는 tombstone만 남고 Discord thread와 R2 object는 없어야 한다. 아직이면 post를 `archived`로 두고 purge 대기로 기록한다.
 - 완료 기록에는 token 이름만 쓰고 값은 쓰지 않는다.
 
-## 8. 완료 기록 형식
+## 13. 완료 기록 형식
 
 [`phase-d-recovery-operations.md`](./phase-d-recovery-operations.md)의 완료 기록에 다음만 추가한다.
 
@@ -209,14 +305,20 @@ Access logout 뒤 보존된 URL·입력과 재로그인 뒤 저장·재오픈 �
 실제 touch 장치·브라우저·1/3↔2/3 결과
 archive 뒤 detail/media 404·no-store
 purge 뒤 tombstone, R2 prefix 0, detail 410, media 404·no-store
+운영 카드·JSON export·drift align·detach/reconnect·restore 결과
+daily check·retention·DLQ 조회 결과
+promotion run ID / manifest status / staging active version
 ```
 
-## 9. 현재 수동 검증으로 통과시킬 수 없는 항목
+## 14. 의도적으로 만들지 않는 실패 상태와 개인정보 경계
 
-현재 runtime에는 daily drift check, drift review dialog, detach, reconnect, withheld 수동 resume가 없다. 실패·`outcome_unknown`·drift·detached fixture를 만들려고 remote D1 row, Discord thread나 R2 object를 직접 고치지 않는다.
+`withheld`, create·notification 결과 불명, restore compensation과 DLQ exhaustion은 local integration test로 검증하고 staging에서는 자연 발생했을 때만 처리한다. 이를 만들려고 remote D1 row, Queue payload, Discord thread나 R2 object를 직접 고치지 않는다.
 
 - 실제 update가 자연스럽게 `outcome_unknown`이 된 경우에만 `Discord mutation 없이 원격 대조`를 사용한다.
 - create 결과 불명, notification 결과 불명, remote mismatch는 자동 재전송하지 않고 상태와 ID를 기록한 뒤 중단한다.
-- `drift`·`detached`는 해당 Phase D runtime action이 구현되기 전까지 No-Go다.
+- `withheld`에서 `공개 재개`는 `차이 검토`의 fresh match 직후에만 한 번 사용한다.
+- restore compensation은 새 thread의 원격 삭제와 D1 archive 복귀가 모두 확인되기 전에는 완료로 보지 않는다.
 
-이 제한은 fixture가 없다는 사실을 숨기지 않으면서 staging source-of-truth를 훼손하지 않는 경계다.
+이 시스템은 공개 Portfolio 방문자와 Discord ID를 결합하지 않으며 Discord profile·member list·댓글·reaction·DM·Patreon supporter data를 저장하지 않는다. Studio가 보존하는 것은 제작자가 입력한 post/version, asset exact key·hash, taxonomy와 delivery 상태다. 제작 원본 삭제 요청은 외부 수집 form이 아니라 해당 post의 보호된 Studio editor에서 `양쪽 공개 보관 → 제목 재입력 → 원본까지 영구 삭제` 순서로 처리한다. export와 purge 증거에는 token·JWT·attachment URL을 남기지 않는다.
+
+이 제한은 실패 fixture가 없다는 사실을 숨기지 않으면서 staging source-of-truth를 훼손하지 않는 경계다.

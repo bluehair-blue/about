@@ -1,6 +1,6 @@
 # Phase D — recovery and operations
 
-> 상태: 시작 조건 감사 No-Go — 정상·archived acceptance와 물리 격리는 통과, 실패·결과 불명·drift·detached fixture와 remote purge 대기
+> 상태: runtime·local QA 완료, staging full smoke와 사용자가 직접 수행할 global purge 대기 — production No-Go
 >
 > 목적: 불명 결과·Discord drift·DLQ·retention·배포 중단을 fail closed로 복구하고, 검증된 동일 commit을 production에 승격한다.
 >
@@ -17,7 +17,7 @@ staging에서 검증된 불변 commit과 migration만 수동 승인 한 번을 �
 - [ ] Phase A–C의 완료 기록과 Go/No-Go가 모두 통과했다. — Phase B/C의 remote purge·일부 실제 browser failure path가 남음
 - [ ] staging에 정상·실패·결과 불명·drift·detached·archived fixture가 준비되어 있다. — 정상·archived는 통과, 실패·결과 불명·drift·detached는 없음
 - [x] production D1·R2·Queue·DLQ와 Discord target이 staging에서 물리적으로 격리되어 있다. — environment별 physical name/ID가 다르고 production Discord vars는 비어 fail closed함
-- [x] 모든 production schema change가 현재 Worker와 호환되는 additive migration이다. — clean commit `be8c2a8`에서 `0001`–`0007` fresh local 적용·재적용 없음, staging pending 0, production applied 0/pending 7을 읽기 전용 preflight로 확인함
+- [x] 모든 production schema change가 현재 Worker와 호환되는 additive migration이다. — `0001`–`0010` fresh local 적용·재적용 없음과 upgrade fixture를 통과했으며 staging 배포 때 remote suffix를 다시 확인함
 - [x] public origin과 기존 build output 계약이 유지된다.
 
 ## 3. 읽을 파일과 소유 범위
@@ -196,37 +196,37 @@ CI로 옮길 때도 `tooling/promote.mjs staging/production`과 manifest schema�
 
 ## 12. 구현 순서
 
-1. fresh check와 daily reconciliation
-2. `확인 필요` filter·dialog·manual resume
-3. detach·reconnect
-4. delivery retry·DLQ·compensation
-5. scheduled retention cleanup
-6. archive·restore·purge destructive-path 검증
-7. JSON·asset manifest export와 runbook
-8. promotion runner·manifest·approval revocation
-9. staging full smoke
-10. 명시적 승인 뒤 production promotion과 read-only verification
+1. fresh check와 daily reconciliation — 구현·local fixture 완료
+2. `확인 필요` filter·dialog·manual resume — 구현·local fixture 완료
+3. detach·reconnect — 구현·local fixture 완료
+4. delivery retry·DLQ·compensation — 구현·local fixture 완료
+5. scheduled retention cleanup — 구현·local fixture 완료
+6. archive·restore·purge destructive-path 검증 — local fixture 완료, remote purge는 사용자 실행 대기
+7. JSON·asset manifest export와 runbook — 완료
+8. promotion runner·manifest·approval revocation — 구현·local fixture 완료
+9. staging full smoke — 실행 대기
+10. 명시적 승인 뒤 production promotion과 read-only verification — 승인 없음, 실행 금지
 
 ## 13. 최종 Go/No-Go
 
 - [x] staging 작업이 production D1·R2·Queue·Discord를 바꾸지 않음
-- [ ] daily drift가 정상 Portfolio를 내리거나 Discord를 자동 덮어쓰지 않음
-- [ ] `확인 필요` post가 제목·원인·시각으로 식별됨
-- [ ] `withheld` media 차단과 수동 fresh resume 통과
-- [ ] detach가 remote 대화를 보존하고 CTA·daily check만 제거함
-- [ ] reconnect가 안전한 기존 thread만 재사용하고 실패 시 자동 create하지 않음
-- [ ] duplicate Queue delivery에도 post·version·notification 중복 없음
-- [ ] archive·restore·purge·retention·DLQ fixture 통과
-- [ ] 잘못된 retention 값에서 cleanup 중단
-- [ ] promotion manifest가 commit·migration·target 변경을 거부함
-- [ ] 중단된 승인이 폐기되고 production 명령이 실행되지 않음
+- [x] daily drift가 정상 Portfolio를 내리거나 Discord를 자동 덮어쓰지 않음 — local integration fixture
+- [x] `확인 필요` post가 제목·원인·시각으로 식별됨 — UI contract와 local integration fixture
+- [x] `withheld` media 차단과 수동 fresh resume 통과 — local public/runtime fixture
+- [x] detach가 remote 대화를 보존하고 CTA·daily check만 제거함 — local runtime fixture; 공개 응답은 no-store
+- [x] reconnect가 안전한 기존 thread만 재사용하고 실패 시 자동 create하지 않음 — local runtime fixture
+- [x] duplicate Queue delivery에도 post·version·notification 중복 없음 — local runtime fixture
+- [ ] archive·restore·purge·retention·DLQ fixture 통과 — local 5개 경로 통과, remote purge와 실제 DLQ는 대기
+- [x] 잘못된 retention 값에서 cleanup 중단 — scheduled local fixture
+- [x] promotion manifest가 commit·migration·target 변경을 거부함 — promotion unit fixture
+- [x] 중단된 승인이 폐기되고 production 명령이 실행되지 않음 — approval/unknown state unit fixture; production 명령 미실행
 - [ ] production smoke가 read-only임
-- [ ] `npm run lint`와 `npm test` 통과
-- [ ] build output 세 항목과 public origin `https://about.bluehair.blue` 확인
+- [x] `npm run lint`와 `npm test` 통과 — 2026-08-31, 60/60
+- [x] build output 세 항목과 public origin `https://about.bluehair.blue` 확인 — production exact-target build 검증
 
 ## 14. 완료 기록
 
-- commit: Phase A–C intent 보정·Phase C projection `596f5ba`; staging 발견 결함 복구 `a41bf3b`; production 직접 배포·target 경계 차단 `85e1ecb`; promotion migration preflight `be8c2a8`; Phase D runtime 구현은 시작하지 않음
+- commit: Phase A–C intent 보정·Phase C projection `596f5ba`; staging 발견 결함 복구 `a41bf3b`; production 직접 배포·target 경계 차단 `85e1ecb`; promotion migration preflight `be8c2a8`; fresh check `5e49f37`; daily check `e0a9f77`; 수동 복구 `83a942c`; 보존·운영 복구 `1c89630`; promotion runner `bba8d93`
 - 2026-08-31 진입 감사: Phase A–C의 intent와 자동 계약을 재검토하고 local migration drift·Queue/notification·역할 패널·이미지 dimension/checksum·public cache·public route runtime 결함을 보정함. 적용된 migration은 수정하지 않았고 `npx tsc --noEmit`, `npm run lint`, `npm test` 52/52 뒤 exact staging target과 custom purge origin을 Worker version `eac4da09-8f0d-4b1a-b5da-6f67af9613f0`에 배포함
 - 시작 조건 No-Go: 정상 restore와 archived revocation acceptance, exact target guard, additive migration promotion preflight는 통과했으나 실패·결과 불명·drift·detached staging fixture와 remote global cache purge가 없음
 - promotion preflight evidence: clean commit `be8c2a879f996e3f228eb5e004a275c219a9749b`에서 migration `0001`–`0007`을 fresh local D1에 적용한 뒤 pending 0을 재확인했다. staging pending 0, production applied 0/pending 7이며 mutation은 없었다. SHA-256은 migrations `f2ccc301289d91890792a1b9bf6adbb24ce2d326a0ebb4a1d0f3e5a62f8a06a3`, lockfile `c53e98a74b7a5b2b9249161b4162f5b5c40c1e4b5f41079362be2db7f209fa2d`, Wrangler `964789bb1f1f3cf791f6b6fba1b963cb217c2b830a7acdb150c3c3e44928a982`다
@@ -234,6 +234,8 @@ CI로 옮길 때도 `tooling/promote.mjs staging/production`과 manifest schema�
 - physical isolation evidence: staging/production D1 ID, R2 bucket, publish Queue와 DLQ가 모두 분리됨. staging Queue producer/consumer는 1/1, production Queue와 DLQ는 0/0이며 production D1 migration count 0, production Worker version `6ec4757e-36f6-4980-84d5-cb1812928858`은 유지됨. production Discord vars가 없어 production runtime은 fail closed함
 - reconciliation/DLQ evidence: local integration에서 outcome-unknown update fresh reconciliation, duplicate 방지, malformed payload DLQ와 missed notification enqueue 복구는 통과했으나 해당 remote staging fixture는 없음
 - archive/restore/purge evidence: post `e222f213-7a71-499d-ad90-588a93aaad45`의 restore create `31050261-7f40-484e-918a-4d714e49777b`과 archive delete `0f991cef-2936-4315-8217-fcf9bbb79156`가 각 1회 succeeded. restore 중 detail/media/CTA 공개와 archive 뒤 detail·media `404`·`no-store`, root/community 비노출을 확인하고 최종 archived로 정리함. purge는 staging token·실제 호출 증거 부재로 미실행
+- Phase D local evidence: `npm run lint -- --no-cache`, `npx tsc --noEmit`, production exact-target build와 `npm test` 60/60. fresh drift/align, daily dedupe·제외 상태, withheld fresh resume, detach/reconnect, outcome-unknown·DLQ, scheduled retention·invalid config, restore compensation, secret-free export·운영 지표, approval revocation·production unknown 차단 fixture가 통과함
+- 운영자 실행 경계: cache purge token 생성·staging 등록·global purge는 사용자가 직접 수행하며, 정확한 순서와 확인 명령은 [`phase-d-staging-operator-runbook.md`](./phase-d-staging-operator-runbook.md)에 기록함. production 승인과 mutation은 없음
 - promotion run ID: 미기록
 - production read-only smoke: 미기록
 - Go/No-Go: 미통과
