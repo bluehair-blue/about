@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   appendFile,
   mkdir,
@@ -11,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -25,7 +26,10 @@ const lockPath = resolve(stateDirectory, "promotion.lock");
 const wranglerPath = fileURLToPath(
   new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url),
 );
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmCliPath = [
+  process.env.npm_execpath,
+  resolve(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+].find((path) => path && existsSync(path));
 const manualSmokeChecks = [
   "studioAccess",
   "draftCreate",
@@ -60,6 +64,13 @@ function git(args, options) {
 
 function wrangler(args, options) {
   return run(process.execPath, [wranglerPath, ...args], options);
+}
+
+function npm(args) {
+  if (!npmCliPath) {
+    throw new Error("Could not locate npm-cli.js; invoke the runner through npm");
+  }
+  return run(process.execPath, [npmCliPath, ...args]);
 }
 
 async function atomicJson(path, value) {
@@ -394,10 +405,10 @@ async function runStaging(smokeFile) {
     throw new Error(`Current commit is already ${previous.status}; do not redeploy it`);
   }
 
-  run(npmCommand, ["run", "lint"]);
-  run(npmCommand, ["test"]);
+  npm(["run", "lint"]);
+  npm(["test"]);
   const productionResources = await builtResources();
-  run(npmCommand, ["run", "build:staging"]);
+  npm(["run", "build:staging"]);
   run(process.execPath, ["tooling/verify-deploy-target.mjs", "staging"]);
   wrangler(["deploy", "--env", "staging", "--dry-run"]);
   const stagingResources = await builtResources();
@@ -420,7 +431,7 @@ async function runStaging(smokeFile) {
     wrangler([
       "d1", "migrations", "apply", "STUDIO_DB", "--env", "staging", "--remote",
     ]);
-    run(npmCommand, ["run", "preflight:promotion"]);
+    npm(["run", "preflight:promotion"]);
     const deployedAt = new Date().toISOString();
     const output = wrangler(["deploy", "--env", "staging"], { capture: true });
     const versionMatch = /Current Version ID:\s*([0-9a-f-]{36})/iu.exec(output);
@@ -485,9 +496,9 @@ async function runProduction() {
   let activeStaging = deploymentFor("staging");
   validateProductionCandidate(state, current, activeStaging.versionId);
 
-  run(npmCommand, ["run", "lint"]);
-  run(npmCommand, ["test"]);
-  run(npmCommand, ["run", "preflight:promotion"]);
+  npm(["run", "lint"]);
+  npm(["test"]);
+  npm(["run", "preflight:promotion"]);
   run(process.execPath, ["tooling/verify-deploy-target.mjs", "production"]);
   const productionResources = await builtResources();
   if (!isDeepStrictEqual(productionResources, state.resources.production)) {
