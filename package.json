@@ -10,11 +10,12 @@
     "build": "vinext build",
     "build:staging": "vinext build --mode staging",
     "start": "vinext start",
-    "test": "npm run build && node tooling/verify-deploy-target.mjs production && node --test tests/deploy-target.test.mjs tests/rendered-html.test.mjs tests/public-projection.test.mjs tests/studio-schema.test.mjs tests/studio-runtime.test.mjs",
+    "test": "npm run build && node tooling/verify-deploy-target.mjs production && node --test tests/deploy-target.test.mjs tests/promotion-preflight.test.mjs tests/rendered-html.test.mjs tests/public-projection.test.mjs tests/studio-schema.test.mjs tests/studio-runtime.test.mjs",
     "deploy": "node tooling/refuse-production-deploy.mjs",
     "deploy:staging": "npm run build:staging && node tooling/verify-deploy-target.mjs staging && wrangler d1 migrations apply STUDIO_DB --env staging --remote && wrangler deploy --env staging",
     "deploy:staging:dry-run": "npm run build:staging && node tooling/verify-deploy-target.mjs staging && wrangler deploy --env staging --dry-run",
     "migrate:staging:local": "wrangler d1 migrations apply STUDIO_DB --env staging --local",
+    "preflight:promotion": "node tooling/verify-promotion-preflight.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
