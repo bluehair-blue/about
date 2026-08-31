@@ -317,6 +317,15 @@ class FakeImages {
     const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
     this.calls.push(bytes);
     if (this.result instanceof Error) throw this.result;
+    const derivative = new TextDecoder().decode(bytes).match(/^RIFF-(\d+)x(\d+)-/u);
+    if (derivative) {
+      return {
+        format: "webp",
+        fileSize: bytes.byteLength,
+        width: Number(derivative[1]),
+        height: Number(derivative[2]),
+      };
+    }
     return {
       ...this.result,
       fileSize: this.result.fileSize ?? bytes.byteLength,
@@ -330,8 +339,11 @@ class FakeImages {
         output: async (output) => {
           await source;
           this.calls.push({ transform, output });
+          const width = this.result.orientedWidth ?? this.result.width;
+          const height = this.result.orientedHeight ?? this.result.height;
+          const scale = Math.min(1, transform.width / Math.max(width, height));
           const bytes = Buffer.from(
-            `RIFF-${transform.width}x${transform.height}-${output.quality}-WEBP`,
+            `RIFF-${Math.round(width * scale)}x${Math.round(height * scale)}-${output.quality}-WEBP`,
           );
           return { response: () => new Response(bytes) };
         },
@@ -2326,11 +2338,17 @@ test("rejects unsafe image inputs and records recoverable R2 failures", async ()
   }
 });
 
-test("creates both derivatives and records Queue retry exhaustion for the DLQ", async () => {
+test("records transformed dimensions and Queue retry exhaustion for the DLQ", async () => {
   const worker = await loadWorker();
   const database = new SqliteD1();
   const media = new MemoryR2();
-  const images = new FakeImages();
+  const images = new FakeImages({
+    format: "png",
+    width: 4_032,
+    height: 3_024,
+    orientedWidth: 3_024,
+    orientedHeight: 4_032,
+  });
   const queue = new MemoryQueue();
   const env = phaseAEnv({
     STUDIO_DB: database,
@@ -2358,7 +2376,7 @@ test("creates both derivatives and records Queue retry exhaustion for the DLQ", 
       SELECT discord_r2_key FROM studio_assets WHERE id = ?
     `).get(uploaded.assetId);
     media.objects.set(processing.discord_r2_key, {
-      bytes: Uint8Array.from(Buffer.from("RIFF-2048x2048-80-WEBP")),
+      bytes: Uint8Array.from(Buffer.from("RIFF-1536x2048-80-WEBP")),
       options: { preexisting: true },
     });
 
@@ -2373,10 +2391,10 @@ test("creates both derivatives and records Queue retry exhaustion for the DLQ", 
       FROM studio_assets WHERE id = ?
     `).get(uploaded.assetId);
     assert.equal(ready.status, "ready");
-    assert.equal(ready.public_width, 1);
-    assert.equal(ready.public_height, 1);
-    assert.equal(ready.discord_width, 1);
-    assert.equal(ready.discord_height, 1);
+    assert.equal(ready.public_width, 1920);
+    assert.equal(ready.public_height, 2560);
+    assert.equal(ready.discord_width, 1536);
+    assert.equal(ready.discord_height, 2048);
     assert.match(ready.public_sha256, /^[0-9a-f]{64}$/);
     assert.match(ready.discord_sha256, /^[0-9a-f]{64}$/);
     assert.equal(media.objects.has(ready.private_source_key), true);
@@ -3836,6 +3854,92 @@ test("re-enqueues a committed queued outbox after Queue and failure-record write
   }
 });
 
+test("DLQs malformed Queue payloads and recovers a missed notification enqueue", async () => {
+  const worker = await loadWorker();
+  const database = new SqliteD1();
+  const queue = new MemoryQueue();
+  const env = phaseAEnv({
+    STUDIO_DB: database,
+    STUDIO_MEDIA: new MemoryR2(),
+    IMAGES: new FakeImages(),
+    PUBLISH_QUEUE: queue,
+  });
+  const keys = await accessKeys();
+  const token = await keys.token();
+  const discord = new FakeDiscordForum(env);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (String(input) === `${teamDomain}/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [keys.publicJwk] });
+    }
+    return discord.fetch(input, init);
+  };
+  const request = async (pathname, init = {}) => worker.fetch(
+    new Request(`https://staging.example${pathname}`, {
+      ...init,
+      headers: {
+        "cf-access-jwt-assertion": token,
+        ...(init.headers ?? {}),
+      },
+    }),
+    env,
+    executionContext(),
+  );
+
+  try {
+    const malformedDraft = await createDraftFixture(request, "malformed Queue fixture");
+    const malformedResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "publish", postId: malformedDraft.postId }),
+    );
+    const malformedJob = await malformedResponse.json();
+    const malformedBody = { ...queue.messages.shift(), traceId: "unexpected" };
+
+    const first = queueMessage(malformedBody, 1);
+    await worker.queue({ messages: [first] }, env);
+    assert.equal(first.acked, false);
+    assert.deepEqual(first.retryOptions, {});
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(malformedJob.jobId).status,
+      "queued",
+    );
+
+    const terminal = queueMessage(malformedBody, 4);
+    await worker.queue({ messages: [terminal] }, env);
+    assert.equal(terminal.acked, false);
+    assert.deepEqual(terminal.retryOptions, {});
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, error_code FROM delivery_jobs WHERE id = ?
+      `).get(malformedJob.jobId) },
+      { status: "failed", error_code: "queue_payload_invalid" },
+    );
+
+    const recoveryDraft = await createDraftFixture(request, "notification recovery fixture");
+    const recoveryResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "publish", postId: recoveryDraft.postId }),
+    );
+    assert.equal(recoveryResponse.status, 202);
+    const discordBody = queue.messages.shift();
+    const delivered = queueMessage(discordBody);
+    await worker.queue({ messages: [delivered] }, env);
+    assert.equal(delivered.acked, true);
+    const lostNotification = queue.messages.shift();
+    assert.equal(lostNotification.type, "notification_send");
+
+    const replay = queueMessage(discordBody, 2);
+    await worker.queue({ messages: [replay] }, env);
+    assert.equal(replay.acked, true);
+    assert.equal(discord.createCalls, 1);
+    assert.deepEqual(queue.messages, [lostNotification]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
 test("retries Discord 429 responses but never replays an unknown create result", async () => {
   async function runCase(failure) {
     const worker = await loadWorker();
@@ -3947,6 +4051,7 @@ test("creates the exact Discord role panel only after Access and same-origin che
   const keys = await accessKeys();
   const originalFetch = globalThis.fetch;
   const discordCalls = [];
+  let failCreate = false;
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === `${teamDomain}/cdn-cgi/access/certs`) {
@@ -3956,6 +4061,7 @@ test("creates the exact Discord role panel only after Access and same-origin che
     if (init.method === "PATCH") {
       return Response.json({ message: "Unknown Message" }, { status: 404 });
     }
+    if (failCreate) throw new Error("Discord result unknown");
     return Response.json({
       id: "100000000000000009",
       channel_id: env.DISCORD_START_CHANNEL_ID,
@@ -3983,6 +4089,7 @@ test("creates the exact Discord role panel only after Access and same-origin che
       messageId: "100000000000000009",
       channelId: env.DISCORD_START_CHANNEL_ID,
       created: true,
+      active: false,
     });
     assert.equal(discordCalls.length, 2);
     assert.equal(discordCalls[0].init.method, "PATCH");
@@ -3997,10 +4104,35 @@ test("creates the exact Discord role panel only after Access and same-origin che
     );
     const body = JSON.parse(discordCalls[1].init.body);
     assert.deepEqual(body.allowed_mentions, { parse: [] });
+    assert.match(body.content, /Worker 설정에 반영/);
+    assert.deepEqual(
+      body.components[0].components.map(({ disabled }) => disabled),
+      [true, true],
+    );
     assert.deepEqual(
       body.components[0].components.map(({ custom_id }) => custom_id),
       ["notify-role:all:add:v1", "notify-role:all:remove:v1"],
     );
+
+    failCreate = true;
+    const unknown = await worker.fetch(
+      new Request("https://staging.example/studio/api/discord/role-panel", {
+        method: "POST",
+        headers: {
+          "cf-access-jwt-assertion": await keys.token(),
+          "content-type": "application/json",
+          origin: "https://staging.example",
+          "x-studio-request": "1",
+        },
+        body: "{}",
+      }),
+      env,
+      executionContext(),
+    );
+    assert.equal(unknown.status, 409);
+    assert.deepEqual(await unknown.json(), {
+      error: "discord_role_panel_create_outcome_unknown",
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

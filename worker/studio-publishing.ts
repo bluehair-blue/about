@@ -227,8 +227,8 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
     action: action as PublishAction,
     postId,
     jobId,
-    title,
-    updatedAt,
+    title: title as string | null,
+    updatedAt: updatedAt as string | null,
     heroRank: heroRank as number | null | undefined,
   };
 }
@@ -1942,29 +1942,35 @@ async function finalizeDiscordDelivery(
   if (!finalized) {
     throw new Error("delivery_finalization_failed");
   }
-  if (job.action === "create" && !payload.restore) {
-    const notification = await database.prepare(`
-      SELECT id
-      FROM delivery_jobs
-      WHERE post_id = ? AND version_id = ?
-        AND target = 'notification' AND action = 'send'
-        AND dedupe_key = ? AND status = 'queued'
-    `).bind(
-      job.post_id,
-      job.version_id,
-      `notify:${job.post_id}:${job.version_id}`,
-    ).first<{ id: string }>();
-    if (!notification || !env.PUBLISH_QUEUE) {
-      throw new Error("notification_outbox_unavailable");
-    }
-    await enqueue(
-      database,
-      env.PUBLISH_QUEUE,
-      notification.id,
-      "notification_send",
-    );
-  }
+  await enqueuePendingNotification(job, database, env, true);
   return { action: "ack" };
+}
+
+async function enqueuePendingNotification(
+  job: DeliveryJob,
+  database: StudioD1,
+  env: PhaseAEnv,
+  required: boolean,
+) {
+  const payload = parseDeliveryPayload(job);
+  if (job.action !== "create" || !payload || payload.restore) return;
+  const notification = await database.prepare(`
+    SELECT id
+    FROM delivery_jobs
+    WHERE post_id = ? AND version_id = ?
+      AND target = 'notification' AND action = 'send'
+      AND dedupe_key = ? AND status = 'queued'
+  `).bind(
+    job.post_id,
+    job.version_id,
+    `notify:${job.post_id}:${job.version_id}`,
+  ).first<{ id: string }>();
+  if (!notification) {
+    if (required) throw new Error("notification_outbox_unavailable");
+    return;
+  }
+  if (!env.PUBLISH_QUEUE) throw new Error("notification_queue_unavailable");
+  await enqueue(database, env.PUBLISH_QUEUE, notification.id, "notification_send");
 }
 
 export async function processStudioDiscordJob(
@@ -1976,7 +1982,12 @@ export async function processStudioDiscordJob(
   const media = env.STUDIO_MEDIA;
   if (!database || !media) throw new Error("publish_unavailable");
   let job = await loadDeliveryJob(database, jobId);
-  if (!job || ["succeeded", "failed", "outcome_unknown"].includes(job.status)) {
+  if (!job) return { action: "ack" };
+  if (job.status === "succeeded") {
+    await enqueuePendingNotification(job, database, env, false);
+    return { action: "ack" };
+  }
+  if (["failed", "outcome_unknown"].includes(job.status)) {
     return { action: "ack" };
   }
   if (job.status === "finalizing") {
@@ -2282,7 +2293,16 @@ export async function recoverStudioDiscordQueueFailure(
   const database = env.STUDIO_DB;
   if (!database) return { action: "retry", delaySeconds: 5 };
   const job = await loadDeliveryJob(database, jobId);
-  if (!job || ["succeeded", "failed", "outcome_unknown"].includes(job.status)) {
+  if (!job) return { action: "ack" };
+  if (job.status === "succeeded") {
+    try {
+      await enqueuePendingNotification(job, database, env, false);
+      return { action: "ack" };
+    } catch {
+      return { action: "retry", delaySeconds: 5 };
+    }
+  }
+  if (["failed", "outcome_unknown"].includes(job.status)) {
     return { action: "ack" };
   }
   if (terminal) {

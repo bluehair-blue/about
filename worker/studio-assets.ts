@@ -1000,14 +1000,6 @@ function parseEmptyJson(request: Request) {
   ).catch(() => false);
 }
 
-function derivativeDimensions(width: number, height: number, limit: number) {
-  const scale = Math.min(1, limit / Math.max(width, height));
-  return {
-    width: Math.max(1, Math.round(width * scale)),
-    height: Math.max(1, Math.round(height * scale)),
-  };
-}
-
 async function transformDerivative(
   images: StudioImages,
   source: ArrayBuffer,
@@ -1020,7 +1012,22 @@ async function transformDerivative(
     .output({ format: "image/webp", quality });
   const response = transformed.response();
   if (!response.ok) throw new Error("image_transform_failed");
-  return response.arrayBuffer();
+  const bytes = await response.arrayBuffer();
+  try {
+    const info = await images.info(new Blob([bytes]).stream());
+    if (
+      normalizeSourceMime(info.format) !== "image/webp" ||
+      !Number.isSafeInteger(info.width) ||
+      !Number.isSafeInteger(info.height) ||
+      info.width < 1 ||
+      info.height < 1
+    ) {
+      throw new Error("image_transform_invalid");
+    }
+    return { bytes, width: info.width, height: info.height };
+  } catch {
+    throw new Error("image_transform_invalid");
+  }
 }
 
 async function storeDerivative(
@@ -1057,6 +1064,7 @@ function assetProcessingCode(error: unknown) {
     "source_missing",
     "source_hash_mismatch",
     "image_transform_failed",
+    "image_transform_invalid",
     "portfolio_derivative_too_large",
     "discord_derivative_too_large",
     "derivative_storage_failed",
@@ -1211,10 +1219,10 @@ export async function processStudioAssetJob(
     transformDerivative(images, source, PORTFOLIO_WIDTH, 85),
     transformDerivative(images, source, DISCORD_WIDTH, 80),
   ]);
-  if (portfolio.byteLength > MAX_PORTFOLIO_BYTES) {
+  if (portfolio.bytes.byteLength > MAX_PORTFOLIO_BYTES) {
     throw new Error("portfolio_derivative_too_large");
   }
-  if (discord.byteLength > MAX_DISCORD_ASSET_BYTES) {
+  if (discord.bytes.byteLength > MAX_DISCORD_ASSET_BYTES) {
     throw new Error("discord_derivative_too_large");
   }
 
@@ -1228,24 +1236,14 @@ export async function processStudioAssetJob(
   const publicHash = await storeDerivative(
     media,
     asset.public_r2_key,
-    portfolio,
+    portfolio.bytes,
     metadata,
   );
   const discordHash = await storeDerivative(
     media,
     asset.discord_r2_key,
-    discord,
+    discord.bytes,
     metadata,
-  );
-  const publicDimensions = derivativeDimensions(
-    asset.width,
-    asset.height,
-    PORTFOLIO_WIDTH,
-  );
-  const discordDimensions = derivativeDimensions(
-    asset.width,
-    asset.height,
-    DISCORD_WIDTH,
   );
   const completedAt = new Date().toISOString();
   const ready = await database.prepare(`
@@ -1256,14 +1254,14 @@ export async function processStudioAssetJob(
       processing_error = NULL, updated_at = ?
     WHERE id = ? AND status = 'processing'
   `).bind(
-    portfolio.byteLength,
+    portfolio.bytes.byteLength,
     publicHash,
-    publicDimensions.width,
-    publicDimensions.height,
-    discord.byteLength,
+    portfolio.width,
+    portfolio.height,
+    discord.bytes.byteLength,
     discordHash,
-    discordDimensions.width,
-    discordDimensions.height,
+    discord.width,
+    discord.height,
     completedAt,
     assetId,
   ).run();

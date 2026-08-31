@@ -185,7 +185,8 @@ posts/{YYYY}/{MM}/{DD}/{timestamp}--{post_id}--{title_snapshot}/
 - stable slug fixture: post `77515136-6636-49e2-bfcd-75b6f7676ac1`에 최초 slug `phase-b-stable-slug-검증-2026-08-31--77515136`을 배정한 뒤 제목 수정에도 그대로 유지함. 첫 thread `1543795623239884934` create·update·delete, 새 thread `1543796674076614746` restore·delete가 모두 1회 시도에서 succeeded였고 notification job은 최초 1건뿐임. fixture는 최종 `archived`, active job 0건이며 원격 slug 변경 SQL은 `stable_slug_immutable`로 거부됨
 - 배포: staging Worker `about-staging` version `d7c236a8-52b8-4667-ad1e-d2e5171be55c`. production Worker·D1·R2·Queue에는 변경 없음
 - 해결된 blocker: 실제 새 post의 slug가 `NULL`이던 원인은 publish candidate 생성 경계에서 slug를 배정하지 않았기 때문이었다. 최초 publish batch 안에서 배정하고 DB 형식·불변 trigger를 추가해 local fixture의 직접 주입 없이 staging create/update/archive/restore로 검증함
-- Go/No-Go: Phase B automated contract 37개와 staging `0004`–`0007`, publish/update·pin/Hero·unpublish/republish·archive/restore·stable slug는 Go. remote purge/cache 설정, browser process 재시작·PIN 만료·실패 이동, public route/media archive 증거는 No-Go이며 production 승인은 하지 않음
+- 2026-08-31 intent audit 보정: succeeded publish의 누락된 notification enqueue 재개, malformed Queue payload의 DLQ 전송, fallback 역할 패널의 비활성 상태와 unknown create 결과 `409`, 실제 WebP 출력 dimension 저장, public media의 D1 byte/SHA-256 재검증과 `private, no-store`를 local Worker fixture로 검증함. 로컬 Wrangler ledger의 비정상 trigger drift는 이미 staging에 적용된 `0006`을 수정하지 않고 로컬 상태만 복구했으며, 이 보정본은 staging에 재배포하지 않음
+- Go/No-Go: Phase B automated contract와 이전 staging `0004`–`0007`, publish/update·pin/Hero·unpublish/republish·archive/restore·stable slug는 Go. current checkout 재배포, remote purge/cache 설정, browser process 재시작·PIN 만료·실패 이동, public route/media archive 증거는 No-Go이며 production 승인은 하지 않음
 
 ## 다음 Phase
 

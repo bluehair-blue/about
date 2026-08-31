@@ -39,19 +39,25 @@ test("renders the portfolio reference page", async () => {
   assert.match(html, /class="hero-scene"/);
   assert.match(html, /class="hero-updates"/);
   assert.match(html, /최근 업데이트 슬라이드/);
+  assert.match(html, /Hero에 공개된 글이 없습니다/);
   assert.match(html, /\/works\/prime-city\.webp/);
   assert.match(html, /id="work"/);
   assert.match(html, /id="support"/);
   assert.match(html, /id="now"/);
   assert.match(html, /https:\/\/intro\.bluehair\.blue/);
   assert.match(html, /href="https:\/\/www\.patreon\.com\/bluehairblue"/);
-  assert.match(html, /aria-label="Patreon 제작실 페이지를 새 탭에서 열기"/);
+  assert.match(html, /작업실 연료 보급/);
+  assert.match(html, /제작자 더 일하게 만들기/);
+  assert.match(html, /aria-label="Patreon 후원 결제 페이지를 새 탭에서 열기"/);
   assert.match(html, /target="_blank"/);
   assert.match(html, /rel="noopener noreferrer"/);
-  assert.match(html, /멤버십에는 별도의 AI 채팅 이용권이 포함되지 않습니다/);
+  assert.match(html, /월 5,000원 수준의 순수 후원입니다/);
+  assert.match(html, /혜택·일정·Discord 역할·독점 콘텐츠는 약속하지 않으며/);
   assert.doesNotMatch(html, /후원 링크 준비 중|멤버십 구성 중/);
+  assert.match(html, /제작 근황 필터와 정렬/);
+  assert.match(html, /커뮤니티 안내 보기/);
+  assert.match(html, /조건에 맞는 공개 글이 없습니다/);
   assert.match(html, /class="site-footer"/);
-  assert.match(html, /dateTime="2026-07-30"|datetime="2026-07-30"/i);
   assert.match(html, /<link rel="canonical" href="https:\/\/about\.bluehair\.blue"/);
   assert.match(html, /<meta property="og:image" content="https:\/\/about\.bluehair\.blue\/og\.png"/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
@@ -69,16 +75,28 @@ test("includes culturally adapted Japanese and English copy", async () => {
 
   assert.match(content, /世界を、/);
   assert.match(content, /その応援は、次のキャラクターと次の世界をつくる時間になります/);
-  assert.match(content, /Patreonの制作室ページを新しいタブで開く/);
+  assert.match(content, /制作室への燃料補給/);
+  assert.match(content, /Patreonの支援決済ページを新しいタブで開く/);
   assert.match(content, /I design/);
   assert.match(content, /Your support becomes time to create the next character/);
-  assert.match(content, /Open the studio Patreon page in a new tab/);
+  assert.match(content, /Fuel the studio/);
+  assert.match(content, /Open the Patreon support checkout in a new tab/);
   assert.match(locale, /document\.documentElement\.lang = locale/);
   assert.match(locale, /localStorage\.setItem\(LOCALE_KEY, nextLocale\)/);
 });
 
 test("keeps the route as a thin section composition", async () => {
-  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const [page, home] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/home.tsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /loadPublicProjection/);
+  assert.match(page, /getRuntimeEnv/);
+  assert.match(page, /redirect\(projection\.canonicalHref\)/);
+  assert.match(page, /<Home projection=\{projection\}/);
+  assert.doesNotMatch(page, /"use client"|usePortfolioLocale\(\)/);
+  assert.doesNotMatch(page, /<header\b|<section\b|<footer\b/);
 
   for (const component of [
     "SiteHeader",
@@ -88,11 +106,56 @@ test("keeps the route as a thin section composition", async () => {
     "UpdatesSection",
     "SiteFooter",
   ]) {
-    assert.match(page, new RegExp(`<${component}\\b`));
+    assert.match(home, new RegExp(`<${component}\\b`));
   }
 
-  assert.match(page, /usePortfolioLocale\(\)/);
-  assert.doesNotMatch(page, /<header\b|<section\b|<footer\b/);
+  assert.match(home, /usePortfolioLocale\(\)/);
+  assert.doesNotMatch(home, /<header\b|<section\b|<footer\b/);
+});
+
+test("keeps Phase C galleries and lightbox on one native interaction contract", async () => {
+  const [gallery, updates, community, publicPost, sections, responsive] = await Promise.all([
+    readFile(
+      new URL("../app/components/public-gallery.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../app/components/updates-section.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../app/community/page.tsx", import.meta.url), "utf8"),
+    readFile(
+      new URL("../app/updates/[slug]/page.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../app/styles/sections.css", import.meta.url), "utf8"),
+    readFile(new URL("../app/styles/responsive.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(gallery, /hasUniformAspectRatio/);
+  assert.match(gallery, /<= 1\.01/);
+  assert.match(gallery, /<dialog/);
+  assert.match(gallery, /\.showModal\(\)/);
+  assert.match(gallery, /onCancel=/);
+  assert.match(gallery, /ArrowLeft/);
+  assert.match(gallery, /ArrowRight/);
+  assert.match(gallery, /onTouchStart=/);
+  assert.match(gallery, /onTouchEnd=/);
+  assert.match(gallery, /requestAnimationFrame\(\(\) => opener\?\.focus\(\)\)/);
+  assert.match(updates, /aria-expanded=\{expanded\}/);
+  assert.equal((updates.match(/<PublicLightbox\b/g) ?? []).length, 1);
+  assert.doesNotMatch(community, /next\/link/);
+  assert.doesNotMatch(publicPost, /next\/link/);
+  assert.match(community, /<a href=\{publicPostPath\(thread\.slug\)\}>/);
+  assert.match(publicPost, /<a href="\/#now">다른 제작 근황 보기<\/a>/);
+  assert.match(sections, /\.post-media-slider[\s\S]*object-fit: contain/);
+  assert.match(sections, /\.post-media-grid[\s\S]*object-fit: cover/);
+  assert.match(sections, /\.public-lightbox::backdrop/);
+  assert.match(responsive, /@media \(max-width: 52rem\)/);
+  assert.match(
+    responsive,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*animation: none !important/,
+  );
 });
 
 test("keeps the Patreon CTA inside the support DOM contract", async () => {

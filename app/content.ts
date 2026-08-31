@@ -1,16 +1,5 @@
 export type Locale = "ko" | "ja" | "en";
 
-export type UpdateItem = {
-  id: string;
-  date: string;
-  dateTime: string;
-  state: string;
-  title: string;
-  description: string;
-  image: string;
-  imageAlt: string;
-};
-
 export type SiteCopy = {
   meta: { title: string; description: string };
   skipLink: string;
@@ -56,13 +45,34 @@ export type SiteCopy = {
     sectionSubtitle: string;
     footnote: string;
   };
-  updates: UpdateItem[];
+  feed: {
+    controls: string;
+    category: string;
+    all: string;
+    update: string;
+    work: string;
+    topic: string;
+    sort: string;
+    newest: string;
+    oldest: string;
+    pinned: string;
+    expand: string;
+    collapse: string;
+    detail: string;
+    discord: string;
+    community: string;
+    empty: string;
+    pagination: string;
+    page: string;
+  };
   showcase: {
     label: string;
     latest: string;
     selectionLabel: string;
     itemLabel: string;
     allUpdates: string;
+    empty: string;
+    openPost: string;
   };
   footer: { name: string; top: string };
 };
@@ -121,50 +131,48 @@ export const siteContent = {
       options: [
         { title: "공개 제작로그", status: "누구나 읽을 수 있습니다" },
         {
-          title: "Patreon 멤버십",
-          status: "제작실 응원하기 ↗",
+          title: "작업실 연료 보급",
+          status: "제작자 더 일하게 만들기 ↗",
           href: patreonUrl,
-          openLabel: "Patreon 제작실 페이지를 새 탭에서 열기",
+          openLabel: "Patreon 후원 결제 페이지를 새 탭에서 열기",
         },
       ],
-      note: "작품과 공개 제작로그는 계속 누구나 볼 수 있습니다. 멤버십에는 별도의 AI 채팅 이용권이 포함되지 않습니다.",
+      note: "월 5,000원 수준의 순수 후원입니다. 혜택·일정·Discord 역할·독점 콘텐츠는 약속하지 않으며, 결제액과 통화는 Patreon 결제 화면에서 확인해 주세요.",
     },
     notes: {
       sectionTitle: "Making notes",
       sectionSubtitle: "제작 근황",
       footnote:
-        "세부 제작 로그와 아카이브는 콘텐츠 구조가 확정된 뒤 순차적으로 공개합니다.",
+        "공개 승인된 한국어 원문만 표시합니다. 글 수정과 복구는 Studio에서 관리합니다.",
     },
-    updates: [
-      {
-        id: "portfolio-foundation",
-        date: "2026.07.30",
-        dateTime: "2026-07-30",
-        state: "진행 중",
-        title: "포트폴리오의 첫 기준을 세우는 중",
-        description:
-          "작품, 후원, 제작 노트를 한 흐름으로 잇는 레퍼런스 페이지를 정리하고 있습니다.",
-        image: "/smoke-ribbon.png",
-        imageAlt: "옅은 배경 위를 흐르는 파란 연무",
-      },
-      {
-        id: "prime-city-expansion",
-        date: "2026.04.23",
-        dateTime: "2026-04-23",
-        state: "완료",
-        title: "프라임시티의 인물과 장면 확장",
-        description:
-          "신규 캐릭터와 시네마틱 인트로, 이미지 제작 파이프라인을 확장했습니다.",
-        image: "/works/prime-city.webp",
-        imageAlt: "프라임시티 캐릭터 장그루",
-      },
-    ],
+    feed: {
+      controls: "제작 근황 필터와 정렬",
+      category: "분류",
+      all: "전체",
+      update: "근황",
+      work: "작품 소식",
+      topic: "주제",
+      sort: "정렬",
+      newest: "최신순",
+      oldest: "오래된순",
+      pinned: "PIN",
+      expand: "더 보기",
+      collapse: "접기",
+      detail: "사이트에서 전체 보기",
+      discord: "Discord에서 댓글 보기",
+      community: "커뮤니티 안내 보기 →",
+      empty: "조건에 맞는 공개 글이 없습니다.",
+      pagination: "제작 근황 페이지",
+      page: "페이지",
+    },
     showcase: {
       label: "최근 업데이트 슬라이드",
       latest: "최근 업데이트",
       selectionLabel: "업데이트 선택",
       itemLabel: "{index}번째 업데이트: {title}",
       allUpdates: "전체 업데이트 보기",
+      empty: "Hero에 공개된 글이 없습니다.",
+      openPost: "전체 글 보기 ↗",
     },
     footer: { name: "한파란", top: "맨 위로" },
   },
@@ -207,50 +215,48 @@ export const siteContent = {
       options: [
         { title: "公開制作ノート", status: "どなたでも読めます" },
         {
-          title: "Patreon メンバーシップ",
-          status: "制作室を応援する ↗",
+          title: "制作室への燃料補給",
+          status: "制作者をもっと働かせる ↗",
           href: patreonUrl,
-          openLabel: "Patreonの制作室ページを新しいタブで開く",
+          openLabel: "Patreonの支援決済ページを新しいタブで開く",
         },
       ],
-      note: "作品と公開制作ノートは、これからも誰でも見られる形で続けます。メンバーシップに限定AIチャットへのアクセス権は含まれません。",
+      note: "月5,000ウォン程度の純粋な支援です。特典、日程、Discordロール、限定コンテンツは約束せず、金額と通貨はPatreonの決済画面でご確認ください。",
     },
     notes: {
       sectionTitle: "Making notes",
       sectionSubtitle: "制作ノート",
       footnote:
-        "詳しい制作ログとアーカイブは、コンテンツ構成が固まり次第、順次公開します。",
+        "公開承認された韓国語の原文だけを表示します。編集と復旧はStudioで管理します。",
     },
-    updates: [
-      {
-        id: "portfolio-foundation",
-        date: "2026.07.30",
-        dateTime: "2026-07-30",
-        state: "制作中",
-        title: "ポートフォリオの基準を整えています",
-        description:
-          "作品、応援方法、制作ノートをひとつの流れでたどれるリファレンスページを整えています。",
-        image: "/smoke-ribbon.png",
-        imageAlt: "淡い背景にたなびく青い煙",
-      },
-      {
-        id: "prime-city-expansion",
-        date: "2026.04.23",
-        dateTime: "2026-04-23",
-        state: "完了",
-        title: "プライムシティの人物とシーンを拡張",
-        description:
-          "新キャラクター、シネマティックなイントロ、画像制作パイプラインを拡張しました。",
-        image: "/works/prime-city.webp",
-        imageAlt: "プライムシティのキャラクター、ジャングル",
-      },
-    ],
+    feed: {
+      controls: "制作近況の絞り込みと並び順",
+      category: "分類",
+      all: "すべて",
+      update: "近況",
+      work: "作品のお知らせ",
+      topic: "テーマ",
+      sort: "並び順",
+      newest: "新しい順",
+      oldest: "古い順",
+      pinned: "固定",
+      expand: "もっと見る",
+      collapse: "閉じる",
+      detail: "サイトで全文を見る",
+      discord: "Discordでコメントを見る",
+      community: "コミュニティ案内を見る →",
+      empty: "条件に合う公開記事はありません。",
+      pagination: "制作近況のページ",
+      page: "ページ",
+    },
     showcase: {
       label: "最新情報のスライド",
       latest: "最新情報",
       selectionLabel: "更新を選択",
       itemLabel: "{index}件目の更新：{title}",
       allUpdates: "すべての更新を見る",
+      empty: "Heroに公開中の記事はありません。",
+      openPost: "全文を見る ↗",
     },
     footer: { name: "ハンパラン", top: "ページ上部へ" },
   },
@@ -293,50 +299,48 @@ export const siteContent = {
       options: [
         { title: "Public studio notes", status: "Open to everyone" },
         {
-          title: "Patreon membership",
-          status: "Support the studio ↗",
+          title: "Fuel the studio",
+          status: "Make the creator work more ↗",
           href: patreonUrl,
-          openLabel: "Open the studio Patreon page in a new tab",
+          openLabel: "Open the Patreon support checkout in a new tab",
         },
       ],
-      note: "Artwork and public studio notes will remain open to everyone. Membership does not include access to gated AI chat experiences.",
+      note: "This is simple support at roughly KRW 5,000 per month. It promises no benefits, schedule, Discord role, or exclusive content; confirm the amount and currency at Patreon checkout.",
     },
     notes: {
       sectionTitle: "Making notes",
       sectionSubtitle: "Studio updates",
       footnote:
-        "Detailed production logs and archives will be released as the content structure settles.",
+        "Only approved Korean originals are shown. Editing and recovery stay in Studio.",
     },
-    updates: [
-      {
-        id: "portfolio-foundation",
-        date: "2026.07.30",
-        dateTime: "2026-07-30",
-        state: "In progress",
-        title: "Setting the foundation for this portfolio",
-        description:
-          "I’m shaping a reference page that connects the work, ways to support it, and production notes in one clear flow.",
-        image: "/smoke-ribbon.png",
-        imageAlt: "Blue mist drifting across a pale background",
-      },
-      {
-        id: "prime-city-expansion",
-        date: "2026.04.23",
-        dateTime: "2026-04-23",
-        state: "Complete",
-        title: "Expanding Prime City’s cast and scenes",
-        description:
-          "Added new characters, a cinematic intro, and a broader image-production pipeline.",
-        image: "/works/prime-city.webp",
-        imageAlt: "Jang Gru, a character from Prime City",
-      },
-    ],
+    feed: {
+      controls: "Filter and sort studio updates",
+      category: "Category",
+      all: "All",
+      update: "Updates",
+      work: "Work news",
+      topic: "Topic",
+      sort: "Sort",
+      newest: "Newest",
+      oldest: "Oldest",
+      pinned: "PIN",
+      expand: "Read more",
+      collapse: "Collapse",
+      detail: "Read the full post on this site",
+      discord: "View comments on Discord",
+      community: "Community guide →",
+      empty: "No public posts match these filters.",
+      pagination: "Studio update pages",
+      page: "Page",
+    },
     showcase: {
       label: "Latest updates carousel",
       latest: "Latest update",
       selectionLabel: "Choose an update",
       itemLabel: "Update {index}: {title}",
       allUpdates: "View all updates",
+      empty: "No posts are currently featured in the Hero.",
+      openPost: "Read full post ↗",
     },
     footer: { name: "Hanparan", top: "Back to top" },
   },

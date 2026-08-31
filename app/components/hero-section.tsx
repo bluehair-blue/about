@@ -1,14 +1,17 @@
-import type { SiteCopy, UpdateItem } from "../content";
+import type { PublicPostSummary } from "../../lib/public-projection";
+import type { SiteCopy } from "../content";
 import { UpdateShowcase } from "./update-showcase";
 
 export function HeroSection({
   copy,
-  updates,
+  posts,
   showcase,
+  feed,
 }: {
   copy: SiteCopy["hero"];
-  updates: UpdateItem[];
+  posts: PublicPostSummary[];
   showcase: SiteCopy["showcase"];
+  feed: SiteCopy["feed"];
 }) {
   return (
     <section className="hero-scene" id="top" aria-labelledby="hero-title">
@@ -28,7 +31,7 @@ export function HeroSection({
           </div>
         </div>
 
-        <UpdateShowcase items={updates} labels={showcase} />
+        <UpdateShowcase items={posts} labels={showcase} feed={feed} />
       </div>
     </section>
   );

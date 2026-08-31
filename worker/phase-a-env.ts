@@ -16,6 +16,7 @@ export interface StudioD1 {
 }
 
 export interface StudioR2Object {
+  checksums?: { sha256?: ArrayBuffer };
   key: string;
   size: number;
 }

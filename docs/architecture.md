@@ -6,10 +6,10 @@
 
 ## 모듈 규칙
 
-1. `app/page.tsx`는 페이지 조합과 현재 locale 연결만 담당한다.
-2. 브라우저 locale 탐지·저장·문서 언어 동기화는 `app/use-portfolio-locale.ts` 한 곳에서 담당한다.
+1. `app/page.tsx`는 URL allowlist 정규화와 D1 공개 projection 조회 뒤 `Home`에 직렬화 가능한 결과를 넘기는 server 진입점이다.
+2. 여섯 섹션 조합과 현재 locale 연결은 `app/home.tsx`가 담당하고, 브라우저 locale 탐지·저장·문서 언어 동기화는 `app/use-portfolio-locale.ts` 한 곳에서 담당한다.
 3. 각 섹션 컴포넌트는 `SiteCopy` 전체가 아니라 자신이 쓰는 조각만 props로 받는다.
-4. 자체 상태가 있는 동작은 가장 가까운 컴포넌트 안에 둔다. 현재 독립 상태 모듈은 업데이트 쇼케이스뿐이다.
+4. 자체 상태가 있는 동작은 가장 가까운 컴포넌트 안에 둔다. Hero 전환은 `UpdateShowcase`, 본문 펼침과 feed 공용 lightbox는 `UpdatesSection`, 상세 gallery lightbox는 `StandalonePublicGallery`가 소유한다.
 5. 콘텐츠 계약과 번역은 `app/content.ts`가 단일 출처다. 실제로 두 번째 콘텐츠 축이 생기기 전에는 파일을 더 나누지 않는다.
 6. 컴포넌트 분리는 DOM wrapper 추가를 뜻하지 않는다. 기존 시맨틱 태그, 직계 자식 순서, class와 `data-*` 속성은 스타일 계약이다.
 7. 범용 UI primitive, Context, factory, CSS-in-JS, 새 상태 라이브러리는 실제 두 번째 사용처가 생기기 전에는 만들지 않는다.
@@ -18,22 +18,33 @@
 
 ```text
 RootLayout (server)
-└─ Home (client composition)
-   ├─ SiteHeader
-   ├─ HeroSection
-   │  └─ UpdateShowcase (client-owned interaction)
-   ├─ ProjectIndexSection
-   ├─ SupportSection
-   ├─ UpdatesSection
-   └─ SiteFooter
+├─ PortfolioPage (server public projection loader)
+│  └─ Home (client composition)
+│     ├─ SiteHeader
+│     ├─ HeroSection
+│     │  └─ UpdateShowcase (client-owned interaction)
+│     ├─ ProjectIndexSection
+│     ├─ SupportSection
+│     ├─ UpdatesSection
+│     │  ├─ PublicGallery
+│     │  └─ PublicLightbox (one shared native dialog)
+│     └─ SiteFooter
+├─ PublicPostPage (server detail + record metadata)
+│  └─ StandalonePublicGallery
+└─ CommunityPage (server active Discord mapping list)
 ```
 
 데이터 흐름은 단방향이다.
 
 ```text
-siteContent[locale] → Home → section-specific copy props → DOM
-usePortfolioLocale ───────────┘
+D1 published current version → PublicProjection → PortfolioPage → Home
+siteContent[locale] ─────────────────────────────────────────────┤
+usePortfolioLocale ──────────────────────────────────────────────┘
+
+D1 approved asset manifest → /media/{assetId}/portfolio-v1.webp → R2 public key
 ```
+
+`lib/public-projection.ts`는 공개 읽기 계약의 단일 출처다. query 값은 allowlist branch로만 SQL에 반영하고, 반환값에는 public media URL을 조립하는 데 필요한 asset ID·dimension·alt만 포함한다. private source key, Discord derivative key와 CDN URL은 server projection 밖으로 보내지 않는다.
 
 ## DOM·스타일 계약
 
@@ -43,7 +54,7 @@ usePortfolioLocale ───────────┘
 - Hero: `.hero` 바로 아래에는 `.hero-copy`와 `.hero-updates`만 둔다.
 - Project: `.featured-work`의 visual → copy 순서를 유지한다.
 - Support: `.support-row`는 panel의 직접 자식이며 행 순서가 animation range를 결정한다.
-- Updates: `.update-copy`의 번호 문단 → 제목 → 설명 문단 순서를 유지한다.
+- Updates: `.update-copy`의 번호 문단 → 제목 → `.public-post-body` → 펼침 button → optional `.post-media` → `.post-actions` 순서를 유지한다. feed의 native `.public-lightbox`는 `.updates-list` 밖에서 section 끝에 한 번만 둔다.
 - Footer: `.site-footer`의 세 직접 자식은 reveal animation 대상이다.
 - `52rem`은 desktop sticky scene과 mobile fallback이 교대하는 공통 경계다.
 - `prefers-reduced-motion` 최종 override 뒤에 animation 규칙을 추가하지 않는다.
@@ -54,12 +65,14 @@ usePortfolioLocale ───────────┘
 
 | 작업 파트 | 기본 파일 | 필요한 스타일 | 최소 검증 |
 | --- | --- | --- | --- |
-| locale 상태 | `app/use-portfolio-locale.ts`, `app/content.ts`, `app/page.tsx` | `foundation.css`의 locale control | locale 계약 테스트 |
+| locale 상태 | `app/use-portfolio-locale.ts`, `app/content.ts`, `app/home.tsx` | `foundation.css`의 locale control | locale 계약 테스트 |
 | header | `app/components/site-header.tsx`, `app/content.ts`의 nav 필드 | `foundation.css`, header 구간의 `responsive.css` | lint + 렌더 테스트 |
 | hero/showcase | `hero-section.tsx`, `update-showcase.tsx`, `content.ts`의 hero/updates 필드 | `hero.css`, 관련 `motion.css`·`responsive.css` | reduced-motion + 렌더 테스트 |
 | project index | `project-index-section.tsx`, `content.ts`의 work 필드 | `sections.css`, work 구간의 `motion.css`·`responsive.css` | 링크·이미지·sticky 계약 테스트 |
 | support | `support-section.tsx`, `content.ts`의 support 필드 | `sections.css`, support 구간의 `motion.css`·`responsive.css` | DOM 순서 + 렌더 테스트 |
-| updates | `updates-section.tsx`, `content.ts`의 notes/updates 필드 | `sections.css`, updates 구간의 `motion.css`·`responsive.css` | 날짜·목록 계약 테스트 |
+| public projection | `lib/public-projection.ts`, `app/page.tsx`, `app/home.tsx`, `worker/public-media.ts` | 없음 | `public-projection.test.mjs`의 query·lifecycle·media 검사 |
+| updates | `updates-section.tsx`, `public-gallery.tsx`, `markdown-body.tsx`, `content.ts`의 notes/feed 필드 | `sections.css`, updates 구간의 `motion.css`·`responsive.css` | feed·gallery·lightbox 계약 테스트 |
+| public detail/community | `app/updates/[slug]/page.tsx`, `app/community/page.tsx`, `lib/public-projection.ts` | detail/community 구간의 `sections.css`·`responsive.css` | metadata·404/410·Discord mapping 테스트 |
 | footer | `site-footer.tsx`, `content.ts`의 footer 필드 | footer 구간의 `sections.css`·`motion.css`·`responsive.css` | 렌더 테스트 |
 | 배포 | `package.json`, `vite.config.ts`, `wrangler.jsonc`, `.openai/hosting.json` | 없음 | build + 공개 도메인 확인 |
 

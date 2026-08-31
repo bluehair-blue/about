@@ -1,6 +1,6 @@
 # Phase C — Portfolio projection
 
-> 상태: Phase B 완료 대기
+> 상태: 로컬 구현·자동 검증·빈 상태 browser QA 완료, staging fixture browser acceptance 대기
 >
 > 목적: D1/R2 승인본을 `about.bluehair.blue`의 SNS형 공개 feed·Hero·상세 페이지로 안전하게 투영한다.
 >
@@ -171,26 +171,29 @@ DOM wrapper, tag order, class와 `data-*`를 바꿔야 하면 해당 CSS selecto
 
 ## 10. 완료 증거
 
-- [ ] unknown·archived query가 canonical URL state로 정규화됨
-- [ ] 최신순·오래된순·kind·topic·pagination 결과가 D1 fixture와 일치
-- [ ] pin이 filter와 page count 계약을 지키고 Hero와 독립적임
-- [ ] 0/1/동일 비율/혼합 비율 이미지 fixture가 지정 layout으로 표시됨
-- [ ] slider·lightbox keyboard, swipe, Escape, focus 복귀와 reduced motion 확인
-- [ ] long body의 `더 보기 / 접기`와 detail 이동 확인
-- [ ] active mapping에만 Discord CTA가 있고 detach 뒤 cache purge로 사라짐
-- [ ] detail canonical·title·description·OG/X가 record와 일치
-- [ ] private source·Discord CDN URL이 public output에 없음
-- [ ] mobile `52rem` 경계와 기존 DOM·CSS 회귀 통과
-- [ ] `npm run lint`와 `npm test` 통과
-- [ ] build output 세 항목 존재
+- [x] unknown·archived query가 canonical URL state로 정규화됨
+- [x] 최신순·오래된순·kind·topic·pagination 결과가 D1 fixture와 일치
+- [x] pin이 filter와 page count 계약을 지키고 Hero와 독립적임
+- [x] 0/1/동일 비율/혼합 비율 이미지 fixture가 지정 layout으로 표시됨
+- [ ] slider·lightbox keyboard, swipe, Escape, focus 복귀와 reduced motion 확인 — event wiring·native dialog·focus 복귀·CSS 계약 자동 검사는 통과했으며 실제 browser 조작 증거는 staging에 남김
+- [ ] long body의 `더 보기 / 접기`와 detail 이동 확인 — SSR·ARIA·route 계약은 통과했으며 실제 browser 조작 증거는 staging에 남김
+- [ ] active mapping에만 Discord CTA가 있고 detach 뒤 cache purge로 사라짐 — local D1 detach 직후 root/community 비노출은 통과했으며 remote global cache purge는 Phase B 운영 blocker와 함께 남김
+- [x] detail canonical·title·description·OG/X가 record와 일치
+- [x] private source·Discord CDN URL이 public output에 없음
+- [x] mobile `52rem` 경계와 기존 DOM·CSS 회귀 통과
+- [x] `npm run lint`와 `npm test` 통과
+- [x] build output 세 항목 존재
 
 ## 11. 완료 기록
 
 - commit: 미기록
-- root feed fixture: 미기록
-- detail/metadata fixture: 미기록
-- keyboard/mobile evidence: 미기록
-- Go/No-Go: 미통과
+- root feed fixture: `tests/public-projection.test.mjs`가 fresh `0001`–`0007` in-memory SQLite에 일반 글 12개, filter 일치 pin 1개, rank Hero 3개, withheld row와 active/archived topic을 만들고 canonical redirect·두 page·결합 filter·sort·Hero 순서를 빌드 Worker에서 검증함
+- detail/metadata fixture: 같은 테스트가 image/no-image 승인본의 canonical·description·OG/X, safe Markdown, private/Discord media 비노출, withheld·archived 404와 purged 410, public derivative GET/HEAD/304/405를 검증함
+- gallery fixture: 0장·1장·동일 비율 2장·혼합 3장·혼합 5장을 넣어 media 없음·single·slider·grid·`+1` server markup을 검증함
+- keyboard/mobile evidence: `tests/rendered-html.test.mjs`에서 native dialog, Arrow key, touch handlers, Escape cancel, opener focus 복귀, 단일 feed lightbox, `52rem`과 최종 reduced-motion override를 자동 검사함. 로컬 in-app browser에서 ko/ja/en 전환, filter URL, `/community` 왕복, 390px 무수평 overflow와 820px/900px의 `52rem` 전후 1열/2열·feed 2열/4열 전환을 확인함. 실제 staging fixture의 keyboard·swipe·focus·mobile 조작 증거는 미기록
+- browser recovery evidence: fresh `--force` dev 시작에서 `/community` 첫 진입 시 `next/link` 지연 최적화로 발생하던 React `Invalid hook call`을 public detail/community의 단순 내부 이동을 native anchor로 좁혀 제거함. 재시작 뒤 `/`·`/community`가 HTTP 200이고 같은 console error가 재발하지 않음을 확인함
+- automated verification: 2026-08-31 `npx tsc --noEmit`, `npm run lint`, `npm test` 46/46 성공. `npm run deploy:staging:dry-run`이 staging target·D1/R2/Images/Queue binding을 검증하고 업로드 없이 종료함. `dist/server/index.js`, `dist/client`, `dist/.openai/hosting.json` 생성과 deployable output의 `.dev.vars` 부재 확인
+- Go/No-Go: local implementation·자동 계약·빈 상태 browser QA는 Go. current checkout의 staging 배포, 실제 gallery/detail fixture browser 조작과 remote cache purge 증거는 No-Go이며 production 배포·승인은 이 Phase 작업에 포함하지 않음
 
 ## 다음 Phase
 

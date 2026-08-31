@@ -323,13 +323,47 @@
   word-break: keep-all;
 }
 
-.update-slide-copy > p:last-child {
+.update-slide-description {
   max-width: 34rem;
   margin: 1.5rem 0 0;
   color: oklch(0.995 0.002 255 / 0.78);
   font-size: clamp(0.92rem, 1.15vw, 1.05rem);
   line-height: 1.65;
   word-break: keep-all;
+}
+
+.update-slide-copy h2 a {
+  display: inline;
+}
+
+.update-slide-link {
+  display: inline-block;
+  margin-top: 1.5rem;
+  border-bottom: 1px solid currentColor;
+  padding-bottom: 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.update-slide-image-empty {
+  background:
+    linear-gradient(135deg, transparent 0 42%, oklch(0.995 0.002 255 / 0.14) 42% 43%, transparent 43% 100%),
+    linear-gradient(145deg, var(--blue-light), var(--blue) 54%, var(--blue-dark));
+}
+
+.update-stage-empty {
+  position: absolute;
+  right: var(--stage-inset);
+  bottom: clamp(7rem, 14vh, 10rem);
+  left: var(--stage-safe-left);
+  z-index: 5;
+  max-width: 18rem;
+  margin: 0;
+  font-size: clamp(1.5rem, 3vw, 2.6rem);
+  font-weight: 800;
+  letter-spacing: -0.05em;
+  line-height: 1.2;
 }
 
 .update-slide-meta {

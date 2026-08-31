@@ -20,6 +20,7 @@ import {
 } from "./studio-taxonomy";
 
 export const PHASE_A_QUEUE_MAX_RETRIES = 3;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -87,6 +88,21 @@ function parseMessage(value: unknown) {
   return null;
 }
 
+async function recordInvalidMessage(value: unknown, env: PhaseAEnv) {
+  if (!isRecord(value) || typeof value.jobId !== "string" ||
+      !uuidPattern.test(value.jobId) || !env.STUDIO_DB) return;
+  await env.STUDIO_DB.prepare(`
+    UPDATE delivery_jobs
+    SET status = 'failed', error_code = 'queue_payload_invalid',
+      last_error = 'queue_payload_invalid', updated_at = ?, completed_at = ?
+    WHERE id = ? AND status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+  `).bind(
+    new Date().toISOString(),
+    new Date().toISOString(),
+    value.jobId,
+  ).run();
+}
+
 function retry(message: StudioQueueBatch["messages"][number], outcome?: StudioQueueOutcome) {
   message.retry(
     outcome?.action === "retry" && outcome.delaySeconds
@@ -105,12 +121,13 @@ export async function handleStudioQueue(
   }
 
   for (const message of batch.messages) {
+    const terminal = message.attempts > PHASE_A_QUEUE_MAX_RETRIES;
     const body = parseMessage(message.body);
     if (!body) {
-      message.ack();
+      if (terminal) await recordInvalidMessage(message.body, env);
+      message.retry();
       continue;
     }
-    const terminal = message.attempts > PHASE_A_QUEUE_MAX_RETRIES;
     if (body.type === "asset_process") {
       try {
         await processStudioAssetJob(body.jobId, body.assetId, env);

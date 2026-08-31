@@ -1,11 +1,14 @@
 import handler from "vinext/server/app-router-entry";
 
+import { publicPostRouteState } from "../lib/public-projection";
+import { withRuntimeEnv } from "../lib/runtime-env";
 import { verifyAccessRequest } from "./access";
 import {
   handleDiscordInteraction,
   upsertDiscordRolePanel,
 } from "./discord-interactions";
 import { phaseAEnvironmentErrors, type PhaseAEnv } from "./phase-a-env";
+import { handlePublicMedia, publicMediaAssetId } from "./public-media";
 import { handleStudioAssetRequest } from "./studio-assets";
 import { handleStudioDraftRequest } from "./studio-drafts";
 import { handleStudioPublishRequest } from "./studio-publishing";
@@ -22,6 +25,27 @@ type VinextContext = Parameters<typeof handler.fetch>[2];
 
 function isStudioPath(pathname: string) {
   return pathname === "/studio" || pathname.startsWith("/studio/");
+}
+
+function updateSlug(pathname: string) {
+  const match = /^\/updates\/([^/]+)\/?$/u.exec(pathname);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+function hiddenPublicPost(status: 404 | 410, method: string) {
+  return new Response(method === "HEAD" ? null : status === 410 ? "Gone" : "Not found", {
+    status,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "text/plain; charset=utf-8",
+      "x-content-type-options": "nosniff",
+    },
+  });
 }
 
 function unavailable() {
@@ -79,6 +103,23 @@ const worker = {
   ) {
     const url = new URL(request.url);
 
+    const mediaAssetId = publicMediaAssetId(url.pathname);
+    if (mediaAssetId !== null) {
+      return handlePublicMedia(request, mediaAssetId, env);
+    }
+
+    const slug = updateSlug(url.pathname);
+    if (
+      slug !== null &&
+      env.STUDIO_DB &&
+      (request.method === "GET" || request.method === "HEAD")
+    ) {
+      const state = await publicPostRouteState(env.STUDIO_DB, slug);
+      if (state !== "published") {
+        return hiddenPublicPost(state === "gone" ? 410 : 404, request.method);
+      }
+    }
+
     if (url.pathname === INTERACTIONS_PATH) {
       if (request.method !== "POST") {
         return new Response("Method not allowed", {
@@ -133,11 +174,11 @@ const worker = {
       }
 
       return privateResponse(
-        await handler.fetch(request, env, context),
+        await withRuntimeEnv(env, () => handler.fetch(request, env, context)),
       );
     }
 
-    return handler.fetch(request, env, context);
+    return withRuntimeEnv(env, () => handler.fetch(request, env, context));
   },
   async queue(batch: Parameters<typeof handleStudioQueue>[0], env: PhaseAEnv = {}) {
     await handleStudioQueue(batch, env);

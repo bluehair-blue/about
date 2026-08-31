@@ -1,14 +1,13 @@
 "use client";
 
 import {
-  Fragment,
   useCallback,
   useEffect,
   useState,
-  type ReactNode,
 } from "react";
 
 import { assetStatuses, type AssetStatus } from "../../db/schema";
+import { MarkdownBody } from "../components/markdown-body";
 import styles from "./studio.module.css";
 
 type PreviewAsset = {
@@ -30,123 +29,6 @@ function isPreviewAsset(value: unknown): value is PreviewAsset {
     typeof asset.ordinal === "number" &&
     typeof asset.alt === "string"
   );
-}
-
-function inlineNodes(value: string, keyPrefix: string, depth = 0): ReactNode[] {
-  if (depth > 4 || value === "") return [value];
-  const token = /(\*\*([^*\n]+)\*\*|__([^_\n]+)__|~~([^~\n]+)~~|`([^`\n]+)`|\[([^\]\n]+)\]\((https:\/\/[^)\s]+)(?:\s+"[^"\n]*")?\)|\*([^*\n]+)\*|_([^_\n]+)_)/u;
-  const match = token.exec(value);
-  if (!match) return [value];
-
-  const before = value.slice(0, match.index);
-  const after = value.slice(match.index + match[0].length);
-  let formatted: ReactNode;
-  if (match[2] || match[3]) {
-    formatted = <strong>{inlineNodes(match[2] ?? match[3], `${keyPrefix}-strong`, depth + 1)}</strong>;
-  } else if (match[4]) {
-    formatted = <del>{inlineNodes(match[4], `${keyPrefix}-del`, depth + 1)}</del>;
-  } else if (match[5]) {
-    formatted = <code>{match[5]}</code>;
-  } else if (match[6] && match[7]) {
-    formatted = <a href={match[7]} target="_blank" rel="noreferrer">{match[6]}</a>;
-  } else {
-    formatted = <em>{inlineNodes(match[8] ?? match[9], `${keyPrefix}-em`, depth + 1)}</em>;
-  }
-
-  return [
-    before,
-    <Fragment key={`${keyPrefix}-${match.index}`}>{formatted}</Fragment>,
-    ...inlineNodes(after, `${keyPrefix}-after-${match.index}`, depth),
-  ];
-}
-
-function MarkdownPreview({ body }: { body: string }) {
-  const lines = body.replace(/\r\n?/gu, "\n").split("\n");
-  const blocks: ReactNode[] = [];
-
-  for (let index = 0; index < lines.length;) {
-    const line = lines[index];
-    if (line.trim() === "") {
-      index += 1;
-      continue;
-    }
-    if (line.startsWith("```")) {
-      const code: string[] = [];
-      index += 1;
-      while (index < lines.length && !lines[index].startsWith("```")) {
-        code.push(lines[index]);
-        index += 1;
-      }
-      if (index < lines.length) index += 1;
-      blocks.push(<pre key={`code-${index}`}><code>{code.join("\n")}</code></pre>);
-      continue;
-    }
-    if (/^>\s?/u.test(line)) {
-      const quoted: string[] = [];
-      const start = index;
-      while (index < lines.length && /^>\s?/u.test(lines[index])) {
-        quoted.push(lines[index].replace(/^>\s?/u, ""));
-        index += 1;
-      }
-      blocks.push(
-        <blockquote key={`quote-${start}`}>
-          {quoted.map((item, itemIndex) => (
-            <Fragment key={`${start}-${itemIndex}`}>
-              {itemIndex > 0 ? <br /> : null}
-              {inlineNodes(item, `quote-${start}-${itemIndex}`)}
-            </Fragment>
-          ))}
-        </blockquote>,
-      );
-      continue;
-    }
-    if (/^(?:[-+*]|\d+\.)\s+/u.test(line)) {
-      const ordered = /^\d+\.\s+/u.test(line);
-      const items: string[] = [];
-      const start = index;
-      const pattern = ordered ? /^\d+\.\s+/u : /^[-+*]\s+/u;
-      while (index < lines.length && pattern.test(lines[index])) {
-        items.push(lines[index].replace(pattern, ""));
-        index += 1;
-      }
-      const children = items.map((item, itemIndex) => (
-        <li key={`${start}-${itemIndex}`}>
-          {inlineNodes(item, `list-${start}-${itemIndex}`)}
-        </li>
-      ));
-      blocks.push(
-        ordered
-          ? <ol key={`list-${start}`}>{children}</ol>
-          : <ul key={`list-${start}`}>{children}</ul>,
-      );
-      continue;
-    }
-
-    const paragraph: string[] = [];
-    const start = index;
-    while (
-      index < lines.length &&
-      lines[index].trim() !== "" &&
-      !lines[index].startsWith("```") &&
-      !/^>\s?/u.test(lines[index]) &&
-      !/^(?:[-+*]|\d+\.)\s+/u.test(lines[index])
-    ) {
-      paragraph.push(lines[index]);
-      index += 1;
-    }
-    blocks.push(
-      <p key={`paragraph-${start}`}>
-        {paragraph.map((item, itemIndex) => (
-          <Fragment key={`${start}-${itemIndex}`}>
-            {itemIndex > 0 ? <br /> : null}
-            {inlineNodes(item, `paragraph-${start}-${itemIndex}`)}
-          </Fragment>
-        ))}
-      </p>,
-    );
-  }
-
-  return <div className={styles.markdownPreview}>{blocks}</div>;
 }
 
 async function requestPreviewAssets(postId: string) {
@@ -262,7 +144,7 @@ export function SurfacePreview({
                 ))}
               </div>
             ) : null}
-            <MarkdownPreview body={visibleBody} />
+            <MarkdownBody body={visibleBody} className={styles.markdownPreview} />
           </div>
         </article>
 
@@ -272,7 +154,7 @@ export function SurfacePreview({
             <span>mention 차단 · 근사 표시</span>
           </header>
           <h3>{visibleTitle}</h3>
-          <MarkdownPreview body={visibleBody} />
+          <MarkdownBody body={visibleBody} className={styles.markdownPreview} />
           {assets.length > 0 ? (
             <div className={styles.previewMedia}>
               {assets.map((asset) => (

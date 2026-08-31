@@ -13,13 +13,15 @@
 | 모듈·DOM·에이전트 경계 | [`architecture.md`](./architecture.md) |
 | Creator CRM 구현 순서 | [`creator-crm-hub-plan.md`의 Phase A–D 실행 문서](./creator-crm-hub-plan.md#구현-실행-문서) |
 | 저장소 작업 규칙 | [`AGENTS.md`](../AGENTS.md) |
-| 페이지 조합 | [`app/page.tsx`](../app/page.tsx) |
+| root 공개 조회 | [`app/page.tsx`](../app/page.tsx), [`lib/public-projection.ts`](../lib/public-projection.ts) |
+| 페이지 조합 | [`app/home.tsx`](../app/home.tsx) |
 | 콘텐츠·locale 타입 | [`app/content.ts`](../app/content.ts) |
 | CSS import 순서 | [`app/globals.css`](../app/globals.css) |
 | Vite·Vinext·Worker 결합 | [`vite.config.ts`](../vite.config.ts) |
 | Worker 공개 배포 | [`wrangler.jsonc`](../wrangler.jsonc) |
 | Sites 프로젝트 연결 | [`.openai/hosting.json`](../.openai/hosting.json) |
 | 렌더·DOM·motion 회귀 | [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs) |
+| 공개 projection·media 회귀 | [`tests/public-projection.test.mjs`](../tests/public-projection.test.mjs) |
 
 ## 런타임 계약
 
@@ -31,6 +33,7 @@
 - 서버 렌더 entry: `vinext/server/app-router-entry`
 - 브라우저 상태: locale만 `localStorage`의 `hanparan-locale` 키에 저장
 - 공개 route 인증: 없음
+- 공개 데이터: `published` post의 `current_version_id`가 가리키는 `published` version만 server에서 읽으며, `/media/{assetId}/portfolio-v1.webp`는 그 current 승인본이 참조한 ready public derivative만 R2에서 제공
 - Studio 인증: `worker/index.ts`가 `/studio*`의 Cloudflare Access JWT와 `/api/discord/interactions`의 Discord Ed25519 signature를 server에서 검증
 - 서버 저장소: direct Cloudflare의 production·staging D1·R2·Queue physical resource는 `wrangler.jsonc`에 분리 연결됨. staging D1에는 Phase A draft·asset·delivery migration, Worker에는 Images info/transform, private source·두 파생본 R2 저장, Queue consumer·DLQ routing과 Discord Forum delivery가 연결됨. Phase B canonical schema `0004`, taxonomy `0005`, asset manifest/retention `0006`, stable canonical slug `0007`과 `worker/studio-domain.ts`의 draft CAS·exact candidate/outbox·archive·verified current pointer 경계는 local 검증을 마쳤다. job-bound candidate snapshot·state·delete와 outbox identity는 불변이고 active delivery 중 비검증 current·Discord mapping 이동을 거부한다. 최초 publish batch는 NFC Unicode slug와 post ID suffix를 한 번만 배정하고 DB trigger가 형식과 이후 불변성을 강제한다. `/studio/api/taxonomy` 변경은 post 없는 전역 outbox 한 건으로 직렬화하고 Queue consumer가 Discord Forum 전체 tag를 fresh verify한다. asset publish payload는 public·Discord key/bytes/SHA-256을 고정하고 두 R2 object를 처리 전·finalization 전에 다시 검증한다. retention endpoint는 미게시 orphan 7일과 superseded snapshot·public/Discord derivative 30일 후보를 Queue에 넣으며 consumer가 reference·active job·현재 environment 값을 재검증하고 exact delete·strong read·prefix 검사·Cloudflare global single-file purge를 통과한 뒤에만 D1 cleanup을 완료한다. 한 번이라도 게시된 private source는 비가역 marker와 exact key manifest로 남고, version metadata 삭제 뒤 실패한 cleanup도 version 비종속 job payload로 재개한다. 코드상 purge는 exact media URL과 zone-scoped API token을 요구하며 누락·오류에서는 fail closed한다. staging에는 2026-08-31 `0004`–`0007`과 Phase B Worker를 적용하고 create/update/notification·unpublish/republish·archive/restore·stable slug 보존을 검증했다. staging의 origin·zone ID·secret token 설정과 실제 global purge는 미검증이다. production에는 `0004`–`0007`을 적용하지 않았고 production Queue에는 배포된 producer·consumer가 없음
 
@@ -104,7 +107,7 @@ vinext()
    dist/.openai/hosting.json
 ```
 
-- [`worker/index.ts`](../worker/index.ts)는 공개 route의 Vinext App Router handler를 보존하는 얇은 wrapper다. `/studio*` Access·same-origin 경계, `/api/discord/interactions`, Queue batch dispatch만 각 runtime handler로 전달한다.
+- [`worker/index.ts`](../worker/index.ts)는 Vinext App Router handler 앞에서 exact public media route와 `/updates/{slug}` 404/410 lifecycle guard를 처리한다. 나머지 공개 RSC render에는 request별 Cloudflare binding을 전달하고, `/studio*` Access·same-origin 경계, `/api/discord/interactions`, Queue batch dispatch는 기존 runtime handler로 보낸다.
 - [`tooling/sites-vite-plugin.ts`](../tooling/sites-vite-plugin.ts)는 build 종료 시 `.openai/hosting.json`을 `dist/.openai/hosting.json`으로 복사한다.
 - `--mode staging` build는 Cloudflare Vite plugin이 `env.staging`을 직렬화하도록 `CLOUDFLARE_ENV=staging`을 설정한다. [`tooling/verify-deploy-target.mjs`](../tooling/verify-deploy-target.mjs)는 redirected Wrangler config의 target·Worker 이름·세 physical binding·`IMAGES` binding·staging 무경로 계약이 맞지 않으면 배포를 거부한다. Wrangler environment는 `images`를 상속하지 않으므로 production과 `env.staging`에 각각 명시한다.
 - `CODEX_SANDBOX=seatbelt`일 때만 HMR polling을 켠다.
@@ -122,13 +125,18 @@ vinext()
 | 모듈 | 책임 | 바꾸면 같이 볼 파일 |
 | --- | --- | --- |
 | `app/layout.tsx` | 서버 layout, 한국어 초기 metadata, canonical/OG/X origin | `wrangler.jsonc`, README, 렌더 테스트 |
-| `app/page.tsx` | locale copy와 여섯 섹션을 연결하는 얇은 client 조합 | `architecture.md`, 렌더 테스트 |
+| `app/page.tsx` | 공개 query 정규화·D1 initial projection을 읽는 얇은 server 진입점 | `lib/public-projection.ts`, `app/home.tsx`, 공개 projection 테스트 |
+| `app/home.tsx` | locale copy와 여섯 섹션을 연결하는 얇은 client 조합 | `architecture.md`, 렌더 테스트 |
 | `app/use-portfolio-locale.ts` | 저장 locale → 브라우저 언어 → 한국어 순서로 감지; 문서 lang/title/description 동기화 | `content.ts`, locale 테스트 |
-| `app/content.ts` | `Locale`, `UpdateItem`, `SiteCopy`, 언어 옵션과 ko/ja/en 전체 copy | 사용하는 섹션 컴포넌트 |
+| `app/content.ts` | `Locale`, `SiteCopy`, 언어 옵션과 ko/ja/en chrome·feed copy | 사용하는 섹션 컴포넌트 |
+| `lib/public-projection.ts` | allowlist URL/query, published-current D1 read, pin/Hero/topic/asset/Discord summary | root/detail/community route, 공개 projection 테스트 |
+| `worker/public-media.ts` | 승인된 public derivative exact R2 read, D1 byte/SHA-256 대조, revocation-safe `private, no-store`와 ETag | Worker wrapper, 공개 projection 테스트 |
+| `app/updates/[slug]/page.tsx` | 승인본 전체 Markdown·gallery와 record canonical/OG/X metadata | projection, Markdown/gallery, metadata 테스트 |
+| `app/community/page.tsx` | active verified Discord thread 참여 경로 | projection, 공개 projection 테스트 |
 | `app/components/*` | 섹션별 시맨틱 DOM | 대응 CSS 구간과 DOM 테스트 |
 | `update-showcase.tsx` | 2.6초 slide, hover/focus/reduced-motion pause | hero/motion/responsive CSS |
 
-`siteContent`는 `satisfies Record<Locale, SiteCopy>`로 모든 locale의 필드 완전성을 검사한다. `UpdateItem.id`는 React key, `dateTime`은 ISO 날짜, `date`는 표시 문자열이다.
+`siteContent`는 `satisfies Record<Locale, SiteCopy>`로 모든 locale의 필드 완전성을 검사한다. 공개 글 원문은 번역하지 않고 D1의 한국어 승인본을 card와 detail에 `lang="ko"`로 표시한다.
 
 ## DOM·스타일 계약
 
@@ -169,15 +177,20 @@ vinext()
 
 ## 테스트·완료 계약
 
-`tests/rendered-html.test.mjs`와 `tests/studio-runtime.test.mjs`는 빌드된 Worker를 직접 import한다. 전자는 `/` HTML을 렌더하고 후자는 mock binding·서명 key와 실제 SQLite migration adapter로 Studio 보안·draft revision CAS·taxonomy outbox·exact publish snapshot·current pointer·image pipeline·asset retention·Queue/Discord delivery 경계를 검증한다. `tests/studio-schema.test.mjs`는 Phase A row를 보존한 `0004`–`0007` upgrade, 일곱 table·foreign key·unique/check/trigger invariant와 representative query plan을 전담한다.
+`tests/rendered-html.test.mjs`, `tests/public-projection.test.mjs`, `tests/studio-runtime.test.mjs`는 빌드된 Worker를 직접 import한다. 렌더 테스트는 빈 공개 DB에서도 기존 root DOM·locale·motion 계약이 유지되는지 확인한다. 공개 projection 테스트는 실제 SQLite migration adapter와 in-memory R2로 query 정규화, feed/pin/Hero, gallery, detail metadata, public media, lifecycle와 Discord mapping을 검증한다. Studio runtime 테스트는 mock binding·서명 key와 같은 SQLite 경로로 보안·draft revision CAS·taxonomy outbox·exact publish snapshot·current pointer·image pipeline·asset retention·Queue/Discord delivery 경계를 검증한다. `tests/studio-schema.test.mjs`는 Phase A row를 보존한 `0004`–`0007` upgrade, 일곱 table·foreign key·unique/check/trigger invariant와 representative query plan을 전담한다.
 
 - HTTP 200과 HTML content type
 - 기본 `<html lang="ko">`와 ko/ja/en copy
 - `#work`, `#support`, `#now`, Prime City image/link
 - `about.bluehair.blue` canonical과 OG image
-- `page.tsx`가 여섯 섹션만 조합하고 raw section DOM을 소유하지 않는지
+- `page.tsx`가 server loader만 소유하고 `home.tsx`가 여섯 섹션만 조합하며 raw section DOM을 소유하지 않는지
 - CSS import, sticky work, view timeline, mobile fallback, reduced motion
 - starter placeholder가 다시 나타나지 않는지
+- unknown·archived·overflow query canonical 정규화, 최신/오래된 sort, kind/topic 결합, 일반 글 10개 pagination과 page 1 별도 pin
+- published current 승인본만 feed/detail/Hero에 노출되고 nullable `hero_rank` 오름차순이 pin과 독립인지
+- 0/1/동일 비율/mixed 2–4/mixed 5+ gallery markup, native dialog·keyboard·touch·focus 복귀와 reduced-motion source 계약
+- record별 canonical·description·OG/X media, no-image metadata 비움, safe Markdown와 public output의 private/Discord media key 부재
+- withheld·archived 404, purged 410, public derivative GET/HEAD/304/405, D1 byte/SHA-256 대조, `private, no-store`와 detach 뒤 Discord CTA 제거
 - Phase A 필수 environment·binding이 없을 때 `/studio*`가 `503`으로 fail closed하는지
 - Access JWT signature·issuer·audience·expiry·관리자 email과 same-origin JSON write 경계
 - Discord Ed25519 signature·5분 timestamp·PING·role add/remove·guild/channel/message/component allowlist
@@ -186,12 +199,12 @@ vinext()
 - Phase B `0005` stable taxonomy identity·kind lifecycle·active label·Discord ID 제약, post 없는 global outbox 직렬화, 동적 topic draft, add·rename·reorder·archive의 Forum full-tag fresh verification과 Queue/429/processing lease 복구
 - Phase B `0006` asset ID 기반 exact three-key identity·cross-role collision 차단, ready manifest 완전성·승인 snapshot 불변성·비가역 first-published marker, superseded cleanup 전용 outbox와 query plan
 - Phase B `0007` 비초안 stable slug 필수·NFC Unicode 생성과 post ID suffix 형식, 최초 배정 뒤 불변성, 기존 row fail-closed preflight
-- 게시 준비와 no-change 판정 중 draft·topic·asset drift의 candidate/outbox 원자적 거부, public·Discord object fresh byte/hash 검증, active delivery 중 competing current 차단, update 준비·파생본 불일치 중 이전 current 유지, `queued` outbox 복구, finalization-only retry의 Discord 무재전송
-- source MIME·dimension·animation·alt·order·request size, private R2 exact key·SHA·metadata, conditional derivative put collision 검증, 삭제 재정렬과 R2 put 실패 복구 상태
+- 게시 준비와 no-change 판정 중 draft·topic·asset drift의 candidate/outbox 원자적 거부, public·Discord object fresh byte/hash 검증, active delivery 중 competing current 차단, update 준비·파생본 불일치 중 이전 current 유지, `queued` notification outbox 재enqueue, finalization-only retry의 Discord 무재전송
+- source MIME·EXIF 적용 dimension·animation·alt·order·request size, 실제 WebP 출력 dimension, private R2 exact key·SHA·metadata, conditional derivative put collision 검증, 삭제 재정렬과 R2 put 실패 복구 상태
 - 7일 미게시 orphan과 30일 superseded snapshot/derivative cleanup의 fail-closed config, reference 재검증, exact delete·strong read·prefix 검사·exact media cache URL, private source 보존과 metadata-delete 뒤 재시도
 - Portfolio·Discord WebP 파생본 byte/hash, attachment budget과 publish-ready gate
 - Forum create·same-mapping update·attachment/tag 교체·delete/404 read-after-write
-- Queue retry exhaustion·DLQ 기록, Discord 429 retry와 outcome-unknown create 무재전송
+- Queue retry exhaustion·malformed payload DLQ·누락 notification enqueue 복구, Discord 429 retry와 outcome-unknown create 무재전송
 
 완료 조건:
 

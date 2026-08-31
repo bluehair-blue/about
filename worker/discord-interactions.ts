@@ -50,6 +50,15 @@ const rolePanel = {
   allowed_mentions: { parse: [] },
 };
 
+const pendingRolePanel = {
+  ...rolePanel,
+  content: `${rolePanel.content}\n메시지 ID를 Worker 설정에 반영한 뒤 다시 연결하세요.`,
+  components: rolePanel.components.map((row) => ({
+    ...row,
+    components: row.components.map((button) => ({ ...button, disabled: true })),
+  })),
+};
+
 function json(value: unknown, status = 200) {
   return Response.json(value, {
     status,
@@ -94,7 +103,7 @@ export async function upsertDiscordRolePanel(env: DiscordEnv) {
         {
           method: "POST",
           headers,
-          body: JSON.stringify(rolePanel),
+          body: JSON.stringify(pendingRolePanel),
           signal: AbortSignal.timeout(5_000),
         },
       );
@@ -116,11 +125,14 @@ export async function upsertDiscordRolePanel(env: DiscordEnv) {
         messageId: message.id,
         channelId: message.channel_id,
         created,
+        active: !created,
       },
       created ? 201 : 200,
     );
   } catch {
-    return json({ error: "Discord role panel write failed" }, 502);
+    return created
+      ? json({ error: "discord_role_panel_create_outcome_unknown" }, 409)
+      : json({ error: "Discord role panel write failed" }, 502);
   }
 }
 

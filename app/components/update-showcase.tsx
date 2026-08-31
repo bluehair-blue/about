@@ -1,16 +1,19 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
-import type { SiteCopy, UpdateItem } from "../content";
+import type { PublicPostSummary } from "../../lib/public-projection";
+import type { SiteCopy } from "../content";
 
 const SLIDE_INTERVAL_MS = 2600;
 
 export function UpdateShowcase({
   items,
   labels,
+  feed,
 }: {
-  items: UpdateItem[];
+  items: PublicPostSummary[];
   labels: SiteCopy["showcase"];
+  feed: SiteCopy["feed"];
 }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [hovered, setHovered] = useState(false);
@@ -38,7 +41,25 @@ export function UpdateShowcase({
     return () => window.clearInterval(timer);
   }, [activeIndex, itemCount, paused]);
 
-  if (itemCount === 0) return null;
+  if (itemCount === 0) {
+    return (
+      <aside className="hero-updates" aria-label={labels.label} data-empty="true">
+        <div className="update-stage-top" aria-hidden="true">
+          <span>{labels.latest}</span>
+          <span>00 / 00</span>
+        </div>
+        <div className="update-slides">
+          <p className="update-stage-empty">{labels.empty}</p>
+        </div>
+        <div className="update-stage-bottom">
+          <div className="update-stage-pagination" />
+          <a href="#now">
+            {labels.allUpdates} <span aria-hidden="true">↓</span>
+          </a>
+        </div>
+      </aside>
+    );
+  }
 
   const currentIndex = activeIndex % itemCount;
   const countLabel = String(itemCount).padStart(2, "0");
@@ -71,28 +92,51 @@ export function UpdateShowcase({
       <div className="update-slides" aria-live="off">
         {items.map((item, index) => {
           const active = index === currentIndex;
+          const image = item.images[0];
 
           return (
             <article
               className="update-slide"
               data-active={active}
               aria-hidden={!active}
-              key={item.id}
+              key={item.postId}
             >
-              <img
-                className="update-slide-image"
-                src={item.image}
-                alt={item.imageAlt}
-                width="900"
-                height="1200"
-              />
+              {image ? (
+                <img
+                  className="update-slide-image"
+                  src={image.src}
+                  alt={image.alt}
+                  width={image.width}
+                  height={image.height}
+                />
+              ) : (
+                <div className="update-slide-image update-slide-image-empty" aria-hidden="true" />
+              )}
               <div className="update-slide-copy">
                 <p className="update-slide-meta">
-                  <span>{item.state}</span>
-                  <time dateTime={item.dateTime}>{item.date}</time>
+                  <span>{item.kind === "work" ? feed.work : feed.update}</span>
+                  <time dateTime={item.publishedAt}>
+                    {item.publishedAt.slice(0, 10).replaceAll("-", ".")}
+                  </time>
                 </p>
-                <h2>{item.title}</h2>
-                <p>{item.description}</p>
+                <h2 lang="ko">
+                  <a
+                    href={`/updates/${encodeURIComponent(item.slug)}`}
+                    tabIndex={active ? 0 : -1}
+                  >
+                    {item.title}
+                  </a>
+                </h2>
+                <p className="update-slide-description" lang="ko">
+                  {item.description}
+                </p>
+                <a
+                  className="update-slide-link"
+                  href={`/updates/${encodeURIComponent(item.slug)}`}
+                  tabIndex={active ? 0 : -1}
+                >
+                  {labels.openPost}
+                </a>
               </div>
             </article>
           );
@@ -116,7 +160,7 @@ export function UpdateShowcase({
                   .replace("{title}", item.title)}
                 aria-pressed={active}
                 data-active={active}
-                key={item.id}
+                key={item.postId}
                 onClick={() => setActiveIndex(index)}
               >
                 {String(index + 1).padStart(2, "0")}

@@ -1,6 +1,6 @@
 # Phase D — recovery and operations
 
-> 상태: Phase C 완료 대기
+> 상태: 시작 조건 감사 No-Go — current checkout staging fixture acceptance·remote purge·물리 격리 증거 대기
 >
 > 목적: 불명 결과·Discord drift·DLQ·retention·배포 중단을 fail closed로 복구하고, 검증된 동일 commit을 production에 승격한다.
 >
@@ -226,6 +226,8 @@ CI로 옮길 때도 `tooling/promote.mjs staging/production`과 manifest schema�
 ## 14. 완료 기록
 
 - commit: 미기록
+- 2026-08-31 진입 감사: Phase A–C의 local intent와 자동 계약을 재검토하고 local migration drift·Queue/notification·역할 패널·이미지 dimension/checksum·public cache·public route dev runtime 결함을 보정함. 적용된 migration은 수정하지 않았고 `npx tsc --noEmit`, `npm run lint`, `npm test` 46/46와 staging dry-run, 빈 상태 local browser QA는 통과했으나 current checkout은 staging에 배포하지 않음
+- 시작 조건 No-Go: 정상·실패·결과 불명·drift·detached·archived의 동일 revision staging fixture browser acceptance, remote cache purge, production 물리 격리, additive migration preflight 증거가 아직 없음
 - reconciliation/DLQ evidence: 미기록
 - archive/restore/purge evidence: 미기록
 - promotion run ID: 미기록
