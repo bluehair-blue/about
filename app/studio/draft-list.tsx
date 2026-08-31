@@ -202,6 +202,13 @@ function discordSurface(item: DraftListItem) {
       checkedAt: item.discordCheckedAt,
     };
   }
+  if (item.discordDeliveryState === "detached") {
+    return {
+      label: "Discord 연결 해제됨",
+      reason: "원격 대화는 유지됨",
+      checkedAt: item.discordCheckedAt,
+    };
+  }
   if (item.hasDiscordThread) {
     return {
       label: "Discord thread 연결됨",

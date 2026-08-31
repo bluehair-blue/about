@@ -38,8 +38,19 @@ type PublishAction =
   | "hero"
   | "retry"
   | "reconcile"
-  | "fresh_check";
-type DiscordAction = "create" | "update" | "delete" | "check";
+  | "fresh_check"
+  | "align"
+  | "resume"
+  | "detach"
+  | "reconnect";
+type DiscordAction =
+  | "create"
+  | "update"
+  | "delete"
+  | "check"
+  | "align"
+  | "detach"
+  | "reconnect";
 type RetriableTarget = "discord" | "notification";
 
 type PublishInput = {
@@ -49,6 +60,8 @@ type PublishInput = {
   title: string | null;
   curationRevision: number | null;
   heroRank: number | null | undefined;
+  checkedAt: string | null;
+  remoteHash: string | null;
 };
 
 type DraftSnapshot = {
@@ -82,13 +95,27 @@ type ArchivedSnapshot = {
 
 type PublishedSnapshot = {
   post_id: string;
-  post_status: "published";
+  post_status: "published" | "withheld";
   current_version_id: string;
   discord_thread_id: string;
   discord_starter_message_id: string;
   discord_delivery_state: string | null;
   discord_remote_hash: string | null;
   discord_checked_at: string | null;
+  title: string;
+  body_markdown: string;
+  kind: string;
+};
+
+type DetachedSnapshot = {
+  post_id: string;
+  post_status: "published" | "withheld";
+  current_version_id: string;
+  discord_delivery_state: "detached";
+  detach_job_id: string;
+  detached_thread_id: string;
+  detached_starter_message_id: string;
+  detached_remote_hash: string | null;
   title: string;
   body_markdown: string;
   kind: string;
@@ -202,6 +229,8 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
   const title = value.title ?? null;
   const curationRevision = value.curationRevision ?? null;
   const heroRank = Object.hasOwn(value, "heroRank") ? value.heroRank : undefined;
+  const checkedAt = value.checkedAt ?? null;
+  const remoteHash = value.remoteHash ?? null;
   const curationAction = action === "pin" || action === "unpin" || action === "hero";
   if (
     ![
@@ -218,6 +247,10 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
       "retry",
       "reconcile",
       "fresh_check",
+      "align",
+      "resume",
+      "detach",
+      "reconnect",
     ].includes(String(action)) ||
     typeof postId !== "string" ||
     !uuidPattern.test(postId) ||
@@ -242,6 +275,14 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
       (typeof heroRank === "number" && Number.isSafeInteger(heroRank) && heroRank >= 0)
     )) ||
     (action !== "hero" && heroRank !== undefined) ||
+    (action === "align" && !(
+      typeof checkedAt === "string" &&
+      !Number.isNaN(Date.parse(checkedAt)) &&
+      new Date(checkedAt).toISOString() === checkedAt &&
+      typeof remoteHash === "string" &&
+      /^[0-9a-f]{64}$/u.test(remoteHash)
+    )) ||
+    (action !== "align" && (checkedAt !== null || remoteHash !== null)) ||
     Object.keys(value).some((key) =>
       ![
         "action",
@@ -250,6 +291,8 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
         "title",
         "curationRevision",
         "heroRank",
+        "checkedAt",
+        "remoteHash",
       ].includes(key)
     )
   ) {
@@ -262,6 +305,8 @@ async function parseInput(request: Request): Promise<PublishInput | string> {
     title: title as string | null,
     curationRevision: curationRevision as number | null,
     heroRank: heroRank as number | null | undefined,
+    checkedAt: checkedAt as string | null,
+    remoteHash: remoteHash as string | null,
   };
 }
 
@@ -376,7 +421,7 @@ async function loadPublishedSnapshot(database: StudioD1, postId: string) {
       version.title, version.body_markdown, version.kind
     FROM studio_posts AS post
     JOIN studio_post_versions AS version ON version.id = post.current_version_id
-    WHERE post.id = ? AND post.status = 'published'
+    WHERE post.id = ? AND post.status IN ('published', 'withheld')
       AND post.current_version_id IS NOT NULL
       AND post.discord_thread_id IS NOT NULL
       AND post.discord_starter_message_id IS NOT NULL
@@ -384,6 +429,65 @@ async function loadPublishedSnapshot(database: StudioD1, postId: string) {
   `).bind(postId).first<PublishedSnapshot>();
   if (!post) return null;
 
+  const [assetRows, topicRows, taxonomyRows] = await Promise.all([
+    database.prepare(`
+      SELECT asset.id, asset.status, selected.ordinal, selected.alt,
+        asset.public_r2_key, asset.public_bytes, asset.public_sha256,
+        asset.discord_r2_key, asset.discord_bytes, asset.discord_sha256
+      FROM studio_post_version_assets AS selected
+      JOIN studio_assets AS asset ON asset.id = selected.asset_id
+      WHERE selected.version_id = ? AND asset.post_id = ?
+      ORDER BY selected.ordinal ASC, asset.id ASC
+    `).bind(post.current_version_id, postId).all<PublishAsset>(),
+    database.prepare(`
+      SELECT taxonomy.id, taxonomy.stable_key
+      FROM studio_post_version_topics AS selected
+      JOIN studio_taxonomy AS taxonomy ON taxonomy.id = selected.taxonomy_id
+      WHERE selected.version_id = ? AND taxonomy.dimension = 'topic'
+      ORDER BY taxonomy.ordinal ASC
+    `).bind(post.current_version_id).all<PublishTopic>(),
+    database.prepare(`
+      SELECT id, dimension, stable_key, label, ordinal, discord_tag_id
+      FROM studio_taxonomy
+      ORDER BY CASE dimension WHEN 'kind' THEN 0 ELSE 1 END, ordinal ASC
+    `).all<TaxonomyRow>(),
+  ]);
+  return {
+    post,
+    assets: assetRows.results ?? [],
+    topics: topicRows.results ?? [],
+    taxonomy: taxonomyRows.results ?? [],
+  };
+}
+
+async function loadDetachedSnapshot(database: StudioD1, postId: string) {
+  const post = await database.prepare(`
+    SELECT post.id AS post_id, post.status AS post_status,
+      post.current_version_id, post.discord_delivery_state,
+      detached.id AS detach_job_id,
+      detached.remote_id AS detached_thread_id,
+      detached.remote_aux_id AS detached_starter_message_id,
+      detached.delivered_hash AS detached_remote_hash,
+      version.title, version.body_markdown, version.kind
+    FROM studio_posts AS post
+    JOIN studio_post_versions AS version ON version.id = post.current_version_id
+    JOIN delivery_jobs AS detached ON detached.id = (
+      SELECT job.id FROM delivery_jobs AS job
+      WHERE job.post_id = post.id AND job.target = 'discord'
+        AND job.action = 'detach' AND job.status = 'succeeded'
+      ORDER BY job.created_at DESC, job.id DESC LIMIT 1
+    )
+    WHERE post.id = ? AND post.status IN ('published', 'withheld')
+      AND post.current_version_id IS NOT NULL
+      AND post.discord_thread_id IS NULL
+      AND post.discord_starter_message_id IS NULL
+      AND post.discord_delivery_state = 'detached'
+      AND detached.version_id = post.current_version_id
+      AND detached.remote_id IS NOT NULL
+      AND detached.remote_aux_id IS NOT NULL
+      AND version.state = 'published'
+  `).bind(postId).first<DetachedSnapshot>();
+  if (!post) return null;
   const [assetRows, topicRows, taxonomyRows] = await Promise.all([
     database.prepare(`
       SELECT asset.id, asset.status, selected.ordinal, selected.alt,
@@ -541,6 +645,66 @@ function sameFreshCheckAttachments(
   });
 }
 
+async function verifyReconnectTarget(
+  postId: string,
+  threadId: string,
+  starterMessageId: string,
+  env: PhaseAEnv,
+  database: StudioD1,
+) {
+  const mappedElsewhere = await database.prepare(`
+    SELECT id FROM studio_posts
+    WHERE id != ? AND (
+      discord_thread_id = ? OR discord_starter_message_id = ?
+    )
+    LIMIT 1
+  `).bind(postId, threadId, starterMessageId).first<{ id: string }>();
+  if (mappedElsewhere) {
+    return { error: "reconnect_mapping_in_use", status: 409 } as const;
+  }
+  const threadResult = await readDiscordForFreshCheck(
+    `${DISCORD_API}/channels/${threadId}`,
+    env,
+  );
+  if ("error" in threadResult) {
+    return { error: threadResult.error, status: 503 } as const;
+  }
+  if (threadResult.missing) {
+    return { error: "reconnect_thread_missing", status: 409 } as const;
+  }
+  const thread = threadResult.value;
+  if (
+    !isRecord(thread) ||
+    thread.id !== threadId ||
+    thread.guild_id !== env.DISCORD_GUILD_ID ||
+    thread.parent_id !== env.DISCORD_FORUM_CHANNEL_ID
+  ) {
+    return { error: "reconnect_thread_mismatch", status: 409 } as const;
+  }
+  const messageResult = await readDiscordForFreshCheck(
+    `${DISCORD_API}/channels/${threadId}/messages/${starterMessageId}`,
+    env,
+  );
+  if ("error" in messageResult) {
+    return { error: messageResult.error, status: 503 } as const;
+  }
+  if (messageResult.missing) {
+    return { error: "reconnect_starter_missing", status: 409 } as const;
+  }
+  const message = messageResult.value;
+  if (
+    !isRecord(message) ||
+    message.id !== starterMessageId ||
+    message.channel_id !== threadId ||
+    !isRecord(message.author) ||
+    message.author.id !== env.DISCORD_APPLICATION_ID ||
+    message.author.bot !== true
+  ) {
+    return { error: "reconnect_starter_not_owned", status: 409 } as const;
+  }
+  return { ok: true } as const;
+}
+
 export async function freshCheckPublishedPost(
   postId: string,
   env: PhaseAEnv,
@@ -690,7 +854,7 @@ export async function freshCheckPublishedPost(
     UPDATE studio_posts
     SET discord_delivery_state = ?, discord_remote_hash = ?,
       discord_checked_at = ?
-    WHERE id = ? AND status = 'published' AND current_version_id = ?
+    WHERE id = ? AND status = ? AND current_version_id = ?
       AND discord_thread_id = ? AND discord_starter_message_id = ?
       AND discord_delivery_state IS ? AND discord_remote_hash IS ?
       AND discord_checked_at IS ?
@@ -699,6 +863,7 @@ export async function freshCheckPublishedPost(
     storedHash,
     checkedAt,
     snapshot.post.post_id,
+    snapshot.post.post_status,
     snapshot.post.current_version_id,
     snapshot.post.discord_thread_id,
     snapshot.post.discord_starter_message_id,
@@ -720,7 +885,7 @@ export async function freshCheckPublishedPost(
             AND status IN ('queue_failed', 'retrying', 'failed', 'outcome_unknown')
             AND EXISTS (
               SELECT 1 FROM studio_posts
-              WHERE id = ? AND status = 'published'
+              WHERE id = ? AND status = ?
                 AND current_version_id = ?
                 AND discord_thread_id = ? AND discord_starter_message_id = ?
                 AND discord_checked_at = ?
@@ -734,6 +899,7 @@ export async function freshCheckPublishedPost(
           snapshot.post.discord_thread_id,
           snapshot.post.discord_starter_message_id,
           snapshot.post.post_id,
+          snapshot.post.post_status,
           snapshot.post.current_version_id,
           snapshot.post.discord_thread_id,
           snapshot.post.discord_starter_message_id,
@@ -845,6 +1011,400 @@ export async function enqueueDailyDiscordChecks(
     queued,
     queueFailed,
   };
+}
+
+async function prepareCurrentAlignment(
+  input: PublishInput,
+  env: PhaseAEnv,
+  database: StudioD1,
+  queue: StudioQueueProducer,
+) {
+  const snapshot = await loadPublishedSnapshot(database, input.postId);
+  if (!snapshot) return json({ error: "published_mapping_not_found" }, 409);
+  if (
+    snapshot.post.discord_delivery_state !== "drift" ||
+    snapshot.post.discord_checked_at !== input.checkedAt ||
+    snapshot.post.discord_remote_hash !== input.remoteHash
+  ) {
+    return json({ error: "align_snapshot_stale" }, 409);
+  }
+  if (snapshot.assets.some((asset) =>
+    asset.status !== "ready" ||
+    !asset.public_r2_key ||
+    !Number.isSafeInteger(asset.public_bytes) ||
+    (asset.public_bytes ?? 0) < 1 ||
+    !/^[0-9a-f]{64}$/u.test(asset.public_sha256 ?? "") ||
+    !asset.discord_r2_key ||
+    !Number.isSafeInteger(asset.discord_bytes) ||
+    (asset.discord_bytes ?? 0) < 1 ||
+    !/^[0-9a-f]{64}$/u.test(asset.discord_sha256 ?? "")
+  )) {
+    return json({ error: "published_snapshot_invalid" }, 409);
+  }
+  const topics = snapshot.topics.map(({ stable_key }) => stable_key);
+  const tags = await forumTagIds(
+    env,
+    snapshot.taxonomy,
+    snapshot.post.kind,
+    topics,
+  );
+  if ("error" in tags) {
+    return json(tags, tags.error === "discord_tags_missing" ? 409 : 502);
+  }
+  const expectedHash = await publishSnapshotHash(
+    snapshot.post.title,
+    snapshot.post.body_markdown,
+    snapshot.post.kind,
+    topics,
+    tags.tagIds,
+    snapshot.assets,
+  );
+  const createdAt = new Date().toISOString();
+  const jobId = crypto.randomUUID();
+  const dedupeKey = `discord:align:${input.postId}:${input.checkedAt}`;
+  const payload = JSON.stringify({
+    source: "approved_current",
+    observedAt: input.checkedAt,
+    observedRemoteHash: input.remoteHash,
+    threadId: snapshot.post.discord_thread_id,
+    starterMessageId: snapshot.post.discord_starter_message_id,
+    tagIds: tags.tagIds,
+    assets: snapshot.assets.map((asset) => ({
+      id: asset.id,
+      ordinal: asset.ordinal,
+      alt: asset.alt,
+      publicR2Key: asset.public_r2_key,
+      publicBytes: asset.public_bytes,
+      publicSha256: asset.public_sha256,
+      discordR2Key: asset.discord_r2_key,
+      discordBytes: asset.discord_bytes,
+      discordSha256: asset.discord_sha256,
+    })),
+  });
+  const inserted = await database.prepare(`
+    INSERT INTO delivery_jobs (
+      id, dedupe_key, post_id, version_id, target, action, payload_json,
+      remote_id, remote_aux_id, status, attempts, expected_hash,
+      created_at, updated_at
+    )
+    SELECT ?, ?, post.id, post.current_version_id, 'discord', 'align', ?,
+      post.discord_thread_id, post.discord_starter_message_id,
+      'queued', 0, ?, ?, ?
+    FROM studio_posts AS post
+    WHERE post.id = ? AND post.status IN ('published', 'withheld')
+      AND post.current_version_id = ?
+      AND post.discord_thread_id = ? AND post.discord_starter_message_id = ?
+      AND post.discord_delivery_state = 'drift'
+      AND post.discord_checked_at = ? AND post.discord_remote_hash = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM delivery_jobs WHERE dedupe_key = ?
+      )
+  `).bind(
+    jobId,
+    dedupeKey,
+    payload,
+    expectedHash,
+    createdAt,
+    createdAt,
+    input.postId,
+    snapshot.post.current_version_id,
+    snapshot.post.discord_thread_id,
+    snapshot.post.discord_starter_message_id,
+    input.checkedAt,
+    input.remoteHash,
+    dedupeKey,
+  ).run();
+  if (inserted.meta?.changes !== 1) {
+    const existing = await database.prepare(`
+      SELECT id, status FROM delivery_jobs
+      WHERE dedupe_key = ? AND post_id = ? AND action = 'align'
+    `).bind(dedupeKey, input.postId).first<{ id: string; status: string }>();
+    return existing
+      ? json({
+          postId: input.postId,
+          jobId: existing.id,
+          action: "align",
+          status: existing.status,
+          noChange: true,
+        }, 202)
+      : json({ error: "align_snapshot_stale" }, 409);
+  }
+  const queued = await enqueue(database, queue, jobId);
+  return json({
+    postId: input.postId,
+    jobId,
+    action: "align",
+    status: queued ? "queued" : "queue_failed",
+    expectedHash,
+  }, queued ? 202 : 503);
+}
+
+async function resumeWithFreshCheck(
+  postId: string,
+  env: PhaseAEnv,
+  database: StudioD1,
+) {
+  const checked = await freshCheckPublishedPost(postId, env, database);
+  let result: unknown;
+  try {
+    result = await checked.json();
+  } catch {
+    return json({ error: "discord_check_invalid_response" }, 503);
+  }
+  if (!checked.ok) return json(result, checked.status);
+  if (
+    !isRecord(result) ||
+    result.outcome !== "matched" ||
+    typeof result.checkedAt !== "string" ||
+    !isRecord(result.technical) ||
+    typeof result.technical.expectedHash !== "string"
+  ) {
+    return json({
+      error: "resume_requires_match",
+      changed: isRecord(result) ? result.changed : undefined,
+    }, 409);
+  }
+  const resumedAt = new Date().toISOString();
+  const resumed = await database.prepare(`
+    UPDATE studio_posts
+    SET status = 'published', updated_at = ?
+    WHERE id = ? AND status = 'withheld'
+      AND current_version_id IS NOT NULL
+      AND discord_thread_id IS NOT NULL
+      AND discord_starter_message_id IS NOT NULL
+      AND discord_delivery_state = 'delivered'
+      AND discord_remote_hash = ? AND discord_checked_at = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM delivery_jobs AS job
+        WHERE job.post_id = studio_posts.id AND job.target = 'discord'
+          AND job.action IN ('create', 'update', 'delete', 'align', 'reconnect')
+          AND job.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+      )
+  `).bind(
+    resumedAt,
+    postId,
+    result.technical.expectedHash,
+    result.checkedAt,
+  ).run();
+  return resumed.meta?.changes === 1
+    ? json({ postId, action: "resume", status: "published", resumedAt })
+    : json({ error: "resume_conflict" }, 409);
+}
+
+async function detachDiscordMapping(postId: string, database: StudioD1) {
+  const post = await database.prepare(`
+    SELECT id, status, current_version_id, discord_thread_id,
+      discord_starter_message_id, discord_remote_hash
+    FROM studio_posts
+    WHERE id = ? AND status IN ('published', 'withheld')
+      AND current_version_id IS NOT NULL
+      AND discord_thread_id IS NOT NULL
+      AND discord_starter_message_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM delivery_jobs AS job
+        WHERE job.post_id = studio_posts.id AND job.target = 'discord'
+          AND job.action IN ('create', 'update', 'delete', 'align', 'reconnect')
+          AND job.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+      )
+  `).bind(postId).first<{
+    id: string;
+    status: "published" | "withheld";
+    current_version_id: string;
+    discord_thread_id: string;
+    discord_starter_message_id: string;
+    discord_remote_hash: string | null;
+  }>();
+  if (!post) return json({ error: "detach_mapping_not_found" }, 409);
+  const detachedAt = new Date().toISOString();
+  const jobId = crypto.randomUUID();
+  const results = await database.batch([
+    database.prepare(`
+      INSERT INTO delivery_jobs (
+        id, dedupe_key, post_id, version_id, target, action, payload_json,
+        remote_id, remote_aux_id, status, attempts, delivered_hash,
+        created_at, updated_at, completed_at
+      )
+      SELECT ?, ?, id, current_version_id, 'discord', 'detach', ?,
+        discord_thread_id, discord_starter_message_id,
+        'succeeded', 0, discord_remote_hash, ?, ?, ?
+      FROM studio_posts
+      WHERE id = ? AND status = ? AND current_version_id = ?
+        AND discord_thread_id = ? AND discord_starter_message_id = ?
+        AND discord_remote_hash IS ?
+    `).bind(
+      jobId,
+      `discord:detach:${postId}:${detachedAt}`,
+      JSON.stringify({ reason: "operator_requested", detachedAt }),
+      detachedAt,
+      detachedAt,
+      detachedAt,
+      postId,
+      post.status,
+      post.current_version_id,
+      post.discord_thread_id,
+      post.discord_starter_message_id,
+      post.discord_remote_hash,
+    ),
+    database.prepare(`
+      UPDATE studio_posts
+      SET discord_thread_id = NULL, discord_starter_message_id = NULL,
+        discord_delivery_state = 'detached', discord_remote_hash = NULL,
+        discord_checked_at = ?
+      WHERE id = ? AND status = ? AND current_version_id = ?
+        AND discord_thread_id = ? AND discord_starter_message_id = ?
+        AND EXISTS (
+          SELECT 1 FROM delivery_jobs
+          WHERE id = ? AND post_id = studio_posts.id
+            AND version_id = ? AND action = 'detach' AND status = 'succeeded'
+            AND remote_id = ? AND remote_aux_id = ?
+        )
+    `).bind(
+      detachedAt,
+      postId,
+      post.status,
+      post.current_version_id,
+      post.discord_thread_id,
+      post.discord_starter_message_id,
+      jobId,
+      post.current_version_id,
+      post.discord_thread_id,
+      post.discord_starter_message_id,
+    ),
+  ]);
+  return results[0]?.meta?.changes === 1 && results[1]?.meta?.changes === 1
+    ? json({ postId, jobId, action: "detach", status: "detached", detachedAt })
+    : json({ error: "detach_conflict" }, 409);
+}
+
+async function prepareReconnect(
+  postId: string,
+  env: PhaseAEnv,
+  database: StudioD1,
+  queue: StudioQueueProducer,
+) {
+  const snapshot = await loadDetachedSnapshot(database, postId);
+  if (!snapshot) return json({ error: "detached_mapping_not_found" }, 409);
+  if (snapshot.assets.some((asset) =>
+    asset.status !== "ready" ||
+    !asset.public_r2_key ||
+    !Number.isSafeInteger(asset.public_bytes) ||
+    (asset.public_bytes ?? 0) < 1 ||
+    !/^[0-9a-f]{64}$/u.test(asset.public_sha256 ?? "") ||
+    !asset.discord_r2_key ||
+    !Number.isSafeInteger(asset.discord_bytes) ||
+    (asset.discord_bytes ?? 0) < 1 ||
+    !/^[0-9a-f]{64}$/u.test(asset.discord_sha256 ?? "")
+  )) {
+    return json({ error: "published_snapshot_invalid" }, 409);
+  }
+  const target = await verifyReconnectTarget(
+    postId,
+    snapshot.post.detached_thread_id,
+    snapshot.post.detached_starter_message_id,
+    env,
+    database,
+  );
+  if ("error" in target) return json({ error: target.error }, target.status);
+  const topics = snapshot.topics.map(({ stable_key }) => stable_key);
+  const tags = await forumTagIds(
+    env,
+    snapshot.taxonomy,
+    snapshot.post.kind,
+    topics,
+  );
+  if ("error" in tags) {
+    return json(tags, tags.error === "discord_tags_missing" ? 409 : 502);
+  }
+  const expectedHash = await publishSnapshotHash(
+    snapshot.post.title,
+    snapshot.post.body_markdown,
+    snapshot.post.kind,
+    topics,
+    tags.tagIds,
+    snapshot.assets,
+  );
+  const createdAt = new Date().toISOString();
+  const jobId = crypto.randomUUID();
+  const dedupeKey = `discord:reconnect:${postId}:${snapshot.post.detach_job_id}`;
+  const payload = JSON.stringify({
+    source: "detached_mapping",
+    detachJobId: snapshot.post.detach_job_id,
+    threadId: snapshot.post.detached_thread_id,
+    starterMessageId: snapshot.post.detached_starter_message_id,
+    tagIds: tags.tagIds,
+    assets: snapshot.assets.map((asset) => ({
+      id: asset.id,
+      ordinal: asset.ordinal,
+      alt: asset.alt,
+      publicR2Key: asset.public_r2_key,
+      publicBytes: asset.public_bytes,
+      publicSha256: asset.public_sha256,
+      discordR2Key: asset.discord_r2_key,
+      discordBytes: asset.discord_bytes,
+      discordSha256: asset.discord_sha256,
+    })),
+  });
+  const inserted = await database.prepare(`
+    INSERT INTO delivery_jobs (
+      id, dedupe_key, post_id, version_id, target, action, payload_json,
+      remote_id, remote_aux_id, status, attempts, expected_hash,
+      created_at, updated_at
+    )
+    SELECT ?, ?, post.id, post.current_version_id, 'discord', 'reconnect', ?,
+      detached.remote_id, detached.remote_aux_id, 'queued', 0, ?, ?, ?
+    FROM studio_posts AS post
+    JOIN delivery_jobs AS detached ON detached.id = ?
+    WHERE post.id = ? AND post.status = ? AND post.current_version_id = ?
+      AND post.discord_thread_id IS NULL
+      AND post.discord_starter_message_id IS NULL
+      AND post.discord_delivery_state = 'detached'
+      AND detached.post_id = post.id AND detached.version_id = post.current_version_id
+      AND detached.action = 'detach' AND detached.status = 'succeeded'
+      AND detached.remote_id = ? AND detached.remote_aux_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM delivery_jobs WHERE dedupe_key = ?
+      )
+  `).bind(
+    jobId,
+    dedupeKey,
+    payload,
+    expectedHash,
+    createdAt,
+    createdAt,
+    snapshot.post.detach_job_id,
+    postId,
+    snapshot.post.post_status,
+    snapshot.post.current_version_id,
+    snapshot.post.detached_thread_id,
+    snapshot.post.detached_starter_message_id,
+    dedupeKey,
+  ).run();
+  if (inserted.meta?.changes !== 1) {
+    const existing = await database.prepare(`
+      SELECT id, status FROM delivery_jobs
+      WHERE dedupe_key = ? AND post_id = ? AND action = 'reconnect'
+    `).bind(dedupeKey, postId).first<{ id: string; status: string }>();
+    if (!existing) return json({ error: "reconnect_conflict" }, 409);
+    return ["queued", "processing", "retrying", "verifying", "finalizing"].includes(
+        existing.status,
+      )
+      ? json({
+          postId,
+          jobId: existing.id,
+          action: "reconnect",
+          status: existing.status,
+          noChange: true,
+        }, 202)
+      : json({ error: "reconnect_retry_required", jobId: existing.id }, 409);
+  }
+  const queued = await enqueue(database, queue, jobId);
+  return json({
+    postId,
+    jobId,
+    action: "reconnect",
+    status: queued ? "queued" : "queue_failed",
+    expectedHash,
+  }, queued ? 202 : 503);
 }
 
 async function markQueueFailed(database: StudioD1, jobId: string) {
@@ -1253,16 +1813,31 @@ async function retryDelivery(
         completed_at = NULL, updated_at = ?
       WHERE id = ? AND post_id = ?
         AND status IN ('queue_failed', 'retrying', 'failed')
-        AND (? = 'notification' OR EXISTS (
-          SELECT 1 FROM studio_posts
-          WHERE studio_posts.id = delivery_jobs.post_id
-            AND studio_posts.status = ?
-        ))
+        AND (
+          ? = 'notification'
+          OR (? = 'check' AND EXISTS (
+            SELECT 1 FROM studio_posts
+            WHERE studio_posts.id = delivery_jobs.post_id
+              AND studio_posts.status = 'published'
+          ))
+          OR (? IN ('align', 'reconnect') AND EXISTS (
+            SELECT 1 FROM studio_posts
+            WHERE studio_posts.id = delivery_jobs.post_id
+              AND studio_posts.status IN ('published', 'withheld')
+          ))
+          OR EXISTS (
+            SELECT 1 FROM studio_posts
+            WHERE studio_posts.id = delivery_jobs.post_id
+              AND studio_posts.status = ?
+          )
+        )
     `).bind(
       changedAt,
       jobId,
       postId,
       job.target,
+      job.action,
+      job.action,
       retryPostStatus,
     ));
     const updated = await database.batch(statements);
@@ -1459,6 +2034,19 @@ async function readStatus(request: Request, database: StudioD1) {
     canRestore: post.status === "archived" && Boolean(post.current_version_id),
     canPurge: ["archived", "purging"].includes(post.status),
     canCurate: post.status === "published" && post.current_version_id !== null,
+    canAlign: ["published", "withheld"].includes(post.status) &&
+      post.current_version_id !== null &&
+      post.discord_thread_id !== null &&
+      post.discord_delivery_state === "drift",
+    canResume: post.status === "withheld" &&
+      post.current_version_id !== null &&
+      post.discord_thread_id !== null &&
+      post.discord_delivery_state === "delivered",
+    canDetach: ["published", "withheld"].includes(post.status) &&
+      post.current_version_id !== null && post.discord_thread_id !== null,
+    canReconnect: ["published", "withheld"].includes(post.status) &&
+      post.current_version_id !== null && post.discord_thread_id === null &&
+      post.discord_delivery_state === "detached",
     canDelete: ["published", "unpublished"].includes(post.status) &&
       Boolean(post.discord_thread_id),
     latestJob: latest
@@ -1510,6 +2098,18 @@ export async function handleStudioPublishRequest(
     }
     if (input.action === "fresh_check") {
       return await freshCheckPublishedPost(input.postId, env, database);
+    }
+    if (input.action === "align") {
+      return await prepareCurrentAlignment(input, env, database, queue);
+    }
+    if (input.action === "resume") {
+      return await resumeWithFreshCheck(input.postId, env, database);
+    }
+    if (input.action === "detach") {
+      return await detachDiscordMapping(input.postId, database);
+    }
+    if (input.action === "reconnect") {
+      return await prepareReconnect(input.postId, env, database, queue);
     }
     if (["pin", "unpin", "hero"].includes(input.action)) {
       return await changeCuration(input, database);
@@ -1573,6 +2173,7 @@ type DeliveryJob = {
   current_version_id: string | null;
   discord_thread_id: string | null;
   discord_starter_message_id: string | null;
+  discord_delivery_state: string | null;
   title: string | null;
   body_markdown: string | null;
 };
@@ -1601,6 +2202,7 @@ async function loadDeliveryJob(database: StudioD1, jobId: string) {
       job.status, job.expected_hash, job.remote_id, job.remote_aux_id,
       post.status AS post_status, post.current_version_id,
       post.discord_thread_id, post.discord_starter_message_id,
+      post.discord_delivery_state,
       version.title, version.body_markdown
     FROM delivery_jobs AS job
     JOIN studio_posts AS post ON post.id = job.post_id
@@ -1691,6 +2293,47 @@ function parseDeliveryPayload(job: DeliveryJob) {
     }
     const assets = parsePayloadAssets(payload.assets);
     if (!assets) return null;
+    if (job.action === "align") {
+      return payload.source === "approved_current" &&
+          typeof payload.observedAt === "string" &&
+          !Number.isNaN(Date.parse(payload.observedAt)) &&
+          typeof payload.observedRemoteHash === "string" &&
+          /^[0-9a-f]{64}$/u.test(payload.observedRemoteHash) &&
+          validDiscordId(payload.threadId) &&
+          validDiscordId(payload.starterMessageId)
+        ? {
+            threadId: payload.threadId,
+            starterMessageId: payload.starterMessageId,
+            tagIds: payload.tagIds as string[],
+            assets,
+            previousVersionId: null,
+            restore: false,
+            archivedThreadId: null,
+            archivedStarterMessageId: null,
+            observedAt: payload.observedAt,
+            observedRemoteHash: payload.observedRemoteHash,
+          }
+        : null;
+    }
+    if (job.action === "reconnect") {
+      return payload.source === "detached_mapping" &&
+          typeof payload.detachJobId === "string" &&
+          uuidPattern.test(payload.detachJobId) &&
+          validDiscordId(payload.threadId) &&
+          validDiscordId(payload.starterMessageId)
+        ? {
+            threadId: payload.threadId,
+            starterMessageId: payload.starterMessageId,
+            tagIds: payload.tagIds as string[],
+            assets,
+            previousVersionId: null,
+            restore: false,
+            archivedThreadId: null,
+            archivedStarterMessageId: null,
+            detachJobId: payload.detachJobId,
+          }
+        : null;
+    }
     if (job.action === "create") {
       if (payload.restore === true) {
         return typeof payload.previousVersionId === "string" &&
@@ -2326,6 +2969,183 @@ async function finalizeDiscordDelivery(
     return { action: "ack" };
   }
   const completedAt = new Date().toISOString();
+  if (job.action === "align") {
+    if (
+      !job.version_id ||
+      !job.remote_id ||
+      !job.remote_aux_id ||
+      !job.expected_hash ||
+      payload.threadId !== job.remote_id ||
+      payload.starterMessageId !== job.remote_aux_id ||
+      !env.STUDIO_MEDIA
+    ) {
+      await setJobState(database, job.id, "outcome_unknown", "discord_mapping_missing");
+      return { action: "ack" };
+    }
+    await loadDeliveryAssets(database, env.STUDIO_MEDIA, job, payload.assets);
+    const finalized = await database.batch([
+      database.prepare(`
+        UPDATE studio_posts
+        SET discord_delivery_state = 'delivered', discord_remote_hash = ?,
+          discord_checked_at = ?
+        WHERE id = ? AND status IN ('published', 'withheld')
+          AND current_version_id = ?
+          AND discord_thread_id = ? AND discord_starter_message_id = ?
+          AND EXISTS (
+            SELECT 1 FROM delivery_jobs
+            WHERE id = ? AND post_id = studio_posts.id
+              AND version_id = ? AND action = 'align' AND status = 'finalizing'
+              AND expected_hash = ? AND delivered_hash = expected_hash
+              AND remote_id = ? AND remote_aux_id = ?
+          )
+      `).bind(
+        job.expected_hash,
+        completedAt,
+        job.post_id,
+        job.version_id,
+        job.remote_id,
+        job.remote_aux_id,
+        job.id,
+        job.version_id,
+        job.expected_hash,
+        job.remote_id,
+        job.remote_aux_id,
+      ),
+      database.prepare(`
+        UPDATE delivery_jobs
+        SET status = 'succeeded', delivered_hash = expected_hash,
+          error_code = NULL, last_error = NULL, updated_at = ?, completed_at = ?
+        WHERE id = ? AND action = 'align' AND status = 'finalizing'
+          AND version_id = ? AND expected_hash = ?
+          AND remote_id = ? AND remote_aux_id = ?
+          AND EXISTS (
+            SELECT 1 FROM studio_posts
+            WHERE id = ? AND status IN ('published', 'withheld')
+              AND current_version_id = ?
+              AND discord_thread_id = ? AND discord_starter_message_id = ?
+              AND discord_delivery_state = 'delivered'
+              AND discord_remote_hash = ?
+          )
+      `).bind(
+        completedAt,
+        completedAt,
+        job.id,
+        job.version_id,
+        job.expected_hash,
+        job.remote_id,
+        job.remote_aux_id,
+        job.post_id,
+        job.version_id,
+        job.remote_id,
+        job.remote_aux_id,
+        job.expected_hash,
+      ),
+    ]);
+    if (finalized[1]?.meta?.changes !== 1) {
+      throw new Error("align_finalization_failed");
+    }
+    return { action: "ack" };
+  }
+  if (job.action === "reconnect") {
+    if (
+      !("detachJobId" in payload) ||
+      typeof payload.detachJobId !== "string" ||
+      !job.version_id ||
+      !job.remote_id ||
+      !job.remote_aux_id ||
+      !job.expected_hash ||
+      payload.threadId !== job.remote_id ||
+      payload.starterMessageId !== job.remote_aux_id ||
+      !env.STUDIO_MEDIA
+    ) {
+      await setJobState(database, job.id, "outcome_unknown", "discord_mapping_missing");
+      return { action: "ack" };
+    }
+    await loadDeliveryAssets(database, env.STUDIO_MEDIA, job, payload.assets);
+    const finalized = await database.batch([
+      database.prepare(`
+        UPDATE studio_posts
+        SET discord_thread_id = ?, discord_starter_message_id = ?,
+          discord_delivery_state = 'delivered', discord_remote_hash = ?,
+          discord_checked_at = ?
+        WHERE id = ? AND status IN ('published', 'withheld')
+          AND current_version_id = ?
+          AND discord_thread_id IS NULL AND discord_starter_message_id IS NULL
+          AND discord_delivery_state = 'detached'
+          AND NOT EXISTS (
+            SELECT 1 FROM studio_posts AS other
+            WHERE other.id != studio_posts.id
+              AND (other.discord_thread_id = ? OR other.discord_starter_message_id = ?)
+          )
+          AND EXISTS (
+            SELECT 1 FROM delivery_jobs AS detached
+            WHERE detached.id = ? AND detached.post_id = studio_posts.id
+              AND detached.version_id = ? AND detached.action = 'detach'
+              AND detached.status = 'succeeded'
+              AND detached.remote_id = ? AND detached.remote_aux_id = ?
+          )
+          AND EXISTS (
+            SELECT 1 FROM delivery_jobs
+            WHERE id = ? AND post_id = studio_posts.id
+              AND version_id = ? AND action = 'reconnect' AND status = 'finalizing'
+              AND expected_hash = ? AND delivered_hash = expected_hash
+              AND remote_id = ? AND remote_aux_id = ?
+          )
+      `).bind(
+        job.remote_id,
+        job.remote_aux_id,
+        job.expected_hash,
+        completedAt,
+        job.post_id,
+        job.version_id,
+        job.remote_id,
+        job.remote_aux_id,
+        payload.detachJobId,
+        job.version_id,
+        job.remote_id,
+        job.remote_aux_id,
+        job.id,
+        job.version_id,
+        job.expected_hash,
+        job.remote_id,
+        job.remote_aux_id,
+      ),
+      database.prepare(`
+        UPDATE delivery_jobs
+        SET status = 'succeeded', delivered_hash = expected_hash,
+          error_code = NULL, last_error = NULL, updated_at = ?, completed_at = ?
+        WHERE id = ? AND action = 'reconnect' AND status = 'finalizing'
+          AND version_id = ? AND expected_hash = ?
+          AND remote_id = ? AND remote_aux_id = ?
+          AND EXISTS (
+            SELECT 1 FROM studio_posts
+            WHERE id = ? AND status IN ('published', 'withheld')
+              AND current_version_id = ?
+              AND discord_thread_id = ? AND discord_starter_message_id = ?
+              AND discord_delivery_state = 'delivered'
+              AND discord_remote_hash = ?
+          )
+      `).bind(
+        completedAt,
+        completedAt,
+        job.id,
+        job.version_id,
+        job.expected_hash,
+        job.remote_id,
+        job.remote_aux_id,
+        job.post_id,
+        job.version_id,
+        job.remote_id,
+        job.remote_aux_id,
+        job.expected_hash,
+      ),
+    ]);
+    if (finalized[1]?.meta?.changes !== 1) {
+      throw new Error("reconnect_finalization_failed");
+    }
+    return { action: "ack" };
+  }
+  if (job.action === "detach") return { action: "ack" };
   if (job.action === "delete") {
     if (
       !job.version_id ||
@@ -2537,6 +3357,172 @@ async function processDiscordCheckJob(
   return { action: "ack" };
 }
 
+async function alignApprovedCurrent(
+  job: DeliveryJob,
+  payload: NonNullable<ReturnType<typeof parseDeliveryPayload>>,
+  attachments: LoadedAttachment[],
+  env: PhaseAEnv,
+  database: StudioD1,
+): Promise<StudioQueueOutcome> {
+  if (
+    !("observedRemoteHash" in payload) ||
+    typeof payload.observedRemoteHash !== "string" ||
+    !payload.threadId ||
+    !payload.starterMessageId
+  ) {
+    await setJobState(database, job.id, "failed", "delivery_payload_invalid");
+    return { action: "ack" };
+  }
+  const checked = await freshCheckPublishedPost(job.post_id, env, database, {
+    versionId: job.version_id as string,
+    threadId: payload.threadId,
+    starterMessageId: payload.starterMessageId,
+  });
+  let result: unknown;
+  try {
+    result = await checked.json();
+  } catch {
+    result = null;
+  }
+  const errorCode = isRecord(result) && typeof result.error === "string"
+    ? result.error
+    : "discord_check_invalid_response";
+  if (!checked.ok) {
+    if (checked.status === 502 || checked.status === 503) {
+      await setJobState(database, job.id, "retrying", errorCode);
+      return { action: "retry", delaySeconds: 5 };
+    }
+    await setJobState(database, job.id, "failed", "align_snapshot_stale");
+    return { action: "ack" };
+  }
+  if (
+    !isRecord(result) ||
+    !isRecord(result.technical) ||
+    typeof result.technical.remoteHash !== "string" ||
+    typeof result.technical.expectedHash !== "string" ||
+    (result.outcome !== "matched" && result.outcome !== "drift")
+  ) {
+    await setJobState(database, job.id, "failed", "discord_check_invalid_response");
+    return { action: "ack" };
+  }
+  if (result.outcome === "matched") {
+    const completedAt = new Date().toISOString();
+    const completed = await database.prepare(`
+      UPDATE delivery_jobs
+      SET status = 'succeeded', delivered_hash = expected_hash,
+        error_code = NULL, last_error = NULL, updated_at = ?, completed_at = ?
+      WHERE id = ? AND action = 'align' AND status = 'processing'
+        AND expected_hash = ?
+        AND EXISTS (
+          SELECT 1 FROM studio_posts
+          WHERE id = ? AND current_version_id = ?
+            AND discord_thread_id = ? AND discord_starter_message_id = ?
+            AND discord_delivery_state = 'delivered'
+            AND discord_remote_hash = ?
+        )
+    `).bind(
+      completedAt,
+      completedAt,
+      job.id,
+      result.technical.expectedHash,
+      job.post_id,
+      job.version_id,
+      payload.threadId,
+      payload.starterMessageId,
+      result.technical.expectedHash,
+    ).run();
+    if (completed.meta?.changes !== 1) throw new Error("align_completion_failed");
+    return { action: "ack" };
+  }
+  if (result.technical.remoteHash !== payload.observedRemoteHash) {
+    await setJobState(database, job.id, "failed", "align_snapshot_stale");
+    return { action: "ack" };
+  }
+  return updateDiscordPost(
+    env,
+    database,
+    job,
+    payload.threadId,
+    payload.starterMessageId,
+    payload.tagIds,
+    attachments,
+  );
+}
+
+async function reconnectApprovedCurrent(
+  job: DeliveryJob,
+  payload: NonNullable<ReturnType<typeof parseDeliveryPayload>>,
+  attachments: LoadedAttachment[],
+  env: PhaseAEnv,
+  database: StudioD1,
+): Promise<StudioQueueOutcome> {
+  if (
+    !("detachJobId" in payload) ||
+    typeof payload.detachJobId !== "string" ||
+    !job.version_id ||
+    !payload.threadId ||
+    !payload.starterMessageId ||
+    !["published", "withheld"].includes(job.post_status) ||
+    job.current_version_id !== job.version_id ||
+    job.discord_thread_id !== null ||
+    job.discord_starter_message_id !== null ||
+    job.discord_delivery_state !== "detached"
+  ) {
+    await setJobState(database, job.id, "failed", "reconnect_snapshot_stale");
+    return { action: "ack" };
+  }
+  const detached = await database.prepare(`
+    SELECT 1 AS matched FROM delivery_jobs
+    WHERE id = ? AND post_id = ? AND version_id = ?
+      AND target = 'discord' AND action = 'detach' AND status = 'succeeded'
+      AND remote_id = ? AND remote_aux_id = ?
+  `).bind(
+    payload.detachJobId,
+    job.post_id,
+    job.version_id,
+    payload.threadId,
+    payload.starterMessageId,
+  ).first<{ matched: number }>();
+  if (!detached) {
+    await setJobState(database, job.id, "failed", "reconnect_snapshot_stale");
+    return { action: "ack" };
+  }
+  const target = await verifyReconnectTarget(
+    job.post_id,
+    payload.threadId,
+    payload.starterMessageId,
+    env,
+    database,
+  );
+  if ("error" in target) {
+    if (target.status === 503) {
+      await setJobState(
+        database,
+        job.id,
+        "retrying",
+        target.error ?? "reconnect_check_failed",
+      );
+      return { action: "retry", delaySeconds: 5 };
+    }
+    await setJobState(
+      database,
+      job.id,
+      "failed",
+      target.error ?? "reconnect_check_failed",
+    );
+    return { action: "ack" };
+  }
+  return updateDiscordPost(
+    env,
+    database,
+    job,
+    payload.threadId,
+    payload.starterMessageId,
+    payload.tagIds,
+    attachments,
+  );
+}
+
 export async function processStudioDiscordJob(
   jobId: string,
   env: PhaseAEnv,
@@ -2621,6 +3607,13 @@ export async function processStudioDiscordJob(
       attachments,
     );
   }
+  if (job.action === "align") {
+    return alignApprovedCurrent(job, payload, attachments, env, database);
+  }
+  if (job.action === "reconnect") {
+    return reconnectApprovedCurrent(job, payload, attachments, env, database);
+  }
+  if (job.action === "detach") return { action: "ack" };
   return deleteDiscordPost(
     env,
     database,

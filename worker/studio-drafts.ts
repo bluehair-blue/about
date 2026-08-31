@@ -282,6 +282,12 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
             AND post.discord_checked_at IS NOT NULL
             AND post.discord_checked_at >= job.updated_at
           )
+          AND NOT (
+            job.target = 'discord' AND job.action IN ('align', 'reconnect')
+            AND post.discord_delivery_state = 'delivered'
+            AND post.discord_checked_at IS NOT NULL
+            AND post.discord_checked_at >= job.updated_at
+          )
         ORDER BY job.updated_at DESC, job.id DESC LIMIT 1) AS failed_job_status,
       (SELECT job.error_code FROM delivery_jobs AS job
         WHERE job.post_id = post.id
@@ -291,12 +297,24 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
             AND post.discord_checked_at IS NOT NULL
             AND post.discord_checked_at >= job.updated_at
           )
+          AND NOT (
+            job.target = 'discord' AND job.action IN ('align', 'reconnect')
+            AND post.discord_delivery_state = 'delivered'
+            AND post.discord_checked_at IS NOT NULL
+            AND post.discord_checked_at >= job.updated_at
+          )
         ORDER BY job.updated_at DESC, job.id DESC LIMIT 1) AS failed_job_error,
       (SELECT job.updated_at FROM delivery_jobs AS job
         WHERE job.post_id = post.id
           AND job.status IN ('queue_failed', 'failed', 'outcome_unknown')
           AND NOT (
             job.target = 'discord' AND job.action = 'check'
+            AND post.discord_checked_at IS NOT NULL
+            AND post.discord_checked_at >= job.updated_at
+          )
+          AND NOT (
+            job.target = 'discord' AND job.action IN ('align', 'reconnect')
+            AND post.discord_delivery_state = 'delivered'
             AND post.discord_checked_at IS NOT NULL
             AND post.discord_checked_at >= job.updated_at
           )
@@ -327,6 +345,12 @@ async function listDrafts(database: StudioD1, filter: DraftFilter) {
             AND job.status IN ('queue_failed', 'failed', 'outcome_unknown')
             AND NOT (
               job.target = 'discord' AND job.action = 'check'
+              AND post.discord_checked_at IS NOT NULL
+              AND post.discord_checked_at >= job.updated_at
+            )
+            AND NOT (
+              job.target = 'discord' AND job.action IN ('align', 'reconnect')
+              AND post.discord_delivery_state = 'delivered'
               AND post.discord_checked_at IS NOT NULL
               AND post.discord_checked_at >= job.updated_at
             )

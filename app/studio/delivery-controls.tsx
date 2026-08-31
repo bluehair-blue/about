@@ -30,11 +30,22 @@ type DeliveryStatus = {
   canRestore: boolean;
   canPurge: boolean;
   canCurate: boolean;
+  canAlign: boolean;
+  canResume: boolean;
+  canDetach: boolean;
+  canReconnect: boolean;
   canDelete: boolean;
   latestJob: null | {
     jobId: string;
     target: "discord";
-    action: "create" | "update" | "delete" | "check";
+    action:
+      | "create"
+      | "update"
+      | "delete"
+      | "check"
+      | "align"
+      | "detach"
+      | "reconnect";
     status: string;
     attempts: number;
     error: string | null;
@@ -120,6 +131,10 @@ function isDeliveryStatus(value: unknown): value is DeliveryStatus {
     typeof status.canRestore === "boolean" &&
     typeof status.canPurge === "boolean" &&
     typeof status.canCurate === "boolean" &&
+    typeof status.canAlign === "boolean" &&
+    typeof status.canResume === "boolean" &&
+    typeof status.canDetach === "boolean" &&
+    typeof status.canReconnect === "boolean" &&
     typeof status.canDelete === "boolean" &&
     (status.latestJob === null || (
       typeof status.latestJob === "object" &&
@@ -231,6 +246,19 @@ function errorLabel(value: string | null | undefined) {
     fresh_check_conflict: "확인 중 상태 변경",
     discord_check_interrupted: "Discord 확인 중단",
     delivery_retry_exhausted: "자동 재시도 소진",
+    align_snapshot_stale: "검토 뒤 Discord 상태 변경",
+    resume_requires_match: "Discord 일치 확인 필요",
+    resume_conflict: "공개 재개 조건 변경",
+    detach_mapping_not_found: "해제할 Discord 연결 없음",
+    detach_conflict: "연결 해제 중 상태 변경",
+    detached_mapping_not_found: "보존된 Discord 연결 없음",
+    reconnect_mapping_in_use: "다른 post가 Discord 연결 사용 중",
+    reconnect_thread_missing: "기존 Discord thread 없음",
+    reconnect_thread_mismatch: "기존 Discord thread 위치 불일치",
+    reconnect_starter_missing: "기존 starter message 없음",
+    reconnect_starter_not_owned: "Bot 소유 starter 확인 실패",
+    reconnect_snapshot_stale: "재연결 중 승인 상태 변경",
+    reconnect_retry_required: "기존 재연결 job 재시도 필요",
     notification_network_unknown: "알림 전송 결과 불명",
     notification_server_unknown: "알림 서버 결과 불명",
     notification_rate_limited: "알림 요청 제한",
@@ -354,6 +382,46 @@ export function DeliveryControls({
     }
   }
 
+  async function alignDiscord(result: FreshCheckResult) {
+    if (!postId || busy || !currentDelivery?.canAlign) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const response = await fetch("/studio/api/publish", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-studio-request": "1",
+        },
+        body: JSON.stringify({
+          action: "align",
+          postId,
+          checkedAt: result.checkedAt,
+          remoteHash: result.technical.remoteHash,
+        }),
+      });
+      const body = await response.json() as { error?: unknown };
+      if (!response.ok) {
+        setMessage(
+          `승인 원본을 적용하지 않았습니다. Portfolio 공개본과 현재 Discord 연결은 그대로입니다. 차이를 다시 확인해 주세요. · ${errorLabel(typeof body.error === "string" ? body.error : null)}`,
+        );
+        return;
+      }
+      reviewDialogRef.current?.close();
+      setMessage(
+        "승인 원본 적용 작업을 Queue에 등록했습니다. 검증이 끝날 때까지 Portfolio 공개본은 그대로 유지됩니다.",
+      );
+      const next = await load(postId);
+      if (pollingActive(next)) window.dispatchEvent(new Event("studio-state-changed"));
+    } catch {
+      setMessage(
+        "승인 원본 적용 요청의 상태를 확인하지 못했습니다. Portfolio 공개본과 현재 Discord 연결은 그대로입니다. 차이를 다시 확인해 주세요.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submit(
     action:
       | "publish"
@@ -366,7 +434,10 @@ export function DeliveryControls({
       | "unpin"
       | "hero"
       | "retry"
-      | "reconcile",
+      | "reconcile"
+      | "resume"
+      | "detach"
+      | "reconnect",
     retryJobId?: string,
     heroRank?: number | null,
   ) {
@@ -378,6 +449,12 @@ export function DeliveryControls({
     if (
       action === "purge" &&
       !window.confirm("private source와 모든 파생본을 영구 삭제하고 tombstone만 남깁니다. 되돌릴 수 없습니다.")
+    ) return;
+    if (
+      action === "detach" &&
+      !window.confirm(
+        "Discord thread와 대화는 그대로 두고 Studio mapping과 공개 CTA만 해제합니다. 계속할까요?",
+      )
     ) return;
     setBusy(true);
     setMessage("");
@@ -417,7 +494,13 @@ export function DeliveryControls({
         );
       } else {
         setMessage(
-          result.noChange
+          action === "resume"
+            ? "Discord 일치를 다시 확인하고 같은 승인본의 공개를 재개했습니다."
+            : action === "detach"
+            ? "Discord 원격 글은 그대로 두고 Studio 연결만 해제했습니다."
+            : action === "reconnect"
+            ? "기존 Discord 글의 재연결 검증을 Queue에 등록했습니다."
+            : result.noChange
             ? "Discord와 같은 hash라 새 작업을 만들지 않았습니다."
             : "Queue에 전달 작업을 등록했습니다.",
         );
@@ -536,7 +619,8 @@ export function DeliveryControls({
       {message ? <p className={styles.assetMessage} role="status">{message}</p> : null}
 
       <div className={styles.deliveryButtons}>
-        {currentDelivery?.postStatus === "published" && currentDelivery.threadId ? (
+        {["published", "withheld"].includes(currentDelivery?.postStatus ?? "") &&
+          currentDelivery?.threadId ? (
           <button type="button" disabled={busy} onClick={() => void reviewDiscord()}>
             {busy ? "확인 중…" : "차이 검토"}
           </button>
@@ -548,6 +632,24 @@ export function DeliveryControls({
             onClick={() => void submit("reconcile", currentDelivery.latestJob?.jobId)}
           >
             Discord mutation 없이 원격 대조
+          </button>
+        ) : null}
+        {currentDelivery?.canResume ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void submit("resume")}
+          >
+            공개 재개
+          </button>
+        ) : null}
+        {currentDelivery?.canReconnect ? (
+          <button
+            type="button"
+            disabled={busy || Boolean(active(currentDelivery))}
+            onClick={() => void submit("reconnect")}
+          >
+            기존 Discord 글 재연결
           </button>
         ) : null}
         {retryable ? (
@@ -613,6 +715,17 @@ export function DeliveryControls({
             onClick={() => void submit("archive")}
           >
             양쪽 공개 보관
+          </button>
+          <button
+            type="button"
+            className={styles.dangerButton}
+            disabled={
+              disabled || busy || !currentDelivery?.canDetach ||
+              Boolean(active(currentDelivery))
+            }
+            onClick={() => void submit("detach")}
+          >
+            Discord 연결만 해제
           </button>
         </div>
         <div className={styles.heroControls}>
@@ -761,6 +874,28 @@ export function DeliveryControls({
               <p>remote tag IDs · {review.remote.tagIds.join(", ") || "없음"}</p>
             </details>
             <div>
+              {review.outcome === "drift" && currentDelivery?.canAlign &&
+                  review.remote.threadFound && review.remote.starterFound ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void alignDiscord(review)}
+                >
+                  Discord를 원본에 맞추기
+                </button>
+              ) : null}
+              {review.outcome === "matched" && currentDelivery?.canResume ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    reviewDialogRef.current?.close();
+                    void submit("resume");
+                  }}
+                >
+                  공개 재개
+                </button>
+              ) : null}
               <button type="button" onClick={() => reviewDialogRef.current?.close()}>
                 현재 상태 유지
               </button>

@@ -44,6 +44,10 @@ const discordChecksMigration = readFileSync(
   new URL("../migrations/0009_phase_d_discord_checks.sql", import.meta.url),
   "utf8",
 );
+const manualRecoveryMigration = readFileSync(
+  new URL("../migrations/0010_phase_d_manual_recovery.sql", import.meta.url),
+  "utf8",
+);
 
 test("keeps Studio autosave single-flight, IME-aware, and native", () => {
   const editor = readFileSync(
@@ -167,6 +171,10 @@ test("keeps the Phase B Studio UI on canonical Markdown, taxonomy, Media, and su
   assert.match(delivery, /Discord 재전송 없이 D1 반영 재시도/);
   assert.match(delivery, /action: "fresh_check"/);
   assert.match(delivery, /Portfolio 공개본과 기존 연결은 그대로 유지했습니다/);
+  assert.match(delivery, /Discord를 원본에 맞추기/);
+  assert.match(delivery, /공개 재개/);
+  assert.match(delivery, /Discord 연결만 해제/);
+  assert.match(delivery, /기존 Discord 글 재연결/);
   assert.match(delivery, /<dialog/);
   assert.match(delivery, /기술 정보/);
   assert.match(delivery, /<details/);
@@ -222,6 +230,7 @@ class SqliteD1 {
     this.database.exec(stableSlugMigration);
     this.database.exec(curationRevisionMigration);
     this.database.exec(discordChecksMigration);
+    this.database.exec(manualRecoveryMigration);
     const tagIds = {
       update: "300000000000000001",
       work: "300000000000000002",
@@ -444,6 +453,7 @@ class FakeDiscordForum {
     return {
       id: this.starterMessageId,
       channel_id: this.threadId,
+      author: { id: this.env.DISCORD_APPLICATION_ID, bot: true },
       content: source.content,
       flags: source.flags ?? 0,
       attachments,
@@ -2959,35 +2969,282 @@ test("checks published Discord state without mutating either public surface", as
     );
 
     failFreshRead = false;
-    discord.message.content = matched.expected.body;
-    const clearedResponse = await request(
-      "/studio/api/publish",
-      studioJsonWrite({ action: "fresh_check", postId: draft.postId }),
-    );
-    assert.equal(clearedResponse.status, 200);
-    assert.equal((await clearedResponse.json()).outcome, "matched");
-    const cleared = database.database.prepare(`
-      SELECT discord_delivery_state, discord_remote_hash
+    const alignedInvariantBefore = database.database.prepare(`
+      SELECT status, current_version_id, draft_version_id, pinned_at, hero_rank,
+        updated_at, discord_thread_id, discord_starter_message_id
       FROM studio_posts WHERE id = ?
     `).get(draft.postId);
-    assert.deepEqual({ ...cleared }, {
+    assert.equal(new Date(drift.checkedAt).toISOString(), drift.checkedAt);
+    assert.match(drift.technical.remoteHash, /^[0-9a-f]{64}$/u);
+    const alignResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "align",
+        postId: draft.postId,
+        checkedAt: drift.checkedAt,
+        remoteHash: drift.technical.remoteHash,
+      }),
+    );
+    const align = await alignResponse.json();
+    assert.equal(alignResponse.status, 202, JSON.stringify(align));
+    assert.equal(align.action, "align");
+    const updatesBeforeAlign = discord.updateCalls;
+    const alignMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [alignMessage] }, env);
+    assert.equal(alignMessage.acked, true);
+    assert.equal(discord.message.content, matched.expected.body);
+    assert.equal(discord.updateCalls, updatesBeforeAlign + 1);
+    assert.equal(queue.messages.length, 0);
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT action, status, delivered_hash, error_code
+        FROM delivery_jobs WHERE id = ?
+      `).get(align.jobId) },
+      {
+        action: "align",
+        status: "succeeded",
+        delivered_hash: publish.expectedHash,
+        error_code: null,
+      },
+    );
+    const aligned = database.database.prepare(`
+      SELECT status, current_version_id, draft_version_id, pinned_at, hero_rank,
+        updated_at, discord_thread_id, discord_starter_message_id,
+        discord_delivery_state, discord_remote_hash
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    assert.deepEqual(
+      {
+        status: aligned.status,
+        current_version_id: aligned.current_version_id,
+        draft_version_id: aligned.draft_version_id,
+        pinned_at: aligned.pinned_at,
+        hero_rank: aligned.hero_rank,
+        updated_at: aligned.updated_at,
+        discord_thread_id: aligned.discord_thread_id,
+        discord_starter_message_id: aligned.discord_starter_message_id,
+      },
+      { ...alignedInvariantBefore },
+    );
+    assert.deepEqual({
+      discord_delivery_state: aligned.discord_delivery_state,
+      discord_remote_hash: aligned.discord_remote_hash,
+    }, {
       discord_delivery_state: "delivered",
       discord_remote_hash: publish.expectedHash,
     });
+
+    discord.message.content = "검토 뒤 다시 바뀐 Discord 본문";
+    const staleReviewResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "fresh_check", postId: draft.postId }),
+    );
+    const staleReview = await staleReviewResponse.json();
+    assert.equal(staleReview.outcome, "drift");
+    const staleAlignResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "align",
+        postId: draft.postId,
+        checkedAt: staleReview.checkedAt,
+        remoteHash: staleReview.technical.remoteHash,
+      }),
+    );
+    assert.equal(staleAlignResponse.status, 202);
+    const staleAlign = await staleAlignResponse.json();
+    discord.message.content = "Queue 직전에 한 번 더 바뀐 Discord 본문";
+    const updatesBeforeStaleAlign = discord.updateCalls;
+    const staleAlignMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [staleAlignMessage] }, env);
+    assert.equal(staleAlignMessage.acked, true);
+    assert.equal(discord.updateCalls, updatesBeforeStaleAlign);
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, error_code FROM delivery_jobs WHERE id = ?
+      `).get(staleAlign.jobId) },
+      { status: "failed", error_code: "align_snapshot_stale" },
+    );
+    const latestDriftResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "fresh_check", postId: draft.postId }),
+    );
+    const latestDrift = await latestDriftResponse.json();
+    const realignResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({
+        action: "align",
+        postId: draft.postId,
+        checkedAt: latestDrift.checkedAt,
+        remoteHash: latestDrift.technical.remoteHash,
+      }),
+    );
+    const realign = await realignResponse.json();
+    const realignMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [realignMessage] }, env);
+    assert.equal(realignMessage.acked, true);
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(realign.jobId).status,
+      "succeeded",
+    );
+
     const clearedAttention = await request("/studio/api/drafts?filter=attention");
     assert.equal(
       (await clearedAttention.json()).items.some(({ postId }) => postId === draft.postId),
       false,
     );
-    const unpublished = await request(
+
+    const notificationsBeforeRecovery = discord.notificationCalls;
+    const mappingBeforeWithhold = database.database.prepare(`
+      SELECT current_version_id, discord_thread_id, discord_starter_message_id,
+        pinned_at, hero_rank
+      FROM studio_posts WHERE id = ?
+    `).get(draft.postId);
+    database.database.prepare(`
+      UPDATE studio_posts SET status = 'withheld' WHERE id = ?
+    `).run(draft.postId);
+    const resumeReviewResponse = await request(
       "/studio/api/publish",
-      studioJsonWrite({ action: "unpublish", postId: draft.postId }),
+      studioJsonWrite({ action: "fresh_check", postId: draft.postId }),
     );
-    assert.equal(unpublished.status, 200);
+    assert.equal(resumeReviewResponse.status, 200);
+    assert.equal((await resumeReviewResponse.json()).outcome, "matched");
+    const resumeResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "resume", postId: draft.postId }),
+    );
+    assert.equal(resumeResponse.status, 200);
+    assert.equal((await resumeResponse.json()).status, "published");
+    assert.equal(discord.notificationCalls, notificationsBeforeRecovery);
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT current_version_id, discord_thread_id, discord_starter_message_id,
+          pinned_at, hero_rank
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId) },
+      { ...mappingBeforeWithhold },
+    );
+
+    const remoteCallsBeforeDetach = {
+      create: discord.createCalls,
+      update: discord.updateCalls,
+      delete: discord.deleteCalls,
+      notification: discord.notificationCalls,
+    };
+    const detachResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "detach", postId: draft.postId }),
+    );
+    assert.equal(detachResponse.status, 200);
+    const detached = await detachResponse.json();
+    assert.equal(detached.status, "detached");
+    assert.deepEqual({
+      create: discord.createCalls,
+      update: discord.updateCalls,
+      delete: discord.deleteCalls,
+      notification: discord.notificationCalls,
+    }, remoteCallsBeforeDetach);
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, current_version_id, discord_thread_id,
+          discord_starter_message_id, discord_delivery_state,
+          pinned_at, hero_rank
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId) },
+      {
+        status: "published",
+        current_version_id: mappingBeforeWithhold.current_version_id,
+        discord_thread_id: null,
+        discord_starter_message_id: null,
+        discord_delivery_state: "detached",
+        pinned_at: mappingBeforeWithhold.pinned_at,
+        hero_rank: mappingBeforeWithhold.hero_rank,
+      },
+    );
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT action, status, remote_id, remote_aux_id, delivered_hash
+        FROM delivery_jobs WHERE id = ?
+      `).get(detached.jobId) },
+      {
+        action: "detach",
+        status: "succeeded",
+        remote_id: mappingBeforeWithhold.discord_thread_id,
+        remote_aux_id: mappingBeforeWithhold.discord_starter_message_id,
+        delivered_hash: publish.expectedHash,
+      },
+    );
     await worker.scheduled({
       scheduledTime: Date.parse("2026-09-02T18:00:00.000Z"),
     }, env);
     assert.equal(queue.messages.length, 0);
+
+    const reconnectResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "reconnect", postId: draft.postId }),
+    );
+    assert.equal(reconnectResponse.status, 202);
+    const reconnect = await reconnectResponse.json();
+    const reconnectMessage = queueMessage(queue.messages.shift());
+    await worker.queue({ messages: [reconnectMessage] }, env);
+    assert.equal(reconnectMessage.acked, true);
+    assert.equal(discord.createCalls, remoteCallsBeforeDetach.create);
+    assert.equal(discord.deleteCalls, remoteCallsBeforeDetach.delete);
+    assert.equal(discord.notificationCalls, notificationsBeforeRecovery);
+    assert.equal(discord.updateCalls, remoteCallsBeforeDetach.update + 1);
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, current_version_id, discord_thread_id,
+          discord_starter_message_id, discord_delivery_state,
+          discord_remote_hash, pinned_at, hero_rank
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId) },
+      {
+        status: "published",
+        current_version_id: mappingBeforeWithhold.current_version_id,
+        discord_thread_id: mappingBeforeWithhold.discord_thread_id,
+        discord_starter_message_id: mappingBeforeWithhold.discord_starter_message_id,
+        discord_delivery_state: "delivered",
+        discord_remote_hash: publish.expectedHash,
+        pinned_at: mappingBeforeWithhold.pinned_at,
+        hero_rank: mappingBeforeWithhold.hero_rank,
+      },
+    );
+    assert.equal(
+      database.database.prepare("SELECT status FROM delivery_jobs WHERE id = ?")
+        .get(reconnect.jobId).status,
+      "succeeded",
+    );
+
+    const secondDetachResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "detach", postId: draft.postId }),
+    );
+    assert.equal(secondDetachResponse.status, 200);
+    discord.deleted = true;
+    const createsBeforeMissingReconnect = discord.createCalls;
+    const missingReconnectResponse = await request(
+      "/studio/api/publish",
+      studioJsonWrite({ action: "reconnect", postId: draft.postId }),
+    );
+    assert.equal(missingReconnectResponse.status, 409);
+    assert.equal(
+      (await missingReconnectResponse.json()).error,
+      "reconnect_thread_missing",
+    );
+    assert.equal(discord.createCalls, createsBeforeMissingReconnect);
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT discord_thread_id, discord_starter_message_id,
+          discord_delivery_state
+        FROM studio_posts WHERE id = ?
+      `).get(draft.postId) },
+      {
+        discord_thread_id: null,
+        discord_starter_message_id: null,
+        discord_delivery_state: "detached",
+      },
+    );
   } finally {
     globalThis.fetch = originalFetch;
     database.close();

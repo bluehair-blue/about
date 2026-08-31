@@ -580,6 +580,13 @@ export async function createPublishCandidate(
         AND draft_version_id = ?
         AND current_version_id IS ?
         ${mappingCheck}
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_jobs AS recovery_job
+          WHERE recovery_job.post_id = studio_posts.id
+            AND recovery_job.target = 'discord'
+            AND recovery_job.action IN ('align', 'reconnect')
+            AND recovery_job.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+        )
         AND EXISTS (
           SELECT 1 FROM studio_post_versions
           WHERE id = ? AND post_id = ? AND state = 'candidate'
@@ -611,6 +618,13 @@ export async function createPublishCandidate(
           AND status = 'publishing'
           AND current_version_id IS ?
           ${mappingCheck}
+          AND NOT EXISTS (
+            SELECT 1 FROM delivery_jobs AS recovery_job
+            WHERE recovery_job.post_id = studio_posts.id
+              AND recovery_job.target = 'discord'
+              AND recovery_job.action IN ('align', 'reconnect')
+              AND recovery_job.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+          )
       ) AND EXISTS (
         SELECT 1 FROM studio_post_versions
         WHERE id = ? AND post_id = ? AND state = 'candidate'
@@ -659,6 +673,13 @@ export async function queueArchive(
         AND current_version_id = ?
         AND discord_thread_id = ?
         AND discord_starter_message_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_jobs AS recovery_job
+          WHERE recovery_job.post_id = studio_posts.id
+            AND recovery_job.target = 'discord'
+            AND recovery_job.action IN ('align', 'reconnect')
+            AND recovery_job.status NOT IN ('succeeded', 'failed', 'outcome_unknown')
+        )
     `).bind(
       input.createdAt,
       input.postId,

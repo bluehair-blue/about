@@ -13,6 +13,7 @@ const migrationUrls = [
   "../migrations/0007_phase_b_stable_slug.sql",
   "../migrations/0008_phase_d_curation_revision.sql",
   "../migrations/0009_phase_d_discord_checks.sql",
+  "../migrations/0010_phase_d_manual_recovery.sql",
 ];
 const migrations = migrationUrls.map((path) =>
   readFileSync(new URL(path, import.meta.url), "utf8")
@@ -134,6 +135,7 @@ test("adds read-only Discord check jobs without losing the existing outbox", () 
       SET status = 'succeeded', delivered_hash = ?, completed_at = ?
       WHERE id = ?
     `).run("b".repeat(64), now, checkJobId);
+    database.exec(migrations[9]);
     assert.deepEqual(
       { ...database.prepare(`
         SELECT action, status, expected_hash, delivered_hash
@@ -146,6 +148,32 @@ test("adds read-only Discord check jobs without losing the existing outbox", () 
         delivered_hash: "b".repeat(64),
       },
     );
+    for (const [index, action] of ["align", "detach", "reconnect"].entries()) {
+      database.prepare(`
+        INSERT INTO delivery_jobs (
+          id, dedupe_key, post_id, version_id, target, action, payload_json,
+          remote_id, remote_aux_id, status, expected_hash, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'discord', ?, '{}',
+          '100000000000000001', '100000000000000002', 'queued', ?, ?, ?)
+      `).run(
+        `40000000-0000-4000-8000-00000000010${index}`,
+        `manual-recovery-${action}`,
+        postId,
+        versionId,
+        action,
+        action === "detach" ? null : "c".repeat(64),
+        now,
+        now,
+      );
+    }
+    assert.deepEqual(
+      database.prepare(`
+        SELECT action FROM delivery_jobs
+        WHERE dedupe_key LIKE 'manual-recovery-%'
+        ORDER BY action
+      `).all().map(({ action }) => action),
+      ["align", "detach", "reconnect"],
+    );
     assert.throws(
       () => database.prepare(`
         INSERT INTO delivery_jobs (
@@ -154,6 +182,22 @@ test("adds read-only Discord check jobs without losing the existing outbox", () 
         ) VALUES (?, 'invalid-check', ?, ?, 'discord', 'check', 'queued', ?, ?)
       `).run(
         "40000000-0000-4000-8000-000000000093",
+        postId,
+        versionId,
+        now,
+        now,
+      ),
+      /CHECK constraint failed/,
+    );
+    assert.throws(
+      () => database.prepare(`
+        INSERT INTO delivery_jobs (
+          id, dedupe_key, post_id, version_id, target, action, payload_json,
+          remote_id, remote_aux_id, status, created_at, updated_at
+        ) VALUES (?, 'invalid-align', ?, ?, 'discord', 'align', '{}',
+          '100000000000000001', '100000000000000002', 'queued', ?, ?)
+      `).run(
+        "40000000-0000-4000-8000-000000000106",
         postId,
         versionId,
         now,
