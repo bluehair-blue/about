@@ -32,6 +32,10 @@ const assetCleanupMigration = readFileSync(
   new URL("../migrations/0006_phase_b_asset_manifest_cleanup.sql", import.meta.url),
   "utf8",
 );
+const stableSlugMigration = readFileSync(
+  new URL("../migrations/0007_phase_b_stable_slug.sql", import.meta.url),
+  "utf8",
+);
 
 test("keeps Studio autosave single-flight, IME-aware, and native", () => {
   const editor = readFileSync(
@@ -201,6 +205,7 @@ class SqliteD1 {
     this.database.exec(canonicalSchemaMigration);
     this.database.exec(taxonomyMigration);
     this.database.exec(assetCleanupMigration);
+    this.database.exec(stableSlugMigration);
     const tagIds = {
       update: "300000000000000001",
       work: "300000000000000002",
@@ -1244,8 +1249,8 @@ test("lists active drafts by stable Studio URL without expiring old work", async
       WHERE id = ?
     `).run(oldDraft.postId);
     database.database.prepare(`
-      UPDATE studio_posts SET status = 'withheld' WHERE id = ?
-    `).run(attentionDraft.postId);
+      UPDATE studio_posts SET status = 'withheld', slug = ? WHERE id = ?
+    `).run(`attention--${attentionDraft.postId.slice(0, 8)}`, attentionDraft.postId);
 
     const stable = await request(
       `/studio/api/drafts?postId=${oldDraft.postId}`,
@@ -2512,9 +2517,14 @@ test("atomically manages one pin and nullable Hero ranks with stale-action CAS",
     const versionId = crypto.randomUUID();
     const createdAt = new Date(Date.now() - index * 1_000).toISOString();
     database.database.prepare(`
-      INSERT INTO studio_posts (id, status, created_at, updated_at)
-      VALUES (?, 'draft', ?, ?)
-    `).run(postId, createdAt, createdAt);
+      INSERT INTO studio_posts (id, slug, status, created_at, updated_at)
+      VALUES (?, ?, 'draft', ?, ?)
+    `).run(
+      postId,
+      `큐레이션-${index}--${postId.slice(0, 8)}`,
+      createdAt,
+      createdAt,
+    );
     database.database.prepare(`
       INSERT INTO studio_post_versions (
         id, post_id, state, revision, source_hash, title, body_markdown,
@@ -2709,7 +2719,11 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
   });
 
   try {
-    const draft = await createDraftFixture(request, "첫 Forum fixture");
+    const draft = await createDraftFixture(
+      request,
+      "\u110e\u1165\u11ba Forum fixture",
+    );
+    const stableSlug = `첫-forum-fixture--${draft.postId.slice(0, 8)}`;
     const firstUpload = await request(
       "/studio/api/assets",
       sourceUpload(draft.postId, 0, staticPng, { alt: "첫 attachment" }),
@@ -2726,6 +2740,12 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
     assert.equal(createResponse.status, 202);
     const create = await createResponse.json();
     assert.equal(create.action, "create");
+    assert.deepEqual(
+      { ...database.database.prepare(`
+        SELECT status, slug FROM studio_posts WHERE id = ?
+      `).get(draft.postId) },
+      { status: "publishing", slug: stableSlug },
+    );
     const createMessage = queueMessage(queue.messages.shift());
     queue.failSend = true;
     await worker.queue({ messages: [createMessage] }, env);
@@ -2768,11 +2788,12 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
       ["300000000000000002", "300000000000000005"].sort(),
     );
     const published = database.database.prepare(`
-      SELECT status, current_version_id, discord_thread_id,
+      SELECT status, slug, current_version_id, discord_thread_id,
         discord_starter_message_id, discord_remote_hash
       FROM studio_posts WHERE id = ?
     `).get(draft.postId);
     assert.equal(published.status, "published");
+    assert.equal(published.slug, stableSlug);
     assert.equal(published.discord_thread_id, discord.threadId);
     assert.equal(published.discord_starter_message_id, discord.starterMessageId);
     assert.equal(published.discord_remote_hash, create.expectedHash);
@@ -2827,9 +2848,10 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
     const update = await updateResponse.json();
     assert.equal(update.action, "update");
     const pendingUpdate = database.database.prepare(`
-      SELECT status, current_version_id FROM studio_posts WHERE id = ?
+      SELECT status, slug, current_version_id FROM studio_posts WHERE id = ?
     `).get(draft.postId);
     assert.equal(pendingUpdate.status, "publishing");
+    assert.equal(pendingUpdate.slug, stableSlug);
     assert.equal(pendingUpdate.current_version_id, published.current_version_id);
     const updateBody = queue.messages.shift();
     const publicKey = database.database.prepare(`
@@ -3001,9 +3023,6 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
       discord.createCalls + discord.updateCalls + discord.deleteCalls,
       mutationCountBeforeVisibility,
     );
-    database.database.prepare("UPDATE studio_posts SET slug = ? WHERE id = ?")
-      .run("lifecycle-fixture", draft.postId);
-
     const deleteResponse = await request(
       "/studio/api/publish",
       jsonWrite({ action: "archive", postId: draft.postId }),
@@ -3143,7 +3162,7 @@ test("creates, updates, replaces tags and attachments, then deletes one Forum ma
       FROM studio_posts WHERE id = ?
     `).get(draft.postId);
     assert.equal(tombstone.status, "purged");
-    assert.equal(tombstone.slug, "lifecycle-fixture");
+    assert.equal(tombstone.slug, stableSlug);
     assert.equal(tombstone.draft_version_id, null);
     assert.equal(tombstone.current_version_id, null);
     assert.equal(tombstone.discord_thread_id, discord.threadId);
@@ -3316,9 +3335,9 @@ test("does not replay an outcome-unknown first-publish notification", async () =
 
   try {
     database.database.prepare(`
-      INSERT INTO studio_posts (id, status, created_at, updated_at)
-      VALUES (?, 'draft', ?, ?)
-    `).run(postId, now, now);
+      INSERT INTO studio_posts (id, slug, status, created_at, updated_at)
+      VALUES (?, ?, 'draft', ?, ?)
+    `).run(postId, `알림-fixture--${postId.slice(0, 8)}`, now, now);
     database.database.prepare(`
       INSERT INTO studio_post_versions (
         id, post_id, state, revision, source_hash, title, body_markdown,

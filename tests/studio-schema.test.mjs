@@ -10,6 +10,7 @@ const migrationUrls = [
   "../migrations/0004_phase_b_canonical_schema.sql",
   "../migrations/0005_phase_b_taxonomy.sql",
   "../migrations/0006_phase_b_asset_manifest_cleanup.sql",
+  "../migrations/0007_phase_b_stable_slug.sql",
 ];
 const migrations = migrationUrls.map((path) =>
   readFileSync(new URL(path, import.meta.url), "utf8")
@@ -28,7 +29,7 @@ function insertPost(database, id, slug) {
   database.prepare(`
     INSERT INTO studio_posts (id, slug, status, created_at, updated_at)
     VALUES (?, ?, 'draft', ?, ?)
-  `).run(id, slug, now, now);
+  `).run(id, slug === null ? null : `${slug}--${id.slice(0, 8)}`, now, now);
 }
 
 function insertVersion(
@@ -266,6 +267,71 @@ test("rejects legacy Phase A rows that violate canonical ownership or snapshots"
       now,
     );
   }, /legacy_delivery_invariant_invalid/);
+});
+
+test("requires prebackfilled stable slugs and keeps the first value immutable", () => {
+  const missing = databaseThrough(6);
+  const missingId = "10000000-0000-4000-8000-000000000031";
+  try {
+    insertPost(missing, missingId, null);
+    missing.prepare("UPDATE studio_posts SET status = 'archived' WHERE id = ?")
+      .run(missingId);
+    assert.throws(() => missing.exec(migrations[6]), /stable_slug_invalid/);
+  } finally {
+    missing.close();
+  }
+
+  const database = databaseThrough(6);
+  const draftId = "10000000-0000-4000-8000-000000000032";
+  const archivedId = "10000000-0000-4000-8000-000000000033";
+  try {
+    insertPost(database, draftId, null);
+    insertPost(database, archivedId, "기존-게시물");
+    database.prepare("UPDATE studio_posts SET status = 'archived' WHERE id = ?")
+      .run(archivedId);
+    database.exec(migrations[6]);
+
+    assert.equal(
+      database.prepare("SELECT slug FROM studio_posts WHERE id = ?").get(draftId).slug,
+      null,
+    );
+    assert.throws(
+      () => database.prepare("UPDATE studio_posts SET status = 'withheld' WHERE id = ?")
+        .run(draftId),
+      /stable_slug_invalid/,
+    );
+    const firstSlug = `첫-게시물--${draftId.slice(0, 8)}`;
+    database.prepare("UPDATE studio_posts SET slug = ? WHERE id = ?")
+      .run(firstSlug, draftId);
+    assert.throws(
+      () => database.prepare("UPDATE studio_posts SET slug = ? WHERE id = ?")
+        .run(`바뀐-게시물--${draftId.slice(0, 8)}`, draftId),
+      /stable_slug_immutable/,
+    );
+    assert.throws(
+      () => database.prepare(`
+        INSERT INTO studio_posts (id, slug, status, created_at, updated_at)
+        VALUES (?, '잘못된-slug', 'draft', ?, ?)
+      `).run("10000000-0000-4000-8000-000000000034", now, now),
+      /stable_slug_invalid/,
+    );
+
+    const collisionA = "abcdef12-0000-4000-8000-000000000001";
+    const collisionB = "abcdef12-0000-4000-8000-000000000002";
+    database.prepare(`
+      INSERT INTO studio_posts (id, slug, status, created_at, updated_at)
+      VALUES (?, '같은-제목--abcdef12', 'draft', ?, ?)
+    `).run(collisionA, now, now);
+    assert.throws(
+      () => database.prepare(`
+        INSERT INTO studio_posts (id, slug, status, created_at, updated_at)
+        VALUES (?, '같은-제목--abcdef12', 'draft', ?, ?)
+      `).run(collisionB, now, now),
+      /UNIQUE constraint failed/,
+    );
+  } finally {
+    database.close();
+  }
 });
 
 test("keeps the seven-table contract and uses the documented query indexes", () => {

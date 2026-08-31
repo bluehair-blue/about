@@ -38,6 +38,7 @@ export type PublishCandidateAsset = {
 
 export type PublishCandidateInput = {
   postId: string;
+  title: string;
   draftVersionId: string;
   expectedRevision: number;
   expectedSourceHash: string;
@@ -127,6 +128,15 @@ async function draftHash(content: StudioDraftContent) {
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0")
   ).join("");
+}
+
+function stablePostSlug(title: string, postId: string) {
+  const titleSlug = title
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+  return `${titleSlug || "post"}--${postId.slice(0, 8).toLowerCase()}`;
 }
 
 function activeTopicInsert(
@@ -528,6 +538,9 @@ export async function createPublishCandidate(
   if (!validPublishTransition(input)) return null;
   const candidateId = crypto.randomUUID();
   const jobId = crypto.randomUUID();
+  const slug = input.action === "create"
+    ? stablePostSlug(input.title, input.postId)
+    : null;
   const mappingCheck = input.action === "create"
     ? "AND discord_thread_id IS NULL AND discord_starter_message_id IS NULL"
     : "AND discord_thread_id = ? AND discord_starter_message_id = ?";
@@ -560,7 +573,8 @@ export async function createPublishCandidate(
   statements.push(
     database.prepare(`
       UPDATE studio_posts
-      SET status = 'publishing', discord_delivery_state = 'queued', updated_at = ?
+      SET status = 'publishing', slug = coalesce(slug, ?),
+        discord_delivery_state = 'queued', updated_at = ?
       WHERE id = ?
         AND status = ?
         AND draft_version_id = ?
@@ -571,6 +585,7 @@ export async function createPublishCandidate(
           WHERE id = ? AND post_id = ? AND state = 'candidate'
         )
     `).bind(
+      slug,
       input.createdAt,
       input.postId,
       input.postStatus,

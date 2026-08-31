@@ -482,6 +482,7 @@ async function preparePublish(
   const createdAt = new Date().toISOString();
   const candidateInput = {
     postId,
+    title: snapshot.draft.title,
     draftVersionId: snapshot.draft.draft_version_id,
     expectedRevision: snapshot.draft.revision,
     expectedSourceHash: snapshot.draft.source_hash,
